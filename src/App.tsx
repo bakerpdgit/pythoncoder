@@ -9,6 +9,12 @@ import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides } from './
 import { triggerDownload, getBaseFileStem } from './utils/download'
 import { buildCommentExport, buildDocstringExport, getDefinitionNote, getDefaultDefinitionNote, sanitizeNoteText } from './utils/export'
 import { loadMainThreadPyodide, PYGAME_MAIN_THREAD_BOOTSTRAP } from './utils/mainThread'
+import {
+  ensureDefaultFilesystem, getAllFiles, syncFilesFromPyodide, writeFile,
+  isTextMime, guessMimeType, mountFilesToPyodide, readFilesFromPyodide,
+} from './utils/virtualFS'
+import { FileSystemPanel } from './components/FileSystemPanel'
+import { SaveFileDialog } from './components/dialogs/SaveFileDialog'
 import { getExplanation, getDefinitionKey } from './data/explanations'
 import { ThemeToggleButton } from './components/ui/ThemeToggleButton'
 import { RuntimeSettingsMenu } from './components/ui/RuntimeSettingsMenu'
@@ -27,7 +33,7 @@ import {
 } from './constants'
 import type {
   Theme, RuntimeKey, PanelVisibility, InputRequest, SabRef, SimState, InspectorPath,
-  StructureModel, DiagramModel, HierarchyModel, OutlineModel, DiagramView,
+  StructureModel, DiagramModel, HierarchyModel, OutlineModel, DiagramView, VFSEntry,
 } from './types'
 
 const TRACER_WORKER_URL = new URL('./workers/tracer.worker.ts', import.meta.url)
@@ -91,7 +97,13 @@ export default function App() {
   const [isPygameRunActive, setIsPygameRunActive] = useState(false)
   const [isConsolePresentationMode, setIsConsolePresentationMode] = useState(false)
   const [runtimePreference, setRuntimePreference] = useState<RuntimeKey>('trace-worker')
-  const [visiblePanels, setVisiblePanels] = useState<PanelVisibility>({ code: true, visualizer: true, diagram: true, insight: true })
+  const [visiblePanels, setVisiblePanels] = useState<PanelVisibility>({ code: true, visualizer: true, diagram: true, insight: true, filesystem: false })
+  const [activeFilesystemId, setActiveFilesystemId] = useState<string>('default')
+  const [currentWorkingDir, setCurrentWorkingDir] = useState<string>('/')
+  const [openFilePath, setOpenFilePath] = useState<string | null>(null)
+  const [vfsReloadTrigger, setVfsReloadTrigger] = useState(0)
+  const [pendingCodeLoad, setPendingCodeLoad] = useState<{ content: string; name: string; rawBuffer: ArrayBuffer; mimeType: string } | null>(null)
+  const [showCodeSaveDialog, setShowCodeSaveDialog] = useState(false)
   const [diagramFontSize, setDiagramFontSize] = useState(DIAGRAM_FONT_DEFAULT)
   const [isPanelMenuOpen, setIsPanelMenuOpen] = useState(false)
   const [isRuntimeMenuOpen, setIsRuntimeMenuOpen] = useState(false)
@@ -128,6 +140,7 @@ export default function App() {
   const noteDraftRef = useRef('')
   const isInsightEditingRef = useRef(false)
   const activeInsightKeyRef = useRef('')
+  const savedCodeRef = useRef('')
   const resizeDragRef = useRef<string | null>(null)
   const mainContainerRef = useRef<HTMLDivElement | null>(null)
   const rightSideRef = useRef<HTMLDivElement | null>(null)
@@ -167,6 +180,7 @@ export default function App() {
   useEffect(() => {
     setIsCrossOriginIsolated(window.crossOriginIsolated === true)
     setHasSab(typeof SharedArrayBuffer !== 'undefined' && window.crossOriginIsolated === true)
+    void ensureDefaultFilesystem()
   }, [])
 
   useEffect(() => {
@@ -181,7 +195,7 @@ export default function App() {
     if (!editorRef.current || !visiblePanels.code) return
     const frameId = requestAnimationFrame(() => editorRef.current?.layout())
     return () => cancelAnimationFrame(frameId)
-  }, [leftWidth, rightTopHeight, bottomLeftWidth, visiblePanels.code, visiblePanels.visualizer, visiblePanels.diagram, visiblePanels.insight])
+  }, [leftWidth, rightTopHeight, bottomLeftWidth, visiblePanels.code, visiblePanels.visualizer, visiblePanels.diagram, visiblePanels.insight, visiblePanels.filesystem])
 
   useEffect(() => {
     if (!visiblePanels.insight) setShowExportDialog(false)
@@ -357,13 +371,15 @@ export default function App() {
 
   // ── Code loading ─────────────────────────────────────────────────────────
 
-  const loadCodeText = (text: string, fileName = DEFAULT_CODE_FILENAME) => {
+  const loadCodeText = (text: string, fileName = DEFAULT_CODE_FILENAME, vfsPath: string | null = null) => {
     const cleanCode = cleanCodeText(text)
     breakpointsRef.current = new Set()
     setBreakpoints(new Set())
     setCodeText(cleanCode)
     setCodeFileName(fileName)
     setCodeStatus(`${fileName} loaded.`)
+    setOpenFilePath(vfsPath)
+    savedCodeRef.current = cleanCode
     setCurrentLine(-1); setCurrentFunc(''); setCurrentClass(''); setSimState(null)
     setInputRequest(null); setInputValue(''); setOutputLog(''); setActiveRuntime('')
     setMainThreadStatus('Main-thread runtime is ready.')
@@ -382,20 +398,78 @@ export default function App() {
     const file = event.target.files?.[0]
     if (!file) return
     try {
-      const text = await file.text()
-      loadCodeText(text, file.name || DEFAULT_CODE_FILENAME)
+      const rawBuffer = await file.arrayBuffer()
+      const mime = file.type || guessMimeType(file.name)
+      const name = file.name || DEFAULT_CODE_FILENAME
+      const content = isTextMime(mime) ? new TextDecoder().decode(rawBuffer) : ''
+      setPendingCodeLoad({ content, name, rawBuffer, mimeType: mime })
+      setShowCodeSaveDialog(true)
     } catch { setCodeStatus('Failed to read the selected file.') }
     finally { event.target.value = '' }
   }
 
-  const handleSaveCode = () => {
+  const handleCodeSaveDialogSave = async (parentPath: string, filename: string) => {
+    if (!pendingCodeLoad) return
+    try {
+      const path = parentPath === '/' ? `/${filename}` : `${parentPath}/${filename}`
+      const mimeType = pendingCodeLoad.mimeType || guessMimeType(filename)
+      await writeFile(activeFilesystemId, path, pendingCodeLoad.rawBuffer, mimeType)
+      if (isTextMime(mimeType)) {
+        loadCodeText(pendingCodeLoad.content, filename, path)
+      } else {
+        setCodeStatus(`${filename} saved to virtual filesystem.`)
+      }
+      setPendingCodeLoad(null); setShowCodeSaveDialog(false)
+      setVfsReloadTrigger(t => t + 1)
+    } catch (err) { setCodeStatus(`Failed to save: ${String(err)}`) }
+  }
+
+  const handleNewFileButton = () => {
+    setPendingCodeLoad({ content: '', name: 'new_file.py', rawBuffer: new ArrayBuffer(0), mimeType: 'text/x-python' })
+    setShowCodeSaveDialog(true)
+  }
+
+  const handleSaveCode = async () => {
     if (!hasCode) return
-    const blob = new Blob([codeText], { type: 'text/x-python;charset=utf-8' })
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url; link.download = codeFileName || DEFAULT_CODE_FILENAME
-    document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(url)
-    setCodeStatus(`Saved ${codeFileName || DEFAULT_CODE_FILENAME}.`)
+    if (openFilePath) {
+      const content = new TextEncoder().encode(codeText)
+      await writeFile(activeFilesystemId, openFilePath, content.buffer as ArrayBuffer, 'text/x-python')
+      savedCodeRef.current = codeText
+      setCodeStatus(`Saved to ${openFilePath}.`)
+      setVfsReloadTrigger(t => t + 1)
+    } else {
+      const name = codeFileName || DEFAULT_CODE_FILENAME
+      setPendingCodeLoad({ content: codeText, name, rawBuffer: new TextEncoder().encode(codeText).buffer as ArrayBuffer, mimeType: 'text/x-python' })
+      setShowCodeSaveDialog(true)
+    }
+  }
+
+  const saveCurrentToVFS = async () => {
+    if (!openFilePath || !codeText.trim()) return
+    const content = new TextEncoder().encode(codeText)
+    try {
+      await writeFile(activeFilesystemId, openFilePath, content.buffer as ArrayBuffer, 'text/x-python')
+      savedCodeRef.current = codeText
+      setVfsReloadTrigger(t => t + 1)
+    } catch { /* ignore */ }
+  }
+
+  const onOpenVFSFile = async (entry: VFSEntry) => {
+    if (entry.type !== 'file') return
+    const mime = entry.mimeType ?? guessMimeType(entry.name)
+    if (!isTextMime(mime)) {
+      setCodeStatus(`Cannot open '${entry.name}' in the editor (not a text file). Use the file panel to download it.`)
+      return
+    }
+    if (openFilePath && codeText !== savedCodeRef.current) {
+      const confirmed = window.confirm(`Save changes to "${codeFileName}" before opening "${entry.name}"?`)
+      if (confirmed) await saveCurrentToVFS()
+    }
+    if (entry.content) {
+      const text = new TextDecoder().decode(entry.content)
+      savedCodeRef.current = text
+      loadCodeText(text, entry.name, entry.path)
+    }
   }
 
   // ── Note management ───────────────────────────────────────────────────────
@@ -531,7 +605,7 @@ export default function App() {
       pygameLayoutSnapshotRef.current = { visiblePanels: { ...visiblePanels }, leftWidth, rightTopHeight, bottomLeftWidth }
     }
     setShowExportDialog(false)
-    setVisiblePanels({ code: false, visualizer: false, diagram: true, insight: true })
+    setVisiblePanels({ code: false, visualizer: false, diagram: true, insight: true, filesystem: false })
     setBottomLeftWidth(74)
     setIsPygameRunActive(true)
   }
@@ -552,7 +626,7 @@ export default function App() {
       consoleLayoutSnapshotRef.current = { visiblePanels: { ...visiblePanels }, leftWidth, rightTopHeight, bottomLeftWidth }
     }
     setShowExportDialog(false)
-    setVisiblePanels({ code: false, visualizer: false, diagram: false, insight: true })
+    setVisiblePanels({ code: false, visualizer: false, diagram: false, insight: true, filesystem: false })
     setIsConsolePresentationMode(true)
   }
 
@@ -574,8 +648,13 @@ export default function App() {
     setInputRequest(null); setInputValue(''); setOutputLog('')
   }
 
-  const startTraceWorker = () => {
+  const startTraceWorker = async () => {
     if (!hasSab || !hasCode) return
+    await saveCurrentToVFS()
+    const vfsFiles = await getAllFiles(activeFilesystemId)
+    const capturedFsId = activeFilesystemId
+    const capturedCwd = currentWorkingDir
+
     resetExecutionState()
     setIsRunning(true); setActiveRuntime('trace-worker')
     setCodeStatus('Trace-worker runtime starting...')
@@ -599,10 +678,16 @@ export default function App() {
       } else if (data.type === 'print') {
         setOutputLog(prev => prev + data.text + '\n')
       } else if (data.type === 'error') {
+        if (data.files?.length) {
+          void syncFilesFromPyodide(capturedFsId, data.files).then(() => setVfsReloadTrigger(t => t + 1))
+        }
         setOutputLog(prev => prev + '\n[ERROR] ' + data.error + '\n')
         setInputRequest(null); setInputValue(''); setIsRunning(false); setActiveRuntime('')
         setCodeStatus('Trace-worker runtime failed.'); workerRef.current = null; sabRef.current = null
       } else if (data.type === 'done') {
+        if (data.files?.length) {
+          void syncFilesFromPyodide(capturedFsId, data.files).then(() => setVfsReloadTrigger(t => t + 1))
+        }
         setOutputLog(prev => prev + '\n[TRACE RUN FINISHED]\n')
         setInputRequest(null); setInputValue(''); setIsRunning(false); setActiveRuntime('')
         setCurrentLine(-1); setCodeStatus('Trace-worker runtime finished.')
@@ -610,11 +695,16 @@ export default function App() {
       }
     }
 
-    worker.postMessage({ type: 'init', sab: sabRef.current.sab, code: codeText })
+    worker.postMessage({ type: 'init', sab: sabRef.current.sab, code: codeText, files: vfsFiles, cwd: capturedCwd })
   }
 
   const startMainThreadRun = async () => {
     if (!hasCode) return
+    await saveCurrentToVFS()
+    const vfsFiles = await getAllFiles(activeFilesystemId)
+    const capturedFsId = activeFilesystemId
+    const capturedCwd = currentWorkingDir
+
     const runId = ++mainThreadRunIdRef.current
     const shouldRunPygame = codeUsesPygame(codeText)
     mainThreadStopRequestedRef.current = false
@@ -625,14 +715,17 @@ export default function App() {
     setCodeStatus('Main-thread runtime starting...')
     setMainThreadStatus(shouldRunPygame ? 'Loading Pyodide 0.29.3 and pygame-ce on the main thread...' : 'Loading Pyodide 0.29.3 on the main thread...')
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let pyodide: any = null
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const pyodide: any = await loadMainThreadPyodide()
+      pyodide = await loadMainThreadPyodide()
       if (runId !== mainThreadRunIdRef.current) return
 
       if (typeof pyodide.setStdout === 'function') pyodide.setStdout({ batched: (text: string) => setOutputLog(prev => prev + text + '\n') })
       if (typeof pyodide.setStderr === 'function') pyodide.setStderr({ batched: (text: string) => setOutputLog(prev => prev + '[stderr] ' + text + '\n') })
       if (pyodide._api) pyodide._api._skip_unwind_fatal_error = true
+
+      mountFilesToPyodide(pyodide, vfsFiles, capturedCwd)
 
       if (shouldRunPygame) {
         const canvas = ensureMainThreadCanvas()
@@ -672,6 +765,14 @@ exec(code_obj, globals())
       } finally { execGlobals.destroy?.() }
 
       if (runId !== mainThreadRunIdRef.current) return
+      // Sync FS back
+      if (pyodide) {
+        try {
+          const updatedFiles = readFilesFromPyodide(pyodide, vfsFiles.map(f => f.path), capturedCwd)
+          await syncFilesFromPyodide(capturedFsId, updatedFiles)
+          setVfsReloadTrigger(t => t + 1)
+        } catch { /* ignore */ }
+      }
       const wasStopRequested = Boolean(mainThreadStopRequestedRef.current)
       setOutputLog(prev => prev + (wasStopRequested ? '\n[MAIN-THREAD RUN STOPPED]\n' : '\n[MAIN-THREAD RUN FINISHED]\n'))
       setCodeStatus(wasStopRequested ? 'Main-thread pygame runtime stopped.' : 'Main-thread runtime finished.')
@@ -679,6 +780,12 @@ exec(code_obj, globals())
       setIsRunning(false); setActiveRuntime('')
     } catch (error) {
       if (runId !== mainThreadRunIdRef.current) return
+      if (pyodide) {
+        try {
+          const updatedFiles = readFilesFromPyodide(pyodide, vfsFiles.map(f => f.path), capturedCwd)
+          void syncFilesFromPyodide(capturedFsId, updatedFiles).then(() => setVfsReloadTrigger(t => t + 1))
+        } catch { /* ignore */ }
+      }
       const message = error instanceof Error ? error.message : String(error)
       setOutputLog(prev => prev + '\n[ERROR] ' + message + '\n')
       setCodeStatus('Main-thread runtime failed.')
@@ -761,18 +868,17 @@ exec(code_obj, globals())
           <ThemeToggleButton theme={theme} onToggle={toggleTheme} />
 
           {!isRunning ? (
-            <>
-              {selectedRuntime === 'trace-worker' && (
-                <button onClick={startTraceWorker} disabled={!hasCode || !hasSab}
-                  className="bg-emerald-600 hover:bg-emerald-500 text-white px-5 py-2 rounded font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
-                  Trace Run
-                </button>
-              )}
+            selectedRuntime === 'trace-worker' ? (
+              <button onClick={() => void startTraceWorker()} disabled={!hasCode || !hasSab}
+                className="bg-emerald-600 hover:bg-emerald-500 text-white px-5 py-2 rounded font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                Trace Run
+              </button>
+            ) : (
               <button onClick={() => void startMainThreadRun()} disabled={!hasCode}
                 className="bg-sky-600 hover:bg-sky-500 text-white px-5 py-2 rounded font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
                 Run
               </button>
-            </>
+            )
           ) : activeRuntime === 'trace-worker' ? (
             <>
               <button onClick={() => sendTraceCommand(TRACE_CMD_STEP_INTO)} disabled={inputRequest !== null}
@@ -858,63 +964,93 @@ exec(code_obj, globals())
       {/* Main Layout */}
       <div ref={mainContainerRef} className="flex-1 flex overflow-hidden p-2">
 
-        {/* PANEL 1: Code Trace */}
+        {/* PANEL 1: Code Trace (+ optional FS sidebar) */}
         {visiblePanels.code && (
-          <div className="bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden flex-shrink-0"
+          <div className="bg-slate-800 rounded-lg shadow border border-slate-700 flex overflow-hidden flex-shrink-0"
             style={{ width: hasRightSidePanels ? `calc(${leftWidth}% - 6px)` : '100%' }}>
-            <input ref={fileInputRef} type="file" accept=".py,.txt,text/x-python" className="hidden" onChange={handleCodeFileChange} />
-            <div className="bg-slate-900 py-2 px-4 border-b border-slate-700 text-slate-400 text-xs">
-              <div className="flex justify-between items-start gap-3">
-                <div>
-                  <div className="font-bold uppercase tracking-wider">Code Trace ({codeFileName || DEFAULT_CODE_FILENAME})</div>
-                  <div className="mt-1 normal-case tracking-normal text-[11px] text-slate-500">{codeStatus}</div>
+            {/* FS Sidebar */}
+            {visiblePanels.filesystem && (
+              <div className="w-56 flex-shrink-0 border-r border-slate-700 flex flex-col overflow-hidden">
+                <div className="bg-slate-900 py-2 px-3 border-b border-slate-700 text-[10px] font-bold uppercase tracking-wider text-slate-400 flex-shrink-0">
+                  File System
                 </div>
-                <div className="flex items-center gap-2">
-                  <IconButton title="Load code from file" onClick={handleLoadButtonClick} disabled={isRunning}>
-                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-                    </svg>
-                  </IconButton>
-                  <IconButton title="Save code to file" onClick={handleSaveCode} disabled={!hasCode || isRunning}>
-                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
-                    </svg>
-                  </IconButton>
-                  <IconButton title="Clear all breakpoints" onClick={() => { breakpointsRef.current = new Set(); setBreakpoints(new Set()) }} disabled={breakpoints.size === 0}>
-                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                  </IconButton>
+                <div className="flex-1 overflow-hidden min-h-0">
+                  <FileSystemPanel
+                    activeFilesystemId={activeFilesystemId}
+                    currentWorkingDir={currentWorkingDir}
+                    openFilePath={openFilePath}
+                    onFilesystemChange={id => { setActiveFilesystemId(id); setCurrentWorkingDir('/') }}
+                    onCwdChange={setCurrentWorkingDir}
+                    onOpenFile={entry => void onOpenVFSFile(entry)}
+                    onError={msg => setCodeStatus(msg)}
+                    reloadTrigger={vfsReloadTrigger}
+                  />
                 </div>
               </div>
-            </div>
-            <div className="flex-1 overflow-hidden rounded-b-lg">
-              {!isEditorReady && (
-                <div className="flex h-full items-center justify-center text-slate-500 text-sm">Loading Monaco editor...</div>
-              )}
-              <Editor
-                height="100%"
-                language="python"
-                theme={theme === 'light' ? 'as-tracer-light' : 'as-tracer-dark'}
-                value={codeText}
-                onChange={handleEditorChange}
-                beforeMount={handleEditorBeforeMount}
-                onMount={handleEditorMount}
-                options={{
-                  glyphMargin: true,
-                  minimap: { enabled: false },
-                  lineNumbersMinChars: 4,
-                  scrollBeyondLastLine: false,
-                  smoothScrolling: true,
-                  tabSize: 4,
-                  insertSpaces: true,
-                  fontSize: 14,
-                  padding: { top: 14, bottom: 18 },
-                  renderLineHighlight: 'none',
-                  wordWrap: 'off',
-                  readOnly: isRunning,
-                }}
-              />
+            )}
+            {/* Code editor area */}
+            <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
+              <input ref={fileInputRef} type="file" className="hidden" onChange={handleCodeFileChange} />
+              <div className="bg-slate-900 py-2 px-4 border-b border-slate-700 text-slate-400 text-xs flex-shrink-0">
+                <div className="flex justify-between items-start gap-3">
+                  <div className="min-w-0">
+                    <div className="font-bold uppercase tracking-wider truncate">
+                      Code Trace ({openFilePath ? openFilePath : (codeFileName || DEFAULT_CODE_FILENAME)})
+                    </div>
+                    <div className="mt-1 normal-case tracking-normal text-[11px] text-slate-500">{codeStatus}</div>
+                  </div>
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    <IconButton title="New file in virtual filesystem" onClick={handleNewFileButton} disabled={isRunning}>
+                      <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 13h6m-3-3v6m-9 1V7a2 2 0 012-2h6l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
+                      </svg>
+                    </IconButton>
+                    <IconButton title="Upload file to virtual filesystem" onClick={handleLoadButtonClick} disabled={isRunning}>
+                      <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                      </svg>
+                    </IconButton>
+                    <IconButton title="Save to virtual filesystem" onClick={() => void handleSaveCode()} disabled={!hasCode || isRunning}>
+                      <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
+                      </svg>
+                    </IconButton>
+                    <IconButton title="Clear all breakpoints" onClick={() => { breakpointsRef.current = new Set(); setBreakpoints(new Set()) }} disabled={breakpoints.size === 0}>
+                      <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </IconButton>
+                  </div>
+                </div>
+              </div>
+              <div className="flex-1 overflow-hidden">
+                {!isEditorReady && (
+                  <div className="flex h-full items-center justify-center text-slate-500 text-sm">Loading Monaco editor...</div>
+                )}
+                <Editor
+                  height="100%"
+                  language="python"
+                  theme={theme === 'light' ? 'as-tracer-light' : 'as-tracer-dark'}
+                  value={codeText}
+                  onChange={handleEditorChange}
+                  beforeMount={handleEditorBeforeMount}
+                  onMount={handleEditorMount}
+                  options={{
+                    glyphMargin: true,
+                    minimap: { enabled: false },
+                    lineNumbersMinChars: 4,
+                    scrollBeyondLastLine: false,
+                    smoothScrolling: true,
+                    tabSize: 4,
+                    insertSpaces: true,
+                    fontSize: 14,
+                    padding: { top: 14, bottom: 18 },
+                    renderLineHighlight: 'none',
+                    wordWrap: 'off',
+                    readOnly: isRunning,
+                  }}
+                />
+              </div>
             </div>
           </div>
         )}
@@ -1148,6 +1284,18 @@ exec(code_obj, globals())
           </div>
         )}
       </div>
+
+      {/* Code file save dialog */}
+      {showCodeSaveDialog && pendingCodeLoad && (
+        <SaveFileDialog
+          fsId={activeFilesystemId}
+          initialPath={openFilePath ? openFilePath.substring(0, openFilePath.lastIndexOf('/')) || '/' : currentWorkingDir}
+          initialName={pendingCodeLoad.name}
+          title={pendingCodeLoad.name ? `Save "${pendingCodeLoad.name}"` : 'Save File'}
+          onSave={(p, n) => void handleCodeSaveDialogSave(p, n)}
+          onCancel={() => { setShowCodeSaveDialog(false); setPendingCodeLoad(null) }}
+        />
+      )}
     </div>
   )
 }

@@ -35,6 +35,11 @@ export const RUNTIME_OPTIONS = [
 
 export const PANEL_OPTIONS = [
   {
+    key: 'filesystem',
+    label: 'File System',
+    description: 'Virtual file browser, multiple projects, Pyodide FS integration.',
+  },
+  {
     key: 'code',
     label: 'Code Trace',
     description: 'Editor, breakpoints, and line focus.',
@@ -55,3 +60,5 @@ export const PANEL_OPTIONS = [
     description: 'Documentation notes and console output.',
   },
 ] as const
+
+export const FS_SIDEBAR_WIDTH = 240

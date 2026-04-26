@@ -374,6 +374,49 @@ self.onmessage = async function (e: MessageEvent) {
     self.postMessage({ type: 'trace', line, func, cls, state: stateStr })
   })
 
+  // Mount virtual filesystem files
+  const vfsFiles: Array<{ path: string; content: ArrayBuffer; mimeType: string }> = e.data.files ?? []
+  const vfsCwd: string = e.data.cwd ?? '/'
+  const mountedPaths: string[] = []
+  for (const file of vfsFiles) {
+    try {
+      const dir = file.path.substring(0, file.path.lastIndexOf('/')) || '/'
+      if (dir !== '/') { try { pyodide.FS.mkdirTree(dir) } catch { /* exists */ } }
+      pyodide.FS.writeFile(file.path, new Uint8Array(file.content))
+      mountedPaths.push(file.path)
+    } catch { /* skip */ }
+  }
+  try { pyodide.FS.chdir(vfsCwd) } catch { /* ignore */ }
+
+  function collectUpdatedFiles(): Array<{ path: string; content: ArrayBuffer; mimeType: string }> {
+    const results: Array<{ path: string; content: ArrayBuffer; mimeType: string }> = []
+    const visited = new Set<string>()
+    const dirsToScan = new Set<string>([vfsCwd])
+    for (const p of mountedPaths) {
+      const d = p.substring(0, p.lastIndexOf('/')) || '/'
+      dirsToScan.add(d)
+    }
+    function walk(dir: string) {
+      let entries: string[]
+      try { entries = pyodide.FS.readdir(dir) as string[] } catch { return }
+      for (const name of entries) {
+        if (name === '.' || name === '..') continue
+        const full = dir === '/' ? `/${name}` : `${dir}/${name}`
+        if (visited.has(full)) continue; visited.add(full)
+        try {
+          const stat = pyodide.FS.stat(full)
+          if (pyodide.FS.isDir(stat.mode)) { walk(full) }
+          else if (pyodide.FS.isFile(stat.mode)) {
+            const bytes = pyodide.FS.readFile(full) as Uint8Array
+            results.push({ path: full, content: bytes.buffer.slice(0) as ArrayBuffer, mimeType: 'text/plain' })
+          }
+        } catch { /* skip */ }
+      }
+    }
+    for (const d of dirsToScan) walk(d)
+    return results
+  }
+
   try {
     const userCode: string = e.data.code
     await pyodide.loadPackagesFromImports(userCode)
@@ -383,8 +426,10 @@ self.onmessage = async function (e: MessageEvent) {
 code_obj = compile(user_code_str, "simulation.py", "exec")
 exec(code_obj, globals())
     `)
-    self.postMessage({ type: 'done' })
+    const updatedFiles = collectUpdatedFiles()
+    self.postMessage({ type: 'done', files: updatedFiles })
   } catch (err) {
-    self.postMessage({ type: 'error', error: String(err) })
+    const updatedFiles = collectUpdatedFiles()
+    self.postMessage({ type: 'error', error: String(err), files: updatedFiles })
   }
 }

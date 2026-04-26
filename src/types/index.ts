@@ -7,6 +7,34 @@ export interface PanelVisibility {
   visualizer: boolean
   diagram: boolean
   insight: boolean
+  filesystem: boolean
+}
+
+// ── Virtual File System types ──────────────────────────────────────────────
+
+export interface VFSFilesystem {
+  id: string
+  name: string
+  createdAt: number
+}
+
+export interface VFSEntry {
+  id: string
+  fsId: string
+  parentPath: string
+  path: string
+  name: string
+  type: 'file' | 'folder'
+  content?: ArrayBuffer
+  mimeType?: string
+  size?: number
+  modifiedAt: number
+}
+
+export interface VFSFile {
+  path: string
+  content: ArrayBuffer
+  mimeType: string
 }
 
 export interface InputRequest {
