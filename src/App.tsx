@@ -12,7 +12,7 @@ import { loadMainThreadPyodide, PYGAME_MAIN_THREAD_BOOTSTRAP } from './utils/mai
 import {
   ensureDefaultFilesystem, getAllFiles, syncFilesFromPyodide, writeFile,
   isTextMime, guessMimeType, mountFilesToPyodide, readFilesFromPyodide,
-  getEntryByPath, cleanFilesFromPyodide,
+  getEntryByPath, cleanFilesFromPyodide, ensureFilesystemFromUrl,
 } from './utils/virtualFS'
 import { FileSystemPanel } from './components/FileSystemPanel'
 import { SaveFileDialog } from './components/dialogs/SaveFileDialog'
@@ -187,6 +187,19 @@ export default function App() {
     void (async () => {
       await ensureDefaultFilesystem()
       setVfsReloadTrigger(t => t + 1)
+
+      const fsParam = new URLSearchParams(window.location.search).get('filesystem')
+      if (fsParam) {
+        const url = decodeURIComponent(fsParam)
+        try {
+          const fsId = await ensureFilesystemFromUrl(url)
+          setActiveFilesystemId(fsId)
+          setCurrentWorkingDir('/')
+          setVfsReloadTrigger(t => t + 1)
+          return
+        } catch { /* fall through to default */ }
+      }
+
       const entry = await getEntryByPath('default', '/main.py')
       if (entry?.content) {
         const text = new TextDecoder().decode(entry.content)

@@ -3,7 +3,7 @@ import {
   listChildren, listFilesystems, createFilesystem, deleteFilesystem, renameFilesystem,
   createEntry, deleteEntry, renameEntry, getEntryByPath, guessMimeType,
   isTextMime, isImageMime, downloadEntryAsZip, downloadSingleFile, writeFile,
-  getParentPath,
+  getParentPath, loadFilesystemFromUrl,
 } from '../utils/virtualFS'
 import { ConfirmDialog } from './dialogs/ConfirmDialog'
 import { SaveFileDialog } from './dialogs/SaveFileDialog'
@@ -242,9 +242,8 @@ export function FileSystemPanel({
     setUrlLoading(true)
     setUrlError('')
     try {
-      const fsName = url
       const fsList = await listFilesystems()
-      const existing = fsList.find(f => f.name === fsName)
+      const existing = fsList.find(f => f.name === url)
       if (existing) {
         if (!window.confirm(`A filesystem for this URL already exists. Overwrite with fresh content from the URL?`)) {
           setUrlLoading(false)
@@ -252,53 +251,10 @@ export function FileSystemPanel({
         }
         await deleteFilesystem(existing.id)
       }
-      const jsdelivrUrl = toJsDelivrUrl(url)
-      let response: Response | null = null
-      try {
-        response = await fetch(jsdelivrUrl ?? url)
-        if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      } catch {
-        if (jsdelivrUrl) {
-          response = await fetch(url)
-          if (!response.ok) throw new Error(`HTTP ${response.status}`)
-        } else {
-          throw new Error('Failed to fetch the URL. Check the address and try again.')
-        }
-      }
-      const buffer = await response.arrayBuffer()
-      const { default: JSZip } = await import('jszip')
-      const zip = await JSZip.loadAsync(buffer)
-      const allNames = Object.keys(zip.files).filter(n => !zip.files[n].dir)
-      const prefix = detectCommonPrefix(allNames)
-      const newFs = await createFilesystem(fsName)
-      for (const [filename, zipFile] of Object.entries(zip.files)) {
-        if (zipFile.dir) continue
-        if (filename.startsWith('__MACOSX')) continue
-        const stripped = prefix ? filename.slice(prefix.length) : filename
-        if (!stripped) continue
-        const cleanPath = '/' + stripped.replace(/^\//, '')
-        const parentPath = getParentPath(cleanPath)
-        const name = cleanPath.substring(cleanPath.lastIndexOf('/') + 1)
-        if (!name) continue
-        const mime = guessMimeType(name)
-        if (parentPath !== '/') {
-          const parts = parentPath.split('/').filter(Boolean)
-          let accPath = ''
-          for (const part of parts) {
-            accPath += '/' + part
-            const existingEntry = await getEntryByPath(newFs.id, accPath)
-            if (!existingEntry) {
-              const parentOfParent = getParentPath(accPath)
-              await createEntry(newFs.id, parentOfParent, part, 'folder')
-            }
-          }
-        }
-        const content = await zipFile.async('arraybuffer')
-        await createEntry(newFs.id, parentPath, name, 'file', content, mime)
-      }
+      const fsId = await loadFilesystemFromUrl(url)
       setShowUrlDialog(false)
       setUrlInput('')
-      onFilesystemChange(newFs.id)
+      onFilesystemChange(fsId)
     } catch (err) {
       setUrlError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -623,23 +579,4 @@ function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes}B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}K`
   return `${(bytes / 1024 / 1024).toFixed(1)}M`
-}
-
-function toJsDelivrUrl(url: string): string | null {
-  if (url.includes('cdn.jsdelivr.net')) return null
-  const rawMatch = url.match(/^https?:\/\/raw\.githubusercontent\.com\/([^/]+)\/([^/]+)\/([^/]+)\/(.+)$/)
-  if (rawMatch) return `https://cdn.jsdelivr.net/gh/${rawMatch[1]}/${rawMatch[2]}@${rawMatch[3]}/${rawMatch[4]}`
-  const ghMatch = url.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/(raw|blob)\/([^/]+)\/(.+)$/)
-  if (ghMatch) return `https://cdn.jsdelivr.net/gh/${ghMatch[1]}/${ghMatch[2]}@${ghMatch[4]}/${ghMatch[5]}`
-  return null
-}
-
-function detectCommonPrefix(filenames: string[]): string {
-  if (filenames.length === 0) return ''
-  const hasToplevelFile = filenames.some(f => !f.includes('/'))
-  if (hasToplevelFile) return ''
-  const firstSlash = filenames[0].indexOf('/')
-  if (firstSlash < 0) return ''
-  const candidate = filenames[0].substring(0, firstSlash + 1)
-  return filenames.every(f => f.startsWith(candidate)) ? candidate : ''
 }

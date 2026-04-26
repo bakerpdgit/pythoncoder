@@ -349,3 +349,74 @@ export function readFilesFromPyodide(pyodide: any, mountedPaths: string[], cwd: 
 
   return results
 }
+
+// ── URL filesystem loader ────────────────────────────────────────────────────
+
+function toJsDelivrUrl(url: string): string | null {
+  if (url.includes('cdn.jsdelivr.net')) return null
+  const rawMatch = url.match(/^https?:\/\/raw\.githubusercontent\.com\/([^/]+)\/([^/]+)\/([^/]+)\/(.+)$/)
+  if (rawMatch) return `https://cdn.jsdelivr.net/gh/${rawMatch[1]}/${rawMatch[2]}@${rawMatch[3]}/${rawMatch[4]}`
+  const ghMatch = url.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/(raw|blob)\/([^/]+)\/(.+)$/)
+  if (ghMatch) return `https://cdn.jsdelivr.net/gh/${ghMatch[1]}/${ghMatch[2]}@${ghMatch[4]}/${ghMatch[5]}`
+  return null
+}
+
+function detectCommonPrefix(filenames: string[]): string {
+  if (filenames.length === 0) return ''
+  if (filenames.some(f => !f.includes('/'))) return ''
+  const firstSlash = filenames[0].indexOf('/')
+  if (firstSlash < 0) return ''
+  const candidate = filenames[0].substring(0, firstSlash + 1)
+  return filenames.every(f => f.startsWith(candidate)) ? candidate : ''
+}
+
+async function fetchZip(url: string): Promise<ArrayBuffer> {
+  const jsdelivrUrl = toJsDelivrUrl(url)
+  if (jsdelivrUrl) {
+    try {
+      const r = await fetch(jsdelivrUrl)
+      if (r.ok) return r.arrayBuffer()
+    } catch { /* fall through to direct */ }
+  }
+  const r = await fetch(url)
+  if (!r.ok) throw new Error(`HTTP ${r.status} fetching ${url}`)
+  return r.arrayBuffer()
+}
+
+export async function loadFilesystemFromUrl(url: string): Promise<string> {
+  const { default: JSZip } = await import('jszip')
+  const buffer = await fetchZip(url)
+  const zip = await JSZip.loadAsync(buffer)
+  const allNames = Object.keys(zip.files).filter(n => !zip.files[n].dir)
+  const prefix = detectCommonPrefix(allNames)
+  const newFs = await createFilesystem(url)
+  for (const [filename, zipFile] of Object.entries(zip.files)) {
+    if (zipFile.dir || filename.startsWith('__MACOSX')) continue
+    const stripped = prefix ? filename.slice(prefix.length) : filename
+    if (!stripped) continue
+    const cleanPath = '/' + stripped.replace(/^\//, '')
+    const parentPath = getParentPath(cleanPath)
+    const name = cleanPath.substring(cleanPath.lastIndexOf('/') + 1)
+    if (!name) continue
+    if (parentPath !== '/') {
+      const parts = parentPath.split('/').filter(Boolean)
+      let accPath = ''
+      for (const part of parts) {
+        accPath += '/' + part
+        if (!(await getEntryByPath(newFs.id, accPath))) {
+          await createEntry(newFs.id, getParentPath(accPath), part, 'folder')
+        }
+      }
+    }
+    const content = await zipFile.async('arraybuffer')
+    await createEntry(newFs.id, parentPath, name, 'file', content, guessMimeType(name))
+  }
+  return newFs.id
+}
+
+export async function ensureFilesystemFromUrl(url: string): Promise<string> {
+  const fsList = await listFilesystems()
+  const existing = fsList.find(f => f.name === url)
+  if (existing) return existing.id
+  return loadFilesystemFromUrl(url)
+}
