@@ -12,6 +12,7 @@ import { loadMainThreadPyodide, PYGAME_MAIN_THREAD_BOOTSTRAP } from './utils/mai
 import {
   ensureDefaultFilesystem, getAllFiles, syncFilesFromPyodide, writeFile,
   isTextMime, guessMimeType, mountFilesToPyodide, readFilesFromPyodide,
+  getEntryByPath, cleanFilesFromPyodide,
 } from './utils/virtualFS'
 import { FileSystemPanel } from './components/FileSystemPanel'
 import { SaveFileDialog } from './components/dialogs/SaveFileDialog'
@@ -97,11 +98,12 @@ export default function App() {
   const [isPygameRunActive, setIsPygameRunActive] = useState(false)
   const [isConsolePresentationMode, setIsConsolePresentationMode] = useState(false)
   const [runtimePreference, setRuntimePreference] = useState<RuntimeKey>('trace-worker')
-  const [visiblePanels, setVisiblePanels] = useState<PanelVisibility>({ code: true, visualizer: true, diagram: true, insight: true, filesystem: false })
+  const [visiblePanels, setVisiblePanels] = useState<PanelVisibility>({ code: true, visualizer: true, diagram: true, insight: true, filesystem: true })
   const [activeFilesystemId, setActiveFilesystemId] = useState<string>('default')
   const [currentWorkingDir, setCurrentWorkingDir] = useState<string>('/')
   const [openFilePath, setOpenFilePath] = useState<string | null>(null)
   const [vfsReloadTrigger, setVfsReloadTrigger] = useState(0)
+  const [isUnsaved, setIsUnsaved] = useState(false)
   const [pendingCodeLoad, setPendingCodeLoad] = useState<{ content: string; name: string; rawBuffer: ArrayBuffer; mimeType: string } | null>(null)
   const [showCodeSaveDialog, setShowCodeSaveDialog] = useState(false)
   const [diagramFontSize, setDiagramFontSize] = useState(DIAGRAM_FONT_DEFAULT)
@@ -143,6 +145,7 @@ export default function App() {
   const savedCodeRef = useRef('')
   const resizeDragRef = useRef<string | null>(null)
   const mainContainerRef = useRef<HTMLDivElement | null>(null)
+  const mainThreadMountedPathsRef = useRef<string[]>([])
   const rightSideRef = useRef<HTMLDivElement | null>(null)
   const bottomRowRef = useRef<HTMLDivElement | null>(null)
 
@@ -180,7 +183,14 @@ export default function App() {
   useEffect(() => {
     setIsCrossOriginIsolated(window.crossOriginIsolated === true)
     setHasSab(typeof SharedArrayBuffer !== 'undefined' && window.crossOriginIsolated === true)
-    void ensureDefaultFilesystem()
+    void (async () => {
+      await ensureDefaultFilesystem()
+      const entry = await getEntryByPath('default', '/main.py')
+      if (entry?.content) {
+        const text = new TextDecoder().decode(entry.content)
+        loadCodeText(text, 'main.py', '/main.py')
+      }
+    })()
   }, [])
 
   useEffect(() => {
@@ -367,6 +377,7 @@ export default function App() {
     const nextValue = value ?? ''
     setCodeText(nextValue)
     setCodeStatus(nextValue.trim() ? 'Code edited in the browser.' : 'Editor is empty. Load or type Python.')
+    setIsUnsaved(openFilePath !== null && nextValue !== savedCodeRef.current)
   }
 
   // ── Code loading ─────────────────────────────────────────────────────────
@@ -380,6 +391,7 @@ export default function App() {
     setCodeStatus(`${fileName} loaded.`)
     setOpenFilePath(vfsPath)
     savedCodeRef.current = cleanCode
+    setIsUnsaved(false)
     setCurrentLine(-1); setCurrentFunc(''); setCurrentClass(''); setSimState(null)
     setInputRequest(null); setInputValue(''); setOutputLog(''); setActiveRuntime('')
     setMainThreadStatus('Main-thread runtime is ready.')
@@ -435,6 +447,7 @@ export default function App() {
       const content = new TextEncoder().encode(codeText)
       await writeFile(activeFilesystemId, openFilePath, content.buffer as ArrayBuffer, 'text/x-python')
       savedCodeRef.current = codeText
+      setIsUnsaved(false)
       setCodeStatus(`Saved to ${openFilePath}.`)
       setVfsReloadTrigger(t => t + 1)
     } else {
@@ -450,6 +463,7 @@ export default function App() {
     try {
       await writeFile(activeFilesystemId, openFilePath, content.buffer as ArrayBuffer, 'text/x-python')
       savedCodeRef.current = codeText
+      setIsUnsaved(false)
       setVfsReloadTrigger(t => t + 1)
     } catch { /* ignore */ }
   }
@@ -641,6 +655,42 @@ export default function App() {
     setBottomLeftWidth(snapshot.bottomLeftWidth)
   }
 
+  // ── Filesystem switching ─────────────────────────────────────────────────
+
+  const clearEditorForSwitch = () => {
+    if (editorRef.current) {
+      applyingEditorValueRef.current = true
+      editorRef.current.setValue('')
+      applyingEditorValueRef.current = false
+    }
+    setCodeText('')
+    setCodeFileName(DEFAULT_CODE_FILENAME)
+    setCodeStatus('No file open. Select a file from the file system panel.')
+    setOpenFilePath(null)
+    savedCodeRef.current = ''
+    setIsUnsaved(false)
+    setCurrentLine(-1); setCurrentFunc(''); setCurrentClass(''); setSimState(null)
+    setInputRequest(null); setInputValue(''); setOutputLog(''); setActiveRuntime('')
+    mainThreadMountedPathsRef.current = []
+  }
+
+  const handleFilesystemChange = async (id: string) => {
+    if (id === activeFilesystemId) return
+    if (isUnsaved && openFilePath) {
+      const shouldSave = window.confirm(`Save changes to "${codeFileName}" before switching filesystems?`)
+      if (shouldSave) await saveCurrentToVFS()
+    }
+    clearEditorForSwitch()
+    setActiveFilesystemId(id)
+    setCurrentWorkingDir('/')
+  }
+
+  const handleFilesystemForcedChange = (id: string) => {
+    clearEditorForSwitch()
+    setActiveFilesystemId(id)
+    setCurrentWorkingDir('/')
+  }
+
   // ── Runtime execution ─────────────────────────────────────────────────────
 
   const resetExecutionState = () => {
@@ -725,7 +775,9 @@ export default function App() {
       if (typeof pyodide.setStderr === 'function') pyodide.setStderr({ batched: (text: string) => setOutputLog(prev => prev + '[stderr] ' + text + '\n') })
       if (pyodide._api) pyodide._api._skip_unwind_fatal_error = true
 
+      cleanFilesFromPyodide(pyodide, mainThreadMountedPathsRef.current)
       mountFilesToPyodide(pyodide, vfsFiles, capturedCwd)
+      mainThreadMountedPathsRef.current = vfsFiles.map(f => f.path)
 
       if (shouldRunPygame) {
         const canvas = ensureMainThreadCanvas()
@@ -979,7 +1031,8 @@ exec(code_obj, globals())
                     activeFilesystemId={activeFilesystemId}
                     currentWorkingDir={currentWorkingDir}
                     openFilePath={openFilePath}
-                    onFilesystemChange={id => { setActiveFilesystemId(id); setCurrentWorkingDir('/') }}
+                    onFilesystemChange={id => void handleFilesystemChange(id)}
+                    onFilesystemForcedChange={handleFilesystemForcedChange}
                     onCwdChange={setCurrentWorkingDir}
                     onOpenFile={entry => void onOpenVFSFile(entry)}
                     onError={msg => setCodeStatus(msg)}
@@ -994,7 +1047,8 @@ exec(code_obj, globals())
               <div className="bg-slate-900 py-2 px-4 border-b border-slate-700 text-slate-400 text-xs flex-shrink-0">
                 <div className="flex justify-between items-start gap-3">
                   <div className="min-w-0">
-                    <div className="font-bold uppercase tracking-wider truncate">
+                    <div className="font-bold uppercase tracking-wider truncate flex items-center gap-1.5">
+                      {isUnsaved && <span className="inline-block w-2 h-2 rounded-full bg-amber-400 flex-shrink-0" title="Unsaved changes" />}
                       Code Trace ({openFilePath ? openFilePath : (codeFileName || DEFAULT_CODE_FILENAME)})
                     </div>
                     <div className="mt-1 normal-case tracking-normal text-[11px] text-slate-500">{codeStatus}</div>

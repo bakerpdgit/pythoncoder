@@ -1,6 +1,8 @@
 import type { VFSEntry, VFSFile, VFSFilesystem } from '../types'
 
 const DB_NAME = 'pythoncoder-vfs'
+
+const DEFAULT_MAIN_PY_CONTENT = `# main.py\n# Write your Python code here, then click Trace Run or Run.\n\nprint("Hello, World!")\n`
 const DB_VERSION = 1
 
 let dbPromise: Promise<IDBDatabase> | null = null
@@ -80,6 +82,12 @@ export async function ensureDefaultFilesystem(): Promise<void> {
   if (!existing) {
     await idbAdd(store, { id: 'default', name: 'Default', createdAt: Date.now() })
   }
+  // Ensure main.py always exists in the default filesystem
+  const existingMain = await getEntryByPath('default', '/main.py')
+  if (!existingMain) {
+    const content = new TextEncoder().encode(DEFAULT_MAIN_PY_CONTENT).buffer as ArrayBuffer
+    await createEntry('default', '/', 'main.py', 'file', content, 'text/x-python')
+  }
 }
 
 export async function listFilesystems(): Promise<VFSFilesystem[]> {
@@ -156,26 +164,27 @@ export async function createEntry(
   return entry
 }
 
-export async function writeFile(
-  fsId: string,
-  path: string,
-  content: ArrayBuffer,
-  mimeType?: string
-): Promise<void> {
-  const db = await openVFSDb()
-  const store = db.transaction('entries', 'readwrite').objectStore('entries')
-  const index = store.index('byFsAndPath')
-  const existing = await idbGet<VFSEntry>(index, [fsId, path])
-  if (existing) {
-    await idbPut(store, { ...existing, content, mimeType: mimeType ?? existing.mimeType, size: content.byteLength, modifiedAt: Date.now() })
-  } else {
-    const parentPath = getParentPath(path)
-    const name = path.substring(path.lastIndexOf('/') + 1)
-    await idbAdd(store, {
-      id: crypto.randomUUID(), fsId, parentPath, path, name, type: 'file',
-      content, mimeType: mimeType ?? 'text/plain', size: content.byteLength, modifiedAt: Date.now(),
-    })
-  }
+export function writeFile(fsId: string, path: string, content: ArrayBuffer, mimeType?: string): Promise<void> {
+  const parentPath = getParentPath(path)
+  const name = path.substring(path.lastIndexOf('/') + 1)
+  return new Promise((resolve, reject) => {
+    openVFSDb().then(db => {
+      const store = db.transaction('entries', 'readwrite').objectStore('entries')
+      const getReq = store.index('byFsAndPath').get([fsId, path])
+      getReq.onsuccess = () => {
+        const existing = getReq.result as VFSEntry | undefined
+        let req: IDBRequest
+        if (existing) {
+          req = store.put({ ...existing, content, mimeType: mimeType ?? existing.mimeType, size: content.byteLength, modifiedAt: Date.now() })
+        } else {
+          req = store.add({ id: crypto.randomUUID(), fsId, parentPath, path, name, type: 'file', content, mimeType: mimeType ?? 'text/plain', size: content.byteLength, modifiedAt: Date.now() })
+        }
+        req.onsuccess = () => resolve()
+        req.onerror = () => reject(req.error)
+      }
+      getReq.onerror = () => reject(getReq.error)
+    }).catch(reject)
+  })
 }
 
 async function _getAllEntriesForFs(db: IDBDatabase, fsId: string): Promise<VFSEntry[]> {
@@ -284,6 +293,13 @@ export function downloadSingleFile(content: ArrayBuffer, filename: string, mimeT
   a.href = url; a.download = filename
   document.body.appendChild(a); a.click(); a.remove()
   URL.revokeObjectURL(url)
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function cleanFilesFromPyodide(pyodide: any, paths: string[]): void {
+  for (const path of paths) {
+    try { pyodide.FS.unlink(path) } catch { /* ignore */ }
+  }
 }
 
 export function mountFilesToPyodide(

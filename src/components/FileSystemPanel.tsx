@@ -3,6 +3,7 @@ import {
   listChildren, listFilesystems, createFilesystem, deleteFilesystem, renameFilesystem,
   createEntry, deleteEntry, renameEntry, getEntryByPath, guessMimeType,
   isTextMime, isImageMime, downloadEntryAsZip, downloadSingleFile, writeFile,
+  getParentPath,
 } from '../utils/virtualFS'
 import { ConfirmDialog } from './dialogs/ConfirmDialog'
 import { SaveFileDialog } from './dialogs/SaveFileDialog'
@@ -13,6 +14,7 @@ interface Props {
   currentWorkingDir: string
   openFilePath: string | null
   onFilesystemChange: (id: string) => void
+  onFilesystemForcedChange: (id: string) => void
   onCwdChange: (path: string) => void
   onOpenFile: (entry: VFSEntry) => void
   onError: (msg: string) => void
@@ -29,7 +31,7 @@ interface ImagePreview {
 
 export function FileSystemPanel({
   activeFilesystemId, currentWorkingDir, openFilePath,
-  onFilesystemChange, onCwdChange, onOpenFile, onError, reloadTrigger,
+  onFilesystemChange, onFilesystemForcedChange, onCwdChange, onOpenFile, onError, reloadTrigger,
 }: Props) {
   const [filesystems, setFilesystems] = useState<VFSFilesystem[]>([])
   const [currentPath, setCurrentPath] = useState('/')
@@ -47,6 +49,10 @@ export function FileSystemPanel({
   const [pendingUpload, setPendingUpload] = useState<{ name: string; content: ArrayBuffer; mimeType: string } | null>(null)
   const [imagePreview, setImagePreview] = useState<ImagePreview | null>(null)
   const [showFsMenu, setShowFsMenu] = useState(false)
+  const [showUrlDialog, setShowUrlDialog] = useState(false)
+  const [urlInput, setUrlInput] = useState('')
+  const [urlLoading, setUrlLoading] = useState(false)
+  const [urlError, setUrlError] = useState('')
   const uploadInputRef = useRef<HTMLInputElement>(null)
   const fsMenuRef = useRef<HTMLDivElement>(null)
 
@@ -65,6 +71,8 @@ export function FileSystemPanel({
   }, [activeFilesystemId, currentPath])
 
   useEffect(() => { void reload() }, [reload, reloadTrigger])
+
+  useEffect(() => { setCurrentPath('/') }, [activeFilesystemId])
 
   useEffect(() => {
     if (!showFsMenu) return
@@ -113,7 +121,11 @@ export function FileSystemPanel({
     setContextMenu({ x: e.clientX, y: e.clientY, entry })
   }
 
+  const isProtected = (entry: VFSEntry) =>
+    activeFilesystemId === 'default' && entry.path === '/main.py'
+
   const startRename = (entry: VFSEntry) => {
+    if (isProtected(entry)) { onError('main.py cannot be renamed in the default filesystem.'); setContextMenu(null); return }
     setRenameId(entry.id); setRenameValue(entry.name); setContextMenu(null)
   }
 
@@ -127,6 +139,7 @@ export function FileSystemPanel({
 
   const handleDelete = (entry: VFSEntry) => {
     setContextMenu(null)
+    if (isProtected(entry)) { onError('main.py cannot be deleted from the default filesystem.'); return }
     if (entry.path === openFilePath) { onError('Cannot delete the currently open file.'); return }
     setConfirmConfig({
       message: `Delete "${entry.name}"${entry.type === 'folder' ? ' and all its contents' : ''}?`,
@@ -205,7 +218,7 @@ export function FileSystemPanel({
       onConfirm: async () => {
         try {
           await deleteFilesystem(fs.id)
-          if (activeFilesystemId === fs.id) onFilesystemChange('default')
+          if (activeFilesystemId === fs.id) onFilesystemForcedChange('default')
           const fsList = await listFilesystems()
           setFilesystems(fsList.sort((a, b) => a.createdAt - b.createdAt))
         } catch (err) { onError(String(err)) }
@@ -221,6 +234,76 @@ export function FileSystemPanel({
   const handleDownloadFs = async () => {
     const fs = filesystems.find(f => f.id === activeFilesystemId)
     await downloadEntryAsZip(activeFilesystemId, '/', fs?.name ?? 'filesystem')
+  }
+
+  const handleLoadFromUrl = async () => {
+    const url = urlInput.trim()
+    if (!url) return
+    setUrlLoading(true)
+    setUrlError('')
+    try {
+      const fsName = url
+      const fsList = await listFilesystems()
+      const existing = fsList.find(f => f.name === fsName)
+      if (existing) {
+        if (!window.confirm(`A filesystem for this URL already exists. Overwrite with fresh content from the URL?`)) {
+          setUrlLoading(false)
+          return
+        }
+        await deleteFilesystem(existing.id)
+      }
+      const jsdelivrUrl = toJsDelivrUrl(url)
+      let response: Response | null = null
+      try {
+        response = await fetch(jsdelivrUrl ?? url)
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      } catch {
+        if (jsdelivrUrl) {
+          response = await fetch(url)
+          if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        } else {
+          throw new Error('Failed to fetch the URL. Check the address and try again.')
+        }
+      }
+      const buffer = await response.arrayBuffer()
+      const { default: JSZip } = await import('jszip')
+      const zip = await JSZip.loadAsync(buffer)
+      const allNames = Object.keys(zip.files).filter(n => !zip.files[n].dir)
+      const prefix = detectCommonPrefix(allNames)
+      const newFs = await createFilesystem(fsName)
+      for (const [filename, zipFile] of Object.entries(zip.files)) {
+        if (zipFile.dir) continue
+        if (filename.startsWith('__MACOSX')) continue
+        const stripped = prefix ? filename.slice(prefix.length) : filename
+        if (!stripped) continue
+        const cleanPath = '/' + stripped.replace(/^\//, '')
+        const parentPath = getParentPath(cleanPath)
+        const name = cleanPath.substring(cleanPath.lastIndexOf('/') + 1)
+        if (!name) continue
+        const mime = guessMimeType(name)
+        if (parentPath !== '/') {
+          const parts = parentPath.split('/').filter(Boolean)
+          let accPath = ''
+          for (const part of parts) {
+            accPath += '/' + part
+            const existingEntry = await getEntryByPath(newFs.id, accPath)
+            if (!existingEntry) {
+              const parentOfParent = getParentPath(accPath)
+              await createEntry(newFs.id, parentOfParent, part, 'folder')
+            }
+          }
+        }
+        const content = await zipFile.async('arraybuffer')
+        await createEntry(newFs.id, parentPath, name, 'file', content, mime)
+      }
+      setShowUrlDialog(false)
+      setUrlInput('')
+      onFilesystemChange(newFs.id)
+    } catch (err) {
+      setUrlError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setUrlLoading(false)
+    }
   }
 
   const currentFs = filesystems.find(f => f.id === activeFilesystemId)
@@ -242,7 +325,7 @@ export function FileSystemPanel({
               {filesystems.map(fs => (
                 <div key={fs.id} className="flex items-center justify-between px-2 py-1.5 hover:bg-slate-700 transition-colors">
                   <button className={`flex-1 text-left truncate ${fs.id === activeFilesystemId ? 'text-emerald-400' : 'text-slate-300'}`}
-                    onClick={() => { onFilesystemChange(fs.id); setShowFsMenu(false); setCurrentPath('/') }}>
+                    onClick={() => { onFilesystemChange(fs.id); setShowFsMenu(false) }}>
                     {fs.name}
                   </button>
                   {fs.id !== 'default' && (
@@ -297,10 +380,17 @@ export function FileSystemPanel({
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
           </svg>
         </ToolbarBtn>
+        <ToolbarBtn title="Load filesystem from URL (ZIP)" onClick={() => { setUrlError(''); setShowUrlDialog(true) }}>
+          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <circle cx="12" cy="12" r="10" strokeWidth="2" />
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M2 12h20M12 2a15.3 15.3 0 010 20M12 2a15.3 15.3 0 000 20" />
+          </svg>
+        </ToolbarBtn>
         <div className="flex-1" />
         <ToolbarBtn title="Set current folder as working directory" onClick={handleSetCwd}>
           <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+            <text x="12" y="17" textAnchor="middle" fontSize="7" fill="currentColor" stroke="none" fontFamily="monospace">~</text>
           </svg>
         </ToolbarBtn>
         <ToolbarBtn title="Download filesystem as ZIP" onClick={() => void handleDownloadFs()}>
@@ -391,7 +481,7 @@ export function FileSystemPanel({
           {contextMenu.entry.type === 'file' && (
             <CtxItem label="Open" onClick={() => { void handleDoubleClick(contextMenu.entry); setContextMenu(null) }} />
           )}
-          <CtxItem label="Rename" onClick={() => startRename(contextMenu.entry)} />
+          <CtxItem label="Rename" onClick={() => startRename(contextMenu.entry)} disabled={isProtected(contextMenu.entry)} />
           <CtxItem label="Download" onClick={() => void handleDownload(contextMenu.entry)} />
           {contextMenu.entry.type === 'folder' && (
             <CtxItem label="Download as ZIP" onClick={() => void handleDownload(contextMenu.entry)} />
@@ -399,7 +489,7 @@ export function FileSystemPanel({
           <CtxItem label="Set as CWD" onClick={() => { if (contextMenu.entry.type === 'folder') { onCwdChange(contextMenu.entry.path) } setContextMenu(null) }}
             disabled={contextMenu.entry.type !== 'folder'} />
           <div className="border-t border-slate-700 my-1" />
-          <CtxItem label="Delete" onClick={() => handleDelete(contextMenu.entry)} danger />
+          <CtxItem label="Delete" onClick={() => handleDelete(contextMenu.entry)} danger disabled={isProtected(contextMenu.entry)} />
         </div>
       )}
 
@@ -431,6 +521,49 @@ export function FileSystemPanel({
               </button>
             </div>
             <img src={imagePreview.url} alt={imagePreview.name} className="max-h-[80vh] max-w-full object-contain rounded" />
+          </div>
+        </div>
+      )}
+
+      {/* Load from URL dialog */}
+      {showUrlDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70"
+          onClick={() => { if (!urlLoading) { setShowUrlDialog(false); setUrlInput(''); setUrlError('') } }}>
+          <div className="bg-slate-800 border border-slate-600 rounded-lg shadow-2xl p-5 w-[440px] max-w-[95vw] text-xs"
+            onClick={e => e.stopPropagation()}>
+            <div className="text-sm font-bold text-white mb-1">Load Filesystem from URL</div>
+            <p className="text-slate-400 mb-3 leading-relaxed">
+              Enter a URL to a ZIP file. GitHub raw URLs are automatically routed via jsDelivr to avoid CORS issues.<br />
+              e.g. <span className="text-slate-300 font-mono">https://raw.githubusercontent.com/user/repo/main/files.zip</span>
+            </p>
+            <input
+              autoFocus
+              type="url"
+              value={urlInput}
+              onChange={e => { setUrlInput(e.target.value); setUrlError('') }}
+              onKeyDown={e => { if (e.key === 'Enter' && !urlLoading) void handleLoadFromUrl(); if (e.key === 'Escape') { setShowUrlDialog(false); setUrlInput(''); setUrlError('') } }}
+              placeholder="https://..."
+              className="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-white text-xs focus:outline-none focus:ring-1 focus:ring-sky-400 mb-2"
+            />
+            {urlError && <div className="text-red-400 text-[11px] mb-2">{urlError}</div>}
+            <div className="flex justify-end gap-2 mt-1">
+              <button onClick={() => { setShowUrlDialog(false); setUrlInput(''); setUrlError('') }}
+                disabled={urlLoading}
+                className="px-3 py-1.5 rounded border border-slate-600 text-slate-300 hover:border-slate-400 disabled:opacity-50 transition-colors">
+                Cancel
+              </button>
+              <button onClick={() => void handleLoadFromUrl()}
+                disabled={urlLoading || !urlInput.trim()}
+                className="px-3 py-1.5 rounded bg-sky-600 hover:bg-sky-500 text-white font-semibold disabled:opacity-50 transition-colors flex items-center gap-2">
+                {urlLoading && (
+                  <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                  </svg>
+                )}
+                {urlLoading ? 'Loading...' : 'Load'}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -490,4 +623,23 @@ function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes}B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}K`
   return `${(bytes / 1024 / 1024).toFixed(1)}M`
+}
+
+function toJsDelivrUrl(url: string): string | null {
+  if (url.includes('cdn.jsdelivr.net')) return null
+  const rawMatch = url.match(/^https?:\/\/raw\.githubusercontent\.com\/([^/]+)\/([^/]+)\/([^/]+)\/(.+)$/)
+  if (rawMatch) return `https://cdn.jsdelivr.net/gh/${rawMatch[1]}/${rawMatch[2]}@${rawMatch[3]}/${rawMatch[4]}`
+  const ghMatch = url.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/(raw|blob)\/([^/]+)\/(.+)$/)
+  if (ghMatch) return `https://cdn.jsdelivr.net/gh/${ghMatch[1]}/${ghMatch[2]}@${ghMatch[4]}/${ghMatch[5]}`
+  return null
+}
+
+function detectCommonPrefix(filenames: string[]): string {
+  if (filenames.length === 0) return ''
+  const hasToplevelFile = filenames.some(f => !f.includes('/'))
+  if (hasToplevelFile) return ''
+  const firstSlash = filenames[0].indexOf('/')
+  if (firstSlash < 0) return ''
+  const candidate = filenames[0].substring(0, firstSlash + 1)
+  return filenames.every(f => f.startsWith(candidate)) ? candidate : ''
 }
