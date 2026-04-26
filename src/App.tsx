@@ -146,6 +146,7 @@ export default function App() {
   const resizeDragRef = useRef<string | null>(null)
   const mainContainerRef = useRef<HTMLDivElement | null>(null)
   const mainThreadMountedPathsRef = useRef<string[]>([])
+  const workerRunModeRef = useRef(false)
   const rightSideRef = useRef<HTMLDivElement | null>(null)
   const bottomRowRef = useRef<HTMLDivElement | null>(null)
 
@@ -185,6 +186,7 @@ export default function App() {
     setHasSab(typeof SharedArrayBuffer !== 'undefined' && window.crossOriginIsolated === true)
     void (async () => {
       await ensureDefaultFilesystem()
+      setVfsReloadTrigger(t => t + 1)
       const entry = await getEntryByPath('default', '/main.py')
       if (entry?.content) {
         const text = new TextDecoder().decode(entry.content)
@@ -698,16 +700,19 @@ export default function App() {
     setInputRequest(null); setInputValue(''); setOutputLog('')
   }
 
-  const startTraceWorker = async () => {
+  const startTraceWorker = async (runMode = false) => {
     if (!hasSab || !hasCode) return
     await saveCurrentToVFS()
     const vfsFiles = await getAllFiles(activeFilesystemId)
     const capturedFsId = activeFilesystemId
     const capturedCwd = currentWorkingDir
 
+    workerRunModeRef.current = runMode
+    if (runMode) enterConsolePresentationMode()
+
     resetExecutionState()
     setIsRunning(true); setActiveRuntime('trace-worker')
-    setCodeStatus('Trace-worker runtime starting...')
+    setCodeStatus(runMode ? 'Worker runtime starting...' : 'Trace-worker runtime starting...')
     setMainThreadStatus('Trace-worker runtime is active.')
 
     const sab = new SharedArrayBuffer(1024 * 4)
@@ -719,9 +724,13 @@ export default function App() {
     worker.onmessage = (e: MessageEvent) => {
       const data = e.data
       if (data.type === 'trace') {
-        setCurrentLine(data.line); setCurrentFunc(data.func); setCurrentClass(data.cls || '')
-        if (data.state && data.state !== '{}') {
-          try { setSimState(JSON.parse(data.state)) } catch { /* ignore */ }
+        if (workerRunModeRef.current) {
+          sendTraceCommand(TRACE_CMD_CONTINUE)
+        } else {
+          setCurrentLine(data.line); setCurrentFunc(data.func); setCurrentClass(data.cls || '')
+          if (data.state && data.state !== '{}') {
+            try { setSimState(JSON.parse(data.state)) } catch { /* ignore */ }
+          }
         }
       } else if (data.type === 'input') {
         setInputValue(''); setInputRequest({ id: Date.now(), prompt: data.prompt ?? '' })
@@ -733,14 +742,19 @@ export default function App() {
         }
         setOutputLog(prev => prev + '\n[ERROR] ' + data.error + '\n')
         setInputRequest(null); setInputValue(''); setIsRunning(false); setActiveRuntime('')
-        setCodeStatus('Trace-worker runtime failed.'); workerRef.current = null; sabRef.current = null
+        setCodeStatus('Worker runtime failed.')
+        if (workerRunModeRef.current) { restoreConsolePresentationMode(); workerRunModeRef.current = false }
+        workerRef.current = null; sabRef.current = null
       } else if (data.type === 'done') {
         if (data.files?.length) {
           void syncFilesFromPyodide(capturedFsId, data.files).then(() => setVfsReloadTrigger(t => t + 1))
         }
-        setOutputLog(prev => prev + '\n[TRACE RUN FINISHED]\n')
+        const label = workerRunModeRef.current ? '[RUN FINISHED]' : '[TRACE RUN FINISHED]'
+        setOutputLog(prev => prev + `\n${label}\n`)
         setInputRequest(null); setInputValue(''); setIsRunning(false); setActiveRuntime('')
-        setCurrentLine(-1); setCodeStatus('Trace-worker runtime finished.')
+        setCurrentLine(-1)
+        setCodeStatus(workerRunModeRef.current ? 'Worker runtime finished.' : 'Trace-worker runtime finished.')
+        if (workerRunModeRef.current) { restoreConsolePresentationMode(); workerRunModeRef.current = false }
         workerRef.current = null; sabRef.current = null
       }
     }
@@ -878,7 +892,8 @@ exec(code_obj, globals())
   const forceStop = () => {
     if (workerRef.current) {
       workerRef.current.terminate(); workerRef.current = null; sabRef.current = null
-      setCodeStatus('Trace-worker runtime stopped.')
+      setCodeStatus('Worker runtime stopped.')
+      if (workerRunModeRef.current) { restoreConsolePresentationMode(); workerRunModeRef.current = false }
     } else if (activeRuntime === 'main-thread') {
       if (isPygameRunActive) {
         mainThreadStopRequestedRef.current = true
@@ -921,17 +936,23 @@ exec(code_obj, globals())
 
           {!isRunning ? (
             selectedRuntime === 'trace-worker' ? (
-              <button onClick={() => void startTraceWorker()} disabled={!hasCode || !hasSab}
-                className="bg-emerald-600 hover:bg-emerald-500 text-white px-5 py-2 rounded font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
-                Trace Run
-              </button>
+              <>
+                <button onClick={() => void startTraceWorker()} disabled={!hasCode || !hasSab}
+                  className="bg-emerald-600 hover:bg-emerald-500 text-white px-5 py-2 rounded font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                  Trace Run
+                </button>
+                <button onClick={() => void startTraceWorker(true)} disabled={!hasCode || !hasSab}
+                  className="bg-sky-600 hover:bg-sky-500 text-white px-5 py-2 rounded font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                  Run
+                </button>
+              </>
             ) : (
               <button onClick={() => void startMainThreadRun()} disabled={!hasCode}
                 className="bg-sky-600 hover:bg-sky-500 text-white px-5 py-2 rounded font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
                 Run
               </button>
             )
-          ) : activeRuntime === 'trace-worker' ? (
+          ) : activeRuntime === 'trace-worker' && !isConsolePresentationMode ? (
             <>
               <button onClick={() => sendTraceCommand(TRACE_CMD_STEP_INTO)} disabled={inputRequest !== null}
                 className="bg-emerald-700 hover:bg-emerald-600 text-white px-5 py-2 rounded font-semibold transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed">
@@ -957,6 +978,14 @@ exec(code_obj, globals())
               </button>
               <button onClick={forceStop} className="bg-red-600 hover:bg-red-500 text-white px-5 py-2 rounded font-semibold transition-colors">Stop</button>
             </>
+          ) : (activeRuntime === 'trace-worker' && isConsolePresentationMode) ? (
+            <div className="flex items-center overflow-hidden rounded border border-sky-500/70 bg-sky-900/30 text-sm font-semibold text-sky-100">
+              <div className="px-4 py-2">Worker running</div>
+              <button type="button" onClick={forceStop}
+                className="self-stretch border-l border-sky-500/70 bg-red-700 px-3 text-xs font-bold uppercase tracking-wider text-white transition-colors hover:bg-red-600">
+                Stop
+              </button>
+            </div>
           ) : (
             <div className="flex items-center overflow-hidden rounded border border-amber-500/70 bg-amber-900/30 text-sm font-semibold text-amber-100">
               <div className="px-4 py-2">Main-thread execution running</div>
@@ -1077,33 +1106,44 @@ exec(code_obj, globals())
                   </div>
                 </div>
               </div>
-              <div className="flex-1 overflow-hidden">
-                {!isEditorReady && (
-                  <div className="flex h-full items-center justify-center text-slate-500 text-sm">Loading Monaco editor...</div>
+              <div className="flex-1 overflow-hidden relative">
+                {openFilePath === null ? (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-slate-500 bg-slate-950">
+                    <svg className="w-10 h-10 text-slate-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                    </svg>
+                    <span className="text-sm">Open a file to start editing</span>
+                  </div>
+                ) : (
+                  <>
+                    {!isEditorReady && (
+                      <div className="absolute inset-0 flex items-center justify-center text-slate-500 text-sm z-10">Loading Monaco editor...</div>
+                    )}
+                    <Editor
+                      height="100%"
+                      language="python"
+                      theme={theme === 'light' ? 'as-tracer-light' : 'as-tracer-dark'}
+                      value={codeText}
+                      onChange={handleEditorChange}
+                      beforeMount={handleEditorBeforeMount}
+                      onMount={handleEditorMount}
+                      options={{
+                        glyphMargin: true,
+                        minimap: { enabled: false },
+                        lineNumbersMinChars: 4,
+                        scrollBeyondLastLine: false,
+                        smoothScrolling: true,
+                        tabSize: 4,
+                        insertSpaces: true,
+                        fontSize: 14,
+                        padding: { top: 14, bottom: 18 },
+                        renderLineHighlight: 'none',
+                        wordWrap: 'off',
+                        readOnly: isRunning,
+                      }}
+                    />
+                  </>
                 )}
-                <Editor
-                  height="100%"
-                  language="python"
-                  theme={theme === 'light' ? 'as-tracer-light' : 'as-tracer-dark'}
-                  value={codeText}
-                  onChange={handleEditorChange}
-                  beforeMount={handleEditorBeforeMount}
-                  onMount={handleEditorMount}
-                  options={{
-                    glyphMargin: true,
-                    minimap: { enabled: false },
-                    lineNumbersMinChars: 4,
-                    scrollBeyondLastLine: false,
-                    smoothScrolling: true,
-                    tabSize: 4,
-                    insertSpaces: true,
-                    fontSize: 14,
-                    padding: { top: 14, bottom: 18 },
-                    renderLineHighlight: 'none',
-                    wordWrap: 'off',
-                    readOnly: isRunning,
-                  }}
-                />
               </div>
             </div>
           </div>
