@@ -7,6 +7,7 @@ import ast
 import sys
 import json
 import builtins
+_builtin_names = frozenset(dir(builtins))
 
 def my_input(prompt=""):
     try:
@@ -180,6 +181,8 @@ def build_scope_snapshot(frame, func_name):
         if not is_serializable_local(name, value):
             continue
         if name.startswith("_"):
+            continue
+        if name in _builtin_names:
             continue
         global_entries.append({"label": name, "value": serialize_value(value)})
 

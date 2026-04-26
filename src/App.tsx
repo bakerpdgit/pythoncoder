@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef, useDeferredValue, startTransition } from 'react'
 import Editor, { type Monaco } from '@monaco-editor/react'
 import type { editor as MonacoEditor } from 'monaco-editor'
-import TracerWorker from './workers/tracer.worker.ts?worker'
 import {
   buildPythonStructureModel, analyzePythonClasses, analyzePythonFunctions,
   analyzePythonOutline, cleanCodeText, codeUsesPygame, getExpandableOutlineIds,
@@ -30,6 +29,8 @@ import type {
   Theme, RuntimeKey, PanelVisibility, InputRequest, SabRef, SimState, InspectorPath,
   StructureModel, DiagramModel, HierarchyModel, OutlineModel, DiagramView,
 } from './types'
+
+const TRACER_WORKER_URL = new URL('./workers/tracer.worker.ts', import.meta.url)
 
 const MONACO_DARK_THEME: MonacoEditor.IStandaloneThemeData = {
   base: 'vs-dark', inherit: true,
@@ -88,6 +89,7 @@ export default function App() {
   const [activeRuntime, setActiveRuntime] = useState<RuntimeKey | ''>('')
   const [mainThreadStatus, setMainThreadStatus] = useState('Main-thread runtime is ready.')
   const [isPygameRunActive, setIsPygameRunActive] = useState(false)
+  const [isConsolePresentationMode, setIsConsolePresentationMode] = useState(false)
   const [runtimePreference, setRuntimePreference] = useState<RuntimeKey>('trace-worker')
   const [visiblePanels, setVisiblePanels] = useState<PanelVisibility>({ code: true, visualizer: true, diagram: true, insight: true })
   const [diagramFontSize, setDiagramFontSize] = useState(DIAGRAM_FONT_DEFAULT)
@@ -121,6 +123,7 @@ export default function App() {
   const mainThreadCanvasWatcherRef = useRef(0)
   const mainThreadStopRequestedRef = useRef<boolean>(false)
   const pygameLayoutSnapshotRef = useRef<{ visiblePanels: PanelVisibility; leftWidth: number; rightTopHeight: number; bottomLeftWidth: number } | null>(null)
+  const consoleLayoutSnapshotRef = useRef<{ visiblePanels: PanelVisibility; leftWidth: number; rightTopHeight: number; bottomLeftWidth: number } | null>(null)
   const mainThreadRunIdRef = useRef(0)
   const noteDraftRef = useRef('')
   const isInsightEditingRef = useRef(false)
@@ -544,6 +547,26 @@ export default function App() {
     setBottomLeftWidth(snapshot.bottomLeftWidth)
   }
 
+  const enterConsolePresentationMode = () => {
+    if (!consoleLayoutSnapshotRef.current) {
+      consoleLayoutSnapshotRef.current = { visiblePanels: { ...visiblePanels }, leftWidth, rightTopHeight, bottomLeftWidth }
+    }
+    setShowExportDialog(false)
+    setVisiblePanels({ code: false, visualizer: false, diagram: false, insight: true })
+    setIsConsolePresentationMode(true)
+  }
+
+  const restoreConsolePresentationMode = () => {
+    setIsConsolePresentationMode(false)
+    const snapshot = consoleLayoutSnapshotRef.current
+    consoleLayoutSnapshotRef.current = null
+    if (!snapshot) return
+    setVisiblePanels(snapshot.visiblePanels)
+    setLeftWidth(snapshot.leftWidth)
+    setRightTopHeight(snapshot.rightTopHeight)
+    setBottomLeftWidth(snapshot.bottomLeftWidth)
+  }
+
   // ── Runtime execution ─────────────────────────────────────────────────────
 
   const resetExecutionState = () => {
@@ -561,7 +584,7 @@ export default function App() {
     const sab = new SharedArrayBuffer(1024 * 4)
     sabRef.current = { sab, int32: new Int32Array(sab), uint8: new Uint8Array(sab) }
 
-    const worker = new TracerWorker()
+    const worker = new Worker(TRACER_WORKER_URL)
     workerRef.current = worker
 
     worker.onmessage = (e: MessageEvent) => {
@@ -595,8 +618,9 @@ export default function App() {
     const runId = ++mainThreadRunIdRef.current
     const shouldRunPygame = codeUsesPygame(codeText)
     mainThreadStopRequestedRef.current = false
-    if (shouldRunPygame) enterPygamePresentationMode(); else setIsPygameRunActive(false)
-    resetExecutionState(); clearMainThreadCanvas()
+    if (shouldRunPygame) enterPygamePresentationMode(); else enterConsolePresentationMode()
+    resetExecutionState()
+    if (shouldRunPygame) clearMainThreadCanvas()
     setIsRunning(true); setActiveRuntime('main-thread')
     setCodeStatus('Main-thread runtime starting...')
     setMainThreadStatus(shouldRunPygame ? 'Loading Pyodide 0.29.3 and pygame-ce on the main thread...' : 'Loading Pyodide 0.29.3 on the main thread...')
@@ -610,11 +634,13 @@ export default function App() {
       if (typeof pyodide.setStderr === 'function') pyodide.setStderr({ batched: (text: string) => setOutputLog(prev => prev + '[stderr] ' + text + '\n') })
       if (pyodide._api) pyodide._api._skip_unwind_fatal_error = true
 
-      const canvas = ensureMainThreadCanvas()
-      if (!pyodide.canvas?.setCanvas2D) throw new Error('Pyodide canvas support is unavailable.')
-      pyodide.canvas.setCanvas2D(canvas)
-      focusMainThreadCanvas()
-      if (shouldRunPygame) startMainThreadCanvasWatcher()
+      if (shouldRunPygame) {
+        const canvas = ensureMainThreadCanvas()
+        if (!pyodide.canvas?.setCanvas2D) throw new Error('Pyodide canvas support is unavailable.')
+        pyodide.canvas.setCanvas2D(canvas)
+        focusMainThreadCanvas()
+        startMainThreadCanvasWatcher()
+      }
 
       setMainThreadStatus(shouldRunPygame ? 'Loading pygame dependencies from imports...' : 'Loading packages from imports...')
       await pyodide.loadPackagesFromImports(codeText)
@@ -660,8 +686,9 @@ exec(code_obj, globals())
       setIsRunning(false); setActiveRuntime('')
     } finally {
       mainThreadStopRequestedRef.current = false
-      stopMainThreadCanvasWatcher({ restoreSnapshot: codeUsesPygame(codeText) })
-      if (codeUsesPygame(codeText)) restorePygamePresentationMode()
+      stopMainThreadCanvasWatcher({ restoreSnapshot: shouldRunPygame })
+      if (shouldRunPygame) restorePygamePresentationMode()
+      else restoreConsolePresentationMode()
     }
   }
 
@@ -718,14 +745,14 @@ exec(code_obj, globals())
           <svg className="w-8 h-8 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
           </svg>
-          <h1 className="text-xl font-bold tracking-wider">General Python Tracer</h1>
+          <h1 className="text-xl font-bold tracking-wider">Coder</h1>
         </div>
 
         <div className="flex items-center gap-3">
           <PanelVisibilityMenu menuRef={panelMenuRef} isOpen={isPanelMenuOpen}
             onToggleOpen={() => { setIsRuntimeMenuOpen(false); setIsPanelMenuOpen(o => !o) }}
             panelOptions={PANEL_OPTIONS} visiblePanels={visiblePanels} onTogglePanel={togglePanelVisibility}
-            buttonHoverClass="hover:border-emerald-400" checkboxAccent="#34d399" disabled={isPygameRunActive} />
+            buttonHoverClass="hover:border-emerald-400" checkboxAccent="#34d399" disabled={isPygameRunActive || isConsolePresentationMode} />
           <RuntimeSettingsMenu menuRef={runtimeMenuRef} isOpen={isRuntimeMenuOpen}
             onToggleOpen={() => { setIsPanelMenuOpen(false); setIsRuntimeMenuOpen(o => !o) }}
             runtimePreference={runtimePreference} selectedRuntime={selectedRuntime}
@@ -1009,7 +1036,7 @@ exec(code_obj, globals())
                 {visiblePanels.insight && (
                   <div className="bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden flex-1">
                     <div className="flex bg-slate-900 border-b border-slate-700">
-                      {isPygameRunActive ? (
+                      {(isPygameRunActive || isConsolePresentationMode) ? (
                         <div className="w-full py-2 px-4 font-bold uppercase tracking-wider text-teal-400 text-xs">Console Output</div>
                       ) : (
                         <>
@@ -1021,7 +1048,7 @@ exec(code_obj, globals())
 
                     <div className="flex-1 flex overflow-hidden">
                       {/* Notes panel */}
-                      {!isPygameRunActive && (
+                      {!isPygameRunActive && !isConsolePresentationMode && (
                         <div className="relative flex w-1/2 min-h-0 flex-col border-r border-slate-700 bg-slate-800/50 p-4">
                           <div className="flex items-start justify-between gap-3">
                             <div>
@@ -1108,7 +1135,7 @@ exec(code_obj, globals())
                       )}
 
                       {/* Console output */}
-                      <div className={`${isPygameRunActive ? 'w-full' : 'w-1/2'} flex flex-col overflow-hidden bg-slate-900/40 p-3`}>
+                      <div className={`${(isPygameRunActive || isConsolePresentationMode) ? 'w-full' : 'w-1/2'} flex flex-col overflow-hidden bg-slate-900/40 p-3`}>
                         <div ref={outputRef} className="flex-1 overflow-y-auto font-mono text-xs leading-relaxed text-slate-300 whitespace-pre-wrap break-words">
                           {outputLog || <span className="text-slate-500 italic">Console output will appear here.</span>}
                         </div>

@@ -35,7 +35,7 @@ export const OutlinePanel = ({ outlineModel, expandedIds, setExpandedIds, onJump
   const renderNode = (node: OutlineNode, depth = 0): React.ReactNode => {
     const hasChildren = node.children?.length > 0
     const isExpanded = expandedIds.has(node.id)
-    const isCurrent = currentLine > 0 && node.line <= currentLine
+    const isCurrent = currentLine > 0 && node.line === currentLine
 
     return (
       <div key={node.id}>
