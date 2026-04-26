@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useDeferredValue, startTransition } from 'react'
+import TracerWorker from './workers/tracer.worker.ts?worker'
 import Editor, { type Monaco } from '@monaco-editor/react'
 import type { editor as MonacoEditor } from 'monaco-editor'
 import {
@@ -36,8 +37,6 @@ import type {
   Theme, RuntimeKey, PanelVisibility, InputRequest, SabRef, SimState, InspectorPath,
   StructureModel, DiagramModel, HierarchyModel, OutlineModel, DiagramView, VFSEntry,
 } from './types'
-
-const TRACER_WORKER_URL = new URL('./workers/tracer.worker.ts', import.meta.url)
 
 const MONACO_DARK_THEME: MonacoEditor.IStandaloneThemeData = {
   base: 'vs-dark', inherit: true,
@@ -731,7 +730,7 @@ export default function App() {
     const sab = new SharedArrayBuffer(1024 * 4)
     sabRef.current = { sab, int32: new Int32Array(sab), uint8: new Uint8Array(sab) }
 
-    const worker = new Worker(TRACER_WORKER_URL)
+    const worker = new TracerWorker()
     workerRef.current = worker
 
     worker.onmessage = (e: MessageEvent) => {
