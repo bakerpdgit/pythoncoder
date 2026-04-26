@@ -1,0 +1,7 @@
+{
+  "name": "aqa-prelim-2026",
+  "private": true,
+  "scripts": {
+    "start": "node server.mjs"
+  }
+}

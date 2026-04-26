@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AQA Preliminary Code Study 2026</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      html[data-theme="light"] {
+        color-scheme: light;
+      }
+      body {
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        background: #0f172a;
+        color: #f8fafc;
+        min-height: 100vh;
+        margin: 0;
+      }
+      .card-glow:hover {
+        box-shadow: 0 0 32px rgba(96, 165, 250, 0.18);
+      }
+      .card-glow-green:hover {
+        box-shadow: 0 0 32px rgba(52, 211, 153, 0.18);
+      }
+      .theme-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        border: 1px solid #475569;
+        border-radius: 0.75rem;
+        background: rgba(15, 23, 42, 0.45);
+        color: #e2e8f0;
+        padding: 0.55rem 0.8rem;
+        font-size: 0.8rem;
+        font-weight: 700;
+        cursor: pointer;
+        transition:
+          border-color 0.15s ease,
+          background-color 0.15s ease,
+          color 0.15s ease;
+      }
+      .theme-toggle:hover {
+        border-color: #60a5fa;
+        background: rgba(37, 99, 235, 0.12);
+      }
+      html[data-theme="light"] body {
+        background: #e8eef6;
+        color: #0f172a;
+      }
+      html[data-theme="light"] .bg-slate-800 {
+        background-color: #ffffff !important;
+      }
+      html[data-theme="light"] .border-slate-700 {
+        border-color: #d7e0ea !important;
+      }
+      html[data-theme="light"] .text-white {
+        color: #0f172a !important;
+      }
+      html[data-theme="light"] .text-slate-300 {
+        color: #334155 !important;
+      }
+      html[data-theme="light"] .text-slate-400 {
+        color: #475569 !important;
+      }
+      html[data-theme="light"] .text-slate-500,
+      html[data-theme="light"] .text-slate-600 {
+        color: #64748b !important;
+      }
+      html[data-theme="light"] .hover\:text-white:hover {
+        color: #0f172a !important;
+      }
+      html[data-theme="light"] .hover\:border-blue-500:hover {
+        border-color: #3b82f6 !important;
+      }
+      html[data-theme="light"] .hover\:border-emerald-500:hover {
+        border-color: #10b981 !important;
+      }
+      html[data-theme="light"] .bg-blue-900\/60 {
+        background-color: rgba(191, 219, 254, 0.72) !important;
+      }
+      html[data-theme="light"] .border-blue-700 {
+        border-color: #93c5fd !important;
+      }
+      html[data-theme="light"] .bg-emerald-900\/60 {
+        background-color: rgba(187, 247, 208, 0.72) !important;
+      }
+      html[data-theme="light"] .border-emerald-700 {
+        border-color: #86efac !important;
+      }
+      html[data-theme="light"] .theme-toggle {
+        border-color: #cbd5e1;
+        background: rgba(255, 255, 255, 0.82);
+        color: #334155;
+      }
+      html[data-theme="light"] .theme-toggle:hover {
+        border-color: #60a5fa;
+        background: rgba(224, 242, 254, 0.95);
+      }
+    </style>
+  </head>
+  <body class="min-h-screen flex flex-col">
+
+    <!-- Header -->
+    <header class="bg-slate-800 border-b border-slate-700 px-8 py-4 flex items-center justify-between gap-4 shadow-md">
+      <div class="flex items-center gap-3">
+        <svg class="w-8 h-8 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M9 3H5a2 2 0 00-2 2v4m6-6h10a2 2 0 012 2v4M9 3v18m0 0h10a2 2 0 002-2V9M9 21H5a2 2 0 01-2-2V9m0 0h18"/>
+        </svg>
+        <div>
+          <div class="text-xl font-bold tracking-wider">AQA Preliminary Code Study 2026</div>
+          <div class="text-xs text-slate-400 mt-0.5">Interactive trace &amp; visualisation tools</div>
+        </div>
+      </div>
+      <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Toggle theme">
+        <span id="theme-toggle-icon">☀</span>
+        <span id="theme-toggle-label">Light Mode</span>
+      </button>
+    </header>
+
+    <!-- Main content -->
+    <main class="flex-1 flex flex-col items-center justify-center p-8">
+
+      <div class="text-center mb-12 max-w-2xl">
+        <h1 class="text-4xl font-extrabold tracking-tight mb-4 text-white">
+          Choose Your Interactive
+        </h1>
+        <p class="text-slate-400 text-lg leading-relaxed">
+          Select the level you're studying. Each tool lets you load, edit, and step through
+          the AQA preliminary code with live visualisation and variable inspection.
+        </p>
+      </div>
+
+      <!-- Cards grid -->
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-8 w-full max-w-4xl">
+
+        <!-- A Level card -->
+        <a href="alevel"
+           class="card-glow group relative bg-slate-800 border border-slate-700 hover:border-blue-500 rounded-2xl p-8 flex flex-col gap-5 transition-all duration-200 cursor-pointer no-underline text-white">
+          <div class="flex items-center gap-4">
+            <div class="w-14 h-14 rounded-xl bg-blue-900/60 border border-blue-700 flex items-center justify-center flex-shrink-0">
+              <svg class="w-8 h-8 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                  d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z"/>
+              </svg>
+            </div>
+            <div>
+              <div class="text-xs font-bold uppercase tracking-widest text-blue-400 mb-1">A Level</div>
+              <h2 class="text-2xl font-bold">Ants Simulation</h2>
+            </div>
+          </div>
+
+          <p class="text-slate-400 leading-relaxed">
+            Explore the object-oriented ants simulation. Step through execution with a live
+            grid visualiser, UML class diagram, and variable inspector.
+          </p>
+
+          <ul class="text-sm text-slate-300 space-y-1.5 flex-1">
+            <li class="flex items-center gap-2">
+              <span class="w-1.5 h-1.5 rounded-full bg-blue-400 flex-shrink-0"></span>
+              Live grid visualisation of ants, food &amp; pheromones
+            </li>
+            <li class="flex items-center gap-2">
+              <span class="w-1.5 h-1.5 rounded-full bg-blue-400 flex-shrink-0"></span>
+              Auto-generated UML class &amp; composition diagram
+            </li>
+            <li class="flex items-center gap-2">
+              <span class="w-1.5 h-1.5 rounded-full bg-blue-400 flex-shrink-0"></span>
+              Object attribute &amp; locals inspector
+            </li>
+          </ul>
+
+          <div class="mt-2 flex items-center gap-2 text-blue-400 font-semibold group-hover:gap-3 transition-all">
+            Open A Level interactive
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+            </svg>
+          </div>
+        </a>
+
+        <!-- AS Level card -->
+        <a href="as"
+           class="card-glow-green group relative bg-slate-800 border border-slate-700 hover:border-emerald-500 rounded-2xl p-8 flex flex-col gap-5 transition-all duration-200 cursor-pointer no-underline text-white">
+          <div class="flex items-center gap-4">
+            <div class="w-14 h-14 rounded-xl bg-emerald-900/60 border border-emerald-700 flex items-center justify-center flex-shrink-0">
+              <svg class="w-8 h-8 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                  d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"/>
+              </svg>
+            </div>
+            <div>
+              <div class="text-xs font-bold uppercase tracking-widest text-emerald-400 mb-1">AS Level</div>
+              <h2 class="text-2xl font-bold">Tile Game</h2>
+            </div>
+          </div>
+
+          <p class="text-slate-400 leading-relaxed">
+            Explore the procedural tile game. Step through execution with a live
+            board visualiser, function hierarchy chart, and variable inspector.
+          </p>
+
+          <ul class="text-sm text-slate-300 space-y-1.5 flex-1">
+            <li class="flex items-center gap-2">
+              <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 flex-shrink-0"></span>
+              Live game board showing tile state and player turn
+            </li>
+            <li class="flex items-center gap-2">
+              <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 flex-shrink-0"></span>
+              Auto-generated function call hierarchy chart
+            </li>
+            <li class="flex items-center gap-2">
+              <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 flex-shrink-0"></span>
+              Global variables &amp; locals inspector
+            </li>
+          </ul>
+
+          <div class="mt-2 flex items-center gap-2 text-emerald-400 font-semibold group-hover:gap-3 transition-all">
+            Open AS Level interactive
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+            </svg>
+          </div>
+        </a>
+
+      </div>
+
+      <!-- Footer note -->
+      <p class="mt-12 text-slate-600 text-sm text-center max-w-lg">
+        Requires a browser that supports <code class="text-slate-500">SharedArrayBuffer</code> and
+        Cross-Origin Isolation. Run locally with <code class="text-slate-500">npm start</code> or
+        use the hosted version on Cloudflare Pages.
+      </p>
+    </main>
+
+  </body>
+  <script>
+    (function () {
+      const storageKey = "aqa_prelim_site_theme";
+      const root = document.documentElement;
+      const button = document.getElementById("theme-toggle");
+      const icon = document.getElementById("theme-toggle-icon");
+      const label = document.getElementById("theme-toggle-label");
+
+      const getTheme = () => {
+        try {
+          return localStorage.getItem(storageKey) === "light" ? "light" : "dark";
+        } catch (error) {
+          return "dark";
+        }
+      };
+
+      const renderTheme = (theme) => {
+        root.dataset.theme = theme;
+        icon.textContent = theme === "dark" ? "☀" : "☾";
+        label.textContent = theme === "dark" ? "Light Mode" : "Dark Mode";
+      };
+
+      let currentTheme = getTheme();
+      renderTheme(currentTheme);
+
+      button.addEventListener("click", function () {
+        currentTheme = currentTheme === "dark" ? "light" : "dark";
+        try {
+          localStorage.setItem(storageKey, currentTheme);
+        } catch (error) {}
+        renderTheme(currentTheme);
+      });
+    })();
+  </script>
+</html>
