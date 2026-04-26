@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import { createReadStream, existsSync, statSync } from "node:fs";
 import { extname, join, normalize, resolve } from "node:path";
 
-const root = resolve(".");
+const root = resolve("dist");
 const port = Number(process.env.PORT || 3000);
 
 const mimeTypes = {
@@ -102,5 +102,5 @@ const server = createServer((req, res) => {
 });
 
 server.listen(port, () => {
-  console.log(`Serving ${root} at http://localhost:${port}/index.html`);
+  console.log(`Serving ${root} at http://localhost:${port}/`);
 });
