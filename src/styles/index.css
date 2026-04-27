@@ -188,6 +188,9 @@ html[data-theme="light"] .hover\:bg-slate-600:hover { background-color: #e2e8f0 
 html[data-theme="light"] .text-sky-100 { color: #0369a1 !important; }
 html[data-theme="light"] .bg-sky-700\/60 { background-color: rgba(186, 230, 253, 0.75) !important; }
 html[data-theme="light"] .hover\:bg-slate-700\/60:hover { background-color: rgba(203, 213, 225, 0.6) !important; }
+html[data-theme="light"] .bg-slate-900\/50 { background-color: rgba(248, 251, 255, 0.92) !important; }
+html[data-theme="light"] .bg-black\/40 { background-color: rgba(241, 245, 249, 0.9) !important; }
+html[data-theme="light"] .text-emerald-300 { color: #047857 !important; }
 
 html[data-theme="light"] .icon-button { border-color: #cbd5e1; background: rgba(255, 255, 255, 0.82); color: #334155; }
 html[data-theme="light"] .icon-button:hover { border-color: #34d399; background: rgba(220, 252, 231, 0.95); color: #0f172a; }

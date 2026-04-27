@@ -4,12 +4,12 @@ import Editor, { type Monaco } from '@monaco-editor/react'
 import type { editor as MonacoEditor } from 'monaco-editor'
 import {
   buildPythonStructureModel, analyzePythonClasses, analyzePythonFunctions,
-  analyzePythonOutline, cleanCodeText, codeUsesPygame, getExpandableOutlineIds,
+  analyzePythonOutline, cleanCodeText, codeUsesPygame, codeUsesTurtle, getExpandableOutlineIds,
 } from './utils/codeAnalysis'
-import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides } from './utils/storage'
+import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides, getStoredSettings, persistSettings } from './utils/storage'
 import { triggerDownload, getBaseFileStem } from './utils/download'
 import { buildCommentExport, buildDocstringExport, getDefinitionNote, getDefaultDefinitionNote, sanitizeNoteText } from './utils/export'
-import { loadMainThreadPyodide, PYGAME_MAIN_THREAD_BOOTSTRAP } from './utils/mainThread'
+import { loadMainThreadPyodide, PYGAME_MAIN_THREAD_BOOTSTRAP, TURTLE_CANVAS_BOOTSTRAP, TURTLE_SVG_BOOTSTRAP, SVG_TURTLE_WORKER_SETUP } from './utils/mainThread'
 import {
   ensureDefaultFilesystem, getAllFiles, syncFilesFromPyodide, writeFile,
   isTextMime, guessMimeType, mountFilesToPyodide, readFilesFromPyodide,
@@ -23,6 +23,7 @@ import { RuntimeSettingsMenu } from './components/ui/RuntimeSettingsMenu'
 import { PanelVisibilityMenu } from './components/ui/PanelVisibilityMenu'
 import { DiagramFontControls } from './components/ui/DiagramFontControls'
 import { IconButton } from './components/ui/IconButton'
+import { SettingsDialog } from './components/ui/SettingsDialog'
 import { HierarchyChart } from './components/diagrams/HierarchyChart'
 import { UmlDiagram } from './components/diagrams/UmlDiagram'
 import { OutlinePanel } from './components/diagrams/OutlinePanel'
@@ -36,6 +37,7 @@ import {
 import type {
   Theme, RuntimeKey, PanelVisibility, InputRequest, SabRef, SimState, InspectorPath,
   StructureModel, DiagramModel, HierarchyModel, OutlineModel, DiagramView, VFSEntry,
+  AppSettings,
 } from './types'
 
 const MONACO_DARK_THEME: MonacoEditor.IStandaloneThemeData = {
@@ -95,9 +97,14 @@ export default function App() {
   const [activeRuntime, setActiveRuntime] = useState<RuntimeKey | ''>('')
   const [mainThreadStatus, setMainThreadStatus] = useState('Main-thread runtime is ready.')
   const [isPygameRunActive, setIsPygameRunActive] = useState(false)
+  const [isTurtleCanvasRunActive, setIsTurtleCanvasRunActive] = useState(false)
+  const [pendingRestore, setPendingRestore] = useState<(() => void) | null>(null)
+  const [turtleSvg, setTurtleSvg] = useState('')
   const [isConsolePresentationMode, setIsConsolePresentationMode] = useState(false)
   const [runtimePreference, setRuntimePreference] = useState<RuntimeKey>('trace-worker')
-  const [visiblePanels, setVisiblePanels] = useState<PanelVisibility>({ code: true, visualizer: true, diagram: true, insight: true, filesystem: true })
+  const [appSettings, setAppSettings] = useState<AppSettings>(() => getStoredSettings())
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false)
+  const [visiblePanels, setVisiblePanels] = useState<PanelVisibility>({ code: true, visualizer: true, diagram: true, notes: true, output: true, filesystem: true })
   const [activeFilesystemId, setActiveFilesystemId] = useState<string>('default')
   const [currentWorkingDir, setCurrentWorkingDir] = useState<string>('/')
   const [openFilePath, setOpenFilePath] = useState<string | null>(null)
@@ -137,6 +144,7 @@ export default function App() {
   const mainThreadStopRequestedRef = useRef<boolean>(false)
   const pygameLayoutSnapshotRef = useRef<{ visiblePanels: PanelVisibility; leftWidth: number; rightTopHeight: number; bottomLeftWidth: number } | null>(null)
   const consoleLayoutSnapshotRef = useRef<{ visiblePanels: PanelVisibility; leftWidth: number; rightTopHeight: number; bottomLeftWidth: number } | null>(null)
+  const turtleLayoutSnapshotRef = useRef<{ visiblePanels: PanelVisibility; leftWidth: number; rightTopHeight: number; bottomLeftWidth: number } | null>(null)
   const mainThreadRunIdRef = useRef(0)
   const noteDraftRef = useRef('')
   const isInsightEditingRef = useRef(false)
@@ -155,7 +163,8 @@ export default function App() {
   // ── Derived state ────────────────────────────────────────────────────────
 
   const isPygameLocked = codeUsesPygame(codeText)
-  const selectedRuntime: RuntimeKey = isPygameLocked ? 'main-thread' : runtimePreference
+  const isTurtleLocked = codeUsesTurtle(codeText) && appSettings.turtleMode === 'pyo-js-turtle'
+  const selectedRuntime: RuntimeKey = (isPygameLocked || isTurtleLocked) ? 'main-thread' : runtimePreference
   const resolvedRuntime = isRunning ? activeRuntime : selectedRuntime
   const isMainThreadRuntime = resolvedRuntime === 'main-thread'
   const isPygameCanvasRuntime = isPygameRunActive || (isMainThreadRuntime && isPygameLocked)
@@ -175,7 +184,8 @@ export default function App() {
     || (currentClass ? `${currentClass}.${currentFunc}()` : currentFunc ? `${currentFunc}()` : 'Global Scope')
   const hasCustomInsightNote = !!activeInsightDefinition && Object.prototype.hasOwnProperty.call(noteOverrides, activeInsightDefinition.key)
   const canExportNotes = structureModel.orderedDefinitions.length > 0 && hasCode
-  const hasBottomPanels = visiblePanels.diagram || visiblePanels.insight
+  const hasNotesOrOutput = visiblePanels.notes || visiblePanels.output
+  const hasBottomPanels = visiblePanels.diagram || hasNotesOrOutput
   const hasRightSidePanels = visiblePanels.visualizer || hasBottomPanels
 
   // ── Effects ──────────────────────────────────────────────────────────────
@@ -219,13 +229,14 @@ export default function App() {
     if (!editorRef.current || !visiblePanels.code) return
     const frameId = requestAnimationFrame(() => editorRef.current?.layout())
     return () => cancelAnimationFrame(frameId)
-  }, [leftWidth, rightTopHeight, bottomLeftWidth, visiblePanels.code, visiblePanels.visualizer, visiblePanels.diagram, visiblePanels.insight, visiblePanels.filesystem])
+  }, [leftWidth, rightTopHeight, bottomLeftWidth, visiblePanels.code, visiblePanels.visualizer, visiblePanels.diagram, visiblePanels.notes, visiblePanels.output, visiblePanels.filesystem])
 
   useEffect(() => {
-    if (!visiblePanels.insight) setShowExportDialog(false)
-  }, [visiblePanels.insight])
+    if (!visiblePanels.notes) setShowExportDialog(false)
+  }, [visiblePanels.notes])
 
   useEffect(() => { persistNoteOverrides(noteOverrides) }, [noteOverrides])
+  useEffect(() => { persistSettings(appSettings) }, [appSettings])
   useEffect(() => { noteDraftRef.current = noteDraft }, [noteDraft])
   useEffect(() => { isInsightEditingRef.current = isInsightEditing }, [isInsightEditing])
 
@@ -633,7 +644,7 @@ export default function App() {
       pygameLayoutSnapshotRef.current = { visiblePanels: { ...visiblePanels }, leftWidth, rightTopHeight, bottomLeftWidth }
     }
     setShowExportDialog(false)
-    setVisiblePanels({ code: false, visualizer: false, diagram: true, insight: true, filesystem: false })
+    setVisiblePanels({ code: false, visualizer: false, diagram: true, notes: false, output: true, filesystem: false })
     setBottomLeftWidth(74)
     setIsPygameRunActive(true)
   }
@@ -654,7 +665,7 @@ export default function App() {
       consoleLayoutSnapshotRef.current = { visiblePanels: { ...visiblePanels }, leftWidth, rightTopHeight, bottomLeftWidth }
     }
     setShowExportDialog(false)
-    setVisiblePanels({ code: false, visualizer: false, diagram: false, insight: true, filesystem: false })
+    setVisiblePanels({ code: false, visualizer: false, diagram: false, notes: false, output: true, filesystem: false })
     setIsConsolePresentationMode(true)
   }
 
@@ -662,6 +673,27 @@ export default function App() {
     setIsConsolePresentationMode(false)
     const snapshot = consoleLayoutSnapshotRef.current
     consoleLayoutSnapshotRef.current = null
+    if (!snapshot) return
+    setVisiblePanels(snapshot.visiblePanels)
+    setLeftWidth(snapshot.leftWidth)
+    setRightTopHeight(snapshot.rightTopHeight)
+    setBottomLeftWidth(snapshot.bottomLeftWidth)
+  }
+
+  const enterTurtleCanvasPresentationMode = () => {
+    if (!turtleLayoutSnapshotRef.current) {
+      turtleLayoutSnapshotRef.current = { visiblePanels: { ...visiblePanels }, leftWidth, rightTopHeight, bottomLeftWidth }
+    }
+    setShowExportDialog(false)
+    setVisiblePanels({ code: false, visualizer: false, diagram: true, notes: false, output: true, filesystem: false })
+    setBottomLeftWidth(74)
+    setIsTurtleCanvasRunActive(true)
+  }
+
+  const restoreTurtleCanvasPresentationMode = () => {
+    setIsTurtleCanvasRunActive(false)
+    const snapshot = turtleLayoutSnapshotRef.current
+    turtleLayoutSnapshotRef.current = null
     if (!snapshot) return
     setVisiblePanels(snapshot.visiblePanels)
     setLeftWidth(snapshot.leftWidth)
@@ -714,6 +746,7 @@ export default function App() {
 
   const startTraceWorker = async (runMode = false) => {
     if (!hasSab || !hasCode) return
+    setPendingRestore(null)
     await saveCurrentToVFS()
     const vfsFiles = await getAllFiles(activeFilesystemId)
     const capturedFsId = activeFilesystemId
@@ -736,6 +769,7 @@ export default function App() {
     worker.onmessage = (e: MessageEvent) => {
       const data = e.data
       if (data.type === 'trace') {
+        if (data.turtleSvg) { setTurtleSvg(data.turtleSvg); setDiagramView('turtle') }
         if (workerRunModeRef.current) {
           sendTraceCommand(TRACE_CMD_CONTINUE)
         } else {
@@ -755,27 +789,40 @@ export default function App() {
         setOutputLog(prev => prev + '\n[ERROR] ' + data.error + '\n')
         setInputRequest(null); setInputValue(''); setIsRunning(false); setActiveRuntime('')
         setCodeStatus('Worker runtime failed.')
-        if (workerRunModeRef.current) { restoreConsolePresentationMode(); workerRunModeRef.current = false }
+        if (workerRunModeRef.current) {
+          setPendingRestore(() => restoreConsolePresentationMode)
+          workerRunModeRef.current = false
+        }
         workerRef.current = null; sabRef.current = null
       } else if (data.type === 'done') {
         if (data.files?.length) {
           void syncFilesFromPyodide(capturedFsId, data.files).then(() => setVfsReloadTrigger(t => t + 1))
         }
+        if (data.turtleSvg) { setTurtleSvg(data.turtleSvg); setDiagramView('turtle') }
         const label = workerRunModeRef.current ? '[RUN FINISHED]' : '[TRACE RUN FINISHED]'
         setOutputLog(prev => prev + `\n${label}\n`)
         setInputRequest(null); setInputValue(''); setIsRunning(false); setActiveRuntime('')
         setCurrentLine(-1)
         setCodeStatus(workerRunModeRef.current ? 'Worker runtime finished.' : 'Trace-worker runtime finished.')
-        if (workerRunModeRef.current) { restoreConsolePresentationMode(); workerRunModeRef.current = false }
+        if (workerRunModeRef.current) {
+          setPendingRestore(() => restoreConsolePresentationMode)
+          workerRunModeRef.current = false
+        }
         workerRef.current = null; sabRef.current = null
+      } else if (data.type === 'turtle_update') {
+        setTurtleSvg(data.svg || '')
+        setDiagramView('turtle')
       }
     }
 
-    worker.postMessage({ type: 'init', sab: sabRef.current.sab, code: codeText, files: vfsFiles, cwd: capturedCwd })
+    const hasTurtle = codeUsesTurtle(codeText)
+    const svgTurtleBootstrap = hasTurtle && appSettings.turtleMode === 'basthon-svg' ? SVG_TURTLE_WORKER_SETUP : ''
+    worker.postMessage({ type: 'init', sab: sabRef.current.sab, code: codeText, files: vfsFiles, cwd: capturedCwd, svgTurtleBootstrap })
   }
 
   const startMainThreadRun = async () => {
     if (!hasCode) return
+    setPendingRestore(null)
     await saveCurrentToVFS()
     const vfsFiles = await getAllFiles(activeFilesystemId)
     const capturedFsId = activeFilesystemId
@@ -783,13 +830,28 @@ export default function App() {
 
     const runId = ++mainThreadRunIdRef.current
     const shouldRunPygame = codeUsesPygame(codeText)
+    const shouldRunTurtle = !shouldRunPygame && codeUsesTurtle(codeText)
+    const turtleMode = shouldRunTurtle ? appSettings.turtleMode : null
+    const shouldRunTurtleCanvas = turtleMode === 'pyo-js-turtle'
+    const shouldRunTurtleSvg = turtleMode === 'basthon-svg'
+
     mainThreadStopRequestedRef.current = false
-    if (shouldRunPygame) enterPygamePresentationMode(); else enterConsolePresentationMode()
+    if (shouldRunPygame) enterPygamePresentationMode()
+    else if (shouldRunTurtleCanvas) enterTurtleCanvasPresentationMode()
+    else enterConsolePresentationMode()
+
     resetExecutionState()
-    if (shouldRunPygame) clearMainThreadCanvas()
+    if (shouldRunPygame || shouldRunTurtleCanvas) clearMainThreadCanvas()
     setIsRunning(true); setActiveRuntime('main-thread')
     setCodeStatus('Main-thread runtime starting...')
-    setMainThreadStatus(shouldRunPygame ? 'Loading Pyodide 0.29.3 and pygame-ce on the main thread...' : 'Loading Pyodide 0.29.3 on the main thread...')
+    setMainThreadStatus(
+      shouldRunPygame ? 'Loading Pyodide 0.29.3 and pygame-ce on the main thread...' :
+      shouldRunTurtleCanvas ? 'Loading Pyodide 0.29.3 for turtle canvas...' :
+      'Loading Pyodide 0.29.3 on the main thread...'
+    )
+
+    const turtlePendingKeys: string[] = []
+    let turtleKeyListener: ((e: KeyboardEvent) => void) | null = null
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let pyodide: any = null
@@ -811,26 +873,65 @@ export default function App() {
         pyodide.canvas.setCanvas2D(canvas)
         focusMainThreadCanvas()
         startMainThreadCanvasWatcher()
+      } else if (shouldRunTurtleCanvas) {
+        ensureMainThreadCanvas()
+        focusMainThreadCanvas()
+        startMainThreadCanvasWatcher()
       }
 
       setMainThreadStatus(shouldRunPygame ? 'Loading pygame dependencies from imports...' : 'Loading packages from imports...')
-      await pyodide.loadPackagesFromImports(codeText)
+      if (!shouldRunTurtleCanvas && !shouldRunTurtleSvg) {
+        await pyodide.loadPackagesFromImports(codeText)
+      }
       if (runId !== mainThreadRunIdRef.current) return
 
-      setMainThreadStatus(shouldRunPygame ? 'Preparing pygame for browser execution...' : 'Executing code on the main thread...')
-      const execGlobals = pyodide.toPy({
+      setMainThreadStatus(
+        shouldRunPygame ? 'Preparing pygame for browser execution...' :
+        shouldRunTurtleCanvas ? 'Running turtle canvas program...' :
+        shouldRunTurtleSvg ? 'Running turtle SVG program...' :
+        'Executing code on the main thread...'
+      )
+
+      const execGlobalsObj: Record<string, unknown> = {
         __name__: '__main__',
         __coder_user_code__: codeText,
         js_input_prompt: (promptText: string) => window.prompt(promptText ?? '') ?? '',
         js_should_stop_main_thread: () => Boolean(mainThreadStopRequestedRef.current),
         js_set_main_thread_status: (message: string) => setMainThreadStatus(String(message ?? '')),
         js_append_main_thread_log: (message: string) => setOutputLog(prev => prev + String(message ?? '') + '\n'),
-      })
+      }
+      if (shouldRunTurtleCanvas) {
+        execGlobalsObj.js_turtle_canvas_id = 'canvas'
+        execGlobalsObj.js_turtle_resize = (w: number, h: number) => {
+          const canvas = mainThreadCanvasRef.current
+          if (canvas) { canvas.width = w; canvas.height = h }
+        }
+        execGlobalsObj.js_turtle_listen = () => {
+          const canvas = mainThreadCanvasRef.current
+          if (!canvas) return
+          turtleKeyListener = (e: KeyboardEvent) => { turtlePendingKeys.push(e.key); e.preventDefault() }
+          canvas.addEventListener('keydown', turtleKeyListener)
+          canvas.focus()
+        }
+        execGlobalsObj.js_turtle_poll_keys = () => pyodide.toPy(turtlePendingKeys.splice(0))
+      }
+      if (shouldRunTurtleSvg) {
+        execGlobalsObj.js_turtle_update_svg = (svg: string) => {
+          const svgStr = String(svg ?? '')
+          setTurtleSvg(svgStr)
+          if (svgStr) setDiagramView('turtle')
+        }
+      }
+      const execGlobals = pyodide.toPy(execGlobalsObj)
 
       try {
         if (shouldRunPygame) {
           await pyodide.loadPackage('pygame-ce')
           await pyodide.runPythonAsync(PYGAME_MAIN_THREAD_BOOTSTRAP, { globals: execGlobals })
+        } else if (shouldRunTurtleCanvas) {
+          await pyodide.runPythonAsync(TURTLE_CANVAS_BOOTSTRAP, { globals: execGlobals })
+        } else if (shouldRunTurtleSvg) {
+          await pyodide.runPythonAsync(TURTLE_SVG_BOOTSTRAP, { globals: execGlobals })
         } else {
           await pyodide.runPythonAsync(`
 import builtins
@@ -840,10 +941,14 @@ code_obj = compile(__coder_user_code__, "simulation.py", "exec")
 exec(code_obj, globals())
           `, { globals: execGlobals })
         }
-      } finally { execGlobals.destroy?.() }
+      } finally {
+        execGlobals.destroy?.()
+        if (turtleKeyListener && mainThreadCanvasRef.current) {
+          mainThreadCanvasRef.current.removeEventListener('keydown', turtleKeyListener)
+        }
+      }
 
       if (runId !== mainThreadRunIdRef.current) return
-      // Sync FS back
       if (pyodide) {
         try {
           const updatedFiles = readFilesFromPyodide(pyodide, vfsFiles.map(f => f.path), capturedCwd)
@@ -853,8 +958,8 @@ exec(code_obj, globals())
       }
       const wasStopRequested = Boolean(mainThreadStopRequestedRef.current)
       setOutputLog(prev => prev + (wasStopRequested ? '\n[MAIN-THREAD RUN STOPPED]\n' : '\n[MAIN-THREAD RUN FINISHED]\n'))
-      setCodeStatus(wasStopRequested ? 'Main-thread pygame runtime stopped.' : 'Main-thread runtime finished.')
-      setMainThreadStatus(wasStopRequested ? 'Main-thread pygame run stopped.' : 'Main-thread run finished.')
+      setCodeStatus(wasStopRequested ? 'Main-thread runtime stopped.' : 'Main-thread runtime finished.')
+      setMainThreadStatus(wasStopRequested ? 'Main-thread run stopped.' : 'Main-thread run finished.')
       setIsRunning(false); setActiveRuntime('')
     } catch (error) {
       if (runId !== mainThreadRunIdRef.current) return
@@ -871,9 +976,11 @@ exec(code_obj, globals())
       setIsRunning(false); setActiveRuntime('')
     } finally {
       mainThreadStopRequestedRef.current = false
-      stopMainThreadCanvasWatcher({ restoreSnapshot: shouldRunPygame })
-      if (shouldRunPygame) restorePygamePresentationMode()
-      else restoreConsolePresentationMode()
+      stopMainThreadCanvasWatcher({ restoreSnapshot: shouldRunPygame || shouldRunTurtleCanvas })
+      const restore = shouldRunPygame ? restorePygamePresentationMode
+        : shouldRunTurtleCanvas ? restoreTurtleCanvasPresentationMode
+        : restoreConsolePresentationMode
+      setPendingRestore(() => restore)
     }
   }
 
@@ -905,12 +1012,15 @@ exec(code_obj, globals())
     if (workerRef.current) {
       workerRef.current.terminate(); workerRef.current = null; sabRef.current = null
       setCodeStatus('Worker runtime stopped.')
-      if (workerRunModeRef.current) { restoreConsolePresentationMode(); workerRunModeRef.current = false }
+      if (workerRunModeRef.current) {
+        setPendingRestore(() => restoreConsolePresentationMode)
+        workerRunModeRef.current = false
+      }
     } else if (activeRuntime === 'main-thread') {
-      if (isPygameRunActive) {
+      if (isPygameRunActive || isTurtleCanvasRunActive) {
         mainThreadStopRequestedRef.current = true
-        setOutputLog(prev => prev + '\n[INFO] Stop requested for main-thread pygame run.\n')
-        setMainThreadStatus('Stopping pygame run...')
+        setOutputLog(prev => prev + '\n[INFO] Stop requested for main-thread run.\n')
+        setMainThreadStatus('Stopping main-thread run...')
         return
       }
       setOutputLog(prev => prev + '\n[INFO] Force stop is not available in main-thread mode yet.\n')
@@ -938,12 +1048,18 @@ exec(code_obj, globals())
           <PanelVisibilityMenu menuRef={panelMenuRef} isOpen={isPanelMenuOpen}
             onToggleOpen={() => { setIsRuntimeMenuOpen(false); setIsPanelMenuOpen(o => !o) }}
             panelOptions={PANEL_OPTIONS} visiblePanels={visiblePanels} onTogglePanel={togglePanelVisibility}
-            buttonHoverClass="hover:border-emerald-400" checkboxAccent="#34d399" disabled={isPygameRunActive || isConsolePresentationMode} />
+            buttonHoverClass="hover:border-emerald-400" checkboxAccent="#34d399" disabled={isPygameRunActive || isConsolePresentationMode || isTurtleCanvasRunActive} />
           <RuntimeSettingsMenu menuRef={runtimeMenuRef} isOpen={isRuntimeMenuOpen}
             onToggleOpen={() => { setIsPanelMenuOpen(false); setIsRuntimeMenuOpen(o => !o) }}
             runtimePreference={runtimePreference} selectedRuntime={selectedRuntime}
             onSelectRuntime={key => { setRuntimePreference(key); setIsRuntimeMenuOpen(false) }}
-            isPygameLocked={isPygameLocked} hasSab={hasSab} disabled={isRunning} />
+            isPygameLocked={isPygameLocked || isTurtleLocked} hasSab={hasSab} disabled={isRunning} />
+          <button type="button" title="Settings" onClick={() => setIsSettingsOpen(true)}
+            className="rounded border border-slate-600 p-1.5 text-slate-400 hover:border-slate-400 hover:text-slate-200 transition-colors">
+            <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065zM15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+          </button>
           <ThemeToggleButton theme={theme} onToggle={toggleTheme} />
 
           {!isRunning ? (
@@ -1030,10 +1146,10 @@ exec(code_obj, globals())
         </div>
       )}
 
-      {/* Pygame banner */}
-      {isPygameRunActive && (
+      {/* Pygame / turtle canvas banner */}
+      {(isPygameRunActive || isTurtleCanvasRunActive) && (
         <div className="flex-shrink-0 border-b border-sky-700 bg-sky-950/80 px-5 py-2 text-sm text-sky-100 shadow-md">
-          pygame is running in the main page thread. Debugging and live inspection are disabled while it runs. Click inside the canvas panel to focus keyboard controls.
+          {isPygameRunActive ? 'pygame' : 'turtle'} is running in the main page thread. Debugging and live inspection are disabled while it runs. Click inside the canvas panel to focus keyboard controls.
         </div>
       )}
 
@@ -1051,6 +1167,18 @@ exec(code_obj, globals())
             onKeyDown={e => { if (e.key === 'Enter') handleInputSubmit() }} />
           <button onClick={() => handleInputSubmit()} className="flex-shrink-0 bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-1.5 rounded font-semibold text-sm transition-colors">Submit</button>
           <button onClick={forceStop} className="flex-shrink-0 bg-slate-700 hover:bg-slate-600 text-red-400 hover:text-red-300 border border-slate-600 px-4 py-1.5 rounded font-semibold text-sm transition-colors">Cancel / Stop</button>
+        </div>
+      )}
+
+      {/* Post-run return bar */}
+      {pendingRestore && (
+        <div
+          className="flex-shrink-0 flex items-center justify-between border-b border-emerald-600/50 bg-emerald-900/30 px-5 py-2.5 cursor-pointer hover:bg-emerald-900/50 transition-colors"
+          onClick={() => { pendingRestore(); setPendingRestore(null) }}
+          role="button"
+        >
+          <span className="text-sm text-emerald-100">Execution ended — click here to return to the editor.</span>
+          <span className="flex-shrink-0 rounded border border-emerald-600/60 px-3 py-0.5 text-xs font-semibold text-emerald-300">Return to editor</span>
         </div>
       )}
 
@@ -1107,7 +1235,12 @@ exec(code_obj, globals())
                     </IconButton>
                     <IconButton title="Save to virtual filesystem" onClick={() => void handleSaveCode()} disabled={!hasCode || isRunning}>
                       <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2zM17 21v-8H7v8M7 3v5h8" />
+                      </svg>
+                    </IconButton>
+                    <IconButton title="Download to OS filesystem" onClick={() => triggerDownload(codeFileName, codeText, 'text/x-python;charset=utf-8')} disabled={!hasCode}>
+                      <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                       </svg>
                     </IconButton>
                     <IconButton title="Clear all breakpoints" onClick={() => { breakpointsRef.current = new Set(); setBreakpoints(new Set()) }} disabled={breakpoints.size === 0}>
@@ -1214,24 +1347,24 @@ exec(code_obj, globals())
                 {/* PANEL 3: Structure / Canvas */}
                 {visiblePanels.diagram && (
                   <div className="bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden flex-shrink-0"
-                    style={{ width: visiblePanels.insight ? `calc(${bottomLeftWidth}% - 6px)` : '100%' }}>
+                    style={{ width: hasNotesOrOutput ? `calc(${bottomLeftWidth}% - 6px)` : '100%' }}>
                     <div className="bg-slate-900 py-2 px-4 border-b border-slate-700">
                       <div className="flex items-center justify-between gap-2">
                         <div className="font-bold uppercase tracking-wider text-xs text-emerald-400">
-                          {isPygameRunActive ? 'Pygame Canvas' : 'Structure Diagram'}
+                          {isPygameRunActive ? 'Pygame Canvas' : isTurtleCanvasRunActive ? 'Turtle Canvas' : 'Structure Diagram'}
                         </div>
                         <div className="flex items-center gap-3">
-                          {!isPygameRunActive && (
+                          {!isPygameRunActive && !isTurtleCanvasRunActive && (
                             <div className="flex rounded overflow-hidden border border-slate-700 text-[11px]">
-                              {(['hierarchy', 'outline', 'uml'] as DiagramView[]).map(view => (
+                              {(['hierarchy', 'outline', 'uml', ...(turtleSvg ? ['turtle'] : [])] as DiagramView[]).map(view => (
                                 <button key={view} onClick={() => setDiagramView(view)}
                                   className={`px-3 py-1 ${diagramView === view ? 'bg-emerald-700 text-white' : 'bg-slate-800 text-slate-300'}`}>
-                                  {view === 'hierarchy' ? 'Hierarchy' : view === 'outline' ? 'Outline' : 'Class Diagram'}
+                                  {view === 'hierarchy' ? 'Hierarchy' : view === 'outline' ? 'Outline' : view === 'uml' ? 'Class Diagram' : 'Turtle SVG'}
                                 </button>
                               ))}
                             </div>
                           )}
-                          {!isPygameRunActive && diagramView !== 'outline' && (
+                          {!isPygameRunActive && !isTurtleCanvasRunActive && diagramView !== 'outline' && diagramView !== 'turtle' && (
                             <div className="flex flex-col items-end gap-1">
                               <div className="text-[10px] uppercase tracking-wider text-slate-500">Font</div>
                               <DiagramFontControls fontSize={diagramFontSize} onDecrease={decreaseDiagramFontSize} onIncrease={increaseDiagramFontSize}
@@ -1241,155 +1374,174 @@ exec(code_obj, globals())
                         </div>
                       </div>
                     </div>
-                    <div className="flex-1 overflow-auto p-4">
-                      {isPygameRunActive ? (
-                        <div className="mx-auto flex h-full w-full max-w-6xl flex-col">
-                          <div className="flex-1 rounded-xl border border-slate-600 bg-slate-950/80 p-4">
-                            <canvas id="canvas" ref={mainThreadCanvasRef}
-                              className="mx-auto block max-h-full max-w-full rounded bg-slate-950"
-                              style={{ imageRendering: 'pixelated', outline: 'none' }}
-                              onPointerDown={() => mainThreadCanvasRef.current?.focus()} />
+                    <div className="flex-1 overflow-auto p-4 relative">
+                      {/* Canvas always in DOM so ref is valid on re-run; hidden via CSS when inactive */}
+                      <div className={`mx-auto flex h-full w-full max-w-6xl flex-col ${!(isPygameRunActive || isTurtleCanvasRunActive) ? 'hidden' : ''}`}>
+                        <div className="flex-1 rounded-xl border border-slate-600 bg-slate-950/80 p-4">
+                          <canvas id="canvas" ref={mainThreadCanvasRef}
+                            className="mx-auto block max-h-full max-w-full rounded bg-slate-950"
+                            style={{ imageRendering: 'pixelated', outline: 'none' }}
+                            onPointerDown={() => mainThreadCanvasRef.current?.focus()} />
+                        </div>
+                      </div>
+                      {!(isPygameRunActive || isTurtleCanvasRunActive) && (
+                        diagramView === 'turtle' ? (
+                          <div className="mx-auto h-full min-h-[280px] min-w-[320px] flex items-start justify-center">
+                            <div dangerouslySetInnerHTML={{ __html: turtleSvg }} className="max-w-full" />
                           </div>
-                        </div>
-                      ) : (
-                        <div className="mx-auto h-full min-h-[280px] min-w-[320px]">
-                          {diagramView === 'uml' ? (
-                            <UmlDiagram currentClass={currentClass} diagramModel={diagramModel} fontSize={diagramFontSize} />
-                          ) : diagramView === 'outline' ? (
-                            <OutlinePanel outlineModel={outlineModel} expandedIds={outlineExpandedIds}
-                              setExpandedIds={setOutlineExpandedIds} onJumpToLine={jumpToSourceLine} currentLine={currentLine} />
-                          ) : (
-                            <HierarchyChart currentFunc={currentFunc} hierarchyModel={hierarchyModel} fontSize={diagramFontSize} />
-                          )}
-                        </div>
+                        ) : (
+                          <div className="mx-auto h-full min-h-[280px] min-w-[320px]">
+                            {diagramView === 'uml' ? (
+                              <UmlDiagram currentClass={currentClass} diagramModel={diagramModel} fontSize={diagramFontSize} />
+                            ) : diagramView === 'outline' ? (
+                              <OutlinePanel outlineModel={outlineModel} expandedIds={outlineExpandedIds}
+                                setExpandedIds={setOutlineExpandedIds} onJumpToLine={jumpToSourceLine} currentLine={currentLine} />
+                            ) : (
+                              <HierarchyChart currentFunc={currentFunc} hierarchyModel={hierarchyModel} fontSize={diagramFontSize} />
+                            )}
+                          </div>
+                        )
                       )}
                     </div>
                   </div>
                 )}
 
                 {/* Resize handle: Panel 3 ↔ Panel 4 */}
-                {visiblePanels.diagram && visiblePanels.insight && (
+                {visiblePanels.diagram && hasNotesOrOutput && (
                   <div className="resize-handle-col" onMouseDown={e => { e.preventDefault(); resizeDragRef.current = 'col-bottom'; document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none' }}>
                     <div className="resize-bar" style={{ width: '3px', height: '48px' }} />
                   </div>
                 )}
 
                 {/* PANEL 4: Notes + Output */}
-                {visiblePanels.insight && (
-                  <div className="bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden flex-1">
-                    <div className="flex bg-slate-900 border-b border-slate-700">
-                      {(isPygameRunActive || isConsolePresentationMode) ? (
-                        <div className="w-full py-2 px-4 font-bold uppercase tracking-wider text-teal-400 text-xs">Console Output</div>
-                      ) : (
-                        <>
-                          <div className="py-2 px-4 font-bold uppercase tracking-wider text-emerald-400 text-xs border-r border-slate-700 w-1/2">Documentation Notes</div>
-                          <div className="py-2 px-4 font-bold uppercase tracking-wider text-teal-400 text-xs w-1/2">Console Output</div>
-                        </>
-                      )}
-                    </div>
+                {hasNotesOrOutput && (() => {
+                  const inPresentationMode = isPygameRunActive || isConsolePresentationMode || isTurtleCanvasRunActive
+                  const showNotes = visiblePanels.notes && !inPresentationMode
+                  const showOutput = visiblePanels.output
+                  const notesWidth = showNotes && showOutput ? 'w-1/2' : 'w-full'
+                  const outputWidth = showNotes && showOutput ? 'w-1/2' : 'w-full'
+                  return (
+                    <div className="bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden flex-1">
+                      <div className="flex bg-slate-900 border-b border-slate-700">
+                        {showNotes && (
+                          <div className={`py-2 px-4 font-bold uppercase tracking-wider text-emerald-400 text-xs ${showOutput ? 'border-r border-slate-700 w-1/2' : 'w-full'}`}>
+                            Documentation Notes
+                          </div>
+                        )}
+                        {showOutput && (
+                          <div className={`py-2 px-4 font-bold uppercase tracking-wider text-teal-400 text-xs ${showNotes ? 'w-1/2' : 'w-full'}`}>
+                            Console Output
+                          </div>
+                        )}
+                      </div>
 
-                    <div className="flex-1 flex overflow-hidden">
-                      {/* Notes panel */}
-                      {!isPygameRunActive && !isConsolePresentationMode && (
-                        <div className="relative flex w-1/2 min-h-0 flex-col border-r border-slate-700 bg-slate-800/50 p-4">
-                          <div className="flex items-start justify-between gap-3">
-                            <div>
-                              <h3 className="text-sm font-bold text-white mb-1">{activeInsightHeading}</h3>
-                              <div className="text-[11px] uppercase tracking-wider text-slate-500">
-                                {activeInsightKey ? (hasCustomInsightNote ? 'Custom Note' : 'Default Note') : 'Documentation Notes'}
+                      <div className="flex-1 flex overflow-hidden">
+                        {/* Notes panel */}
+                        {showNotes && (
+                          <div className={`relative flex ${notesWidth} min-h-0 flex-col ${showOutput ? 'border-r border-slate-700' : ''} bg-slate-800/50 p-4`}>
+                            <div className="flex items-start justify-between gap-3">
+                              <div>
+                                <h3 className="text-sm font-bold text-white mb-1">{activeInsightHeading}</h3>
+                                <div className="text-[11px] uppercase tracking-wider text-slate-500">
+                                  {activeInsightKey ? (hasCustomInsightNote ? 'Custom Note' : 'Default Note') : 'Documentation Notes'}
+                                </div>
                               </div>
-                            </div>
-                            <div className="flex items-center gap-2">
-                              {!isInsightEditing ? (
-                                <IconButton title="Edit note" onClick={beginEditingInsightNote} disabled={!activeInsightKey}>
+                              <div className="flex items-center gap-2">
+                                {!isInsightEditing ? (
+                                  <IconButton title="Edit note" onClick={beginEditingInsightNote} disabled={!activeInsightKey}>
+                                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.232 5.232l3.536 3.536M9 13l6.232-6.232a2.5 2.5 0 113.536 3.536L12.536 16.536A4 4 0 019.707 17.707L7 18l.293-2.707A4 4 0 018.464 12.536L14.696 6.304" />
+                                    </svg>
+                                  </IconButton>
+                                ) : (
+                                  <IconButton title="Save note" onClick={() => saveInsightNote(activeInsightKey, noteDraft, true)} disabled={!activeInsightKey}>
+                                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                  </IconButton>
+                                )}
+                                <IconButton title="Reset note to original" onClick={resetInsightNote} disabled={!activeInsightKey}>
                                   <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.232 5.232l3.536 3.536M9 13l6.232-6.232a2.5 2.5 0 113.536 3.536L12.536 16.536A4 4 0 019.707 17.707L7 18l.293-2.707A4 4 0 018.464 12.536L14.696 6.304" />
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h5M20 20v-5h-5M5.64 18.36A9 9 0 1020 12" />
                                   </svg>
                                 </IconButton>
+                                <IconButton title="Export notes" onClick={() => setShowExportDialog(true)} disabled={!canExportNotes}>
+                                  <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 16V4m0 12l4-4m-4 4l-4-4M5 20h14" />
+                                  </svg>
+                                </IconButton>
+                              </div>
+                            </div>
+
+                            <div className="mt-4 flex min-h-0 flex-1 flex-col">
+                              {isInsightEditing ? (
+                                <textarea value={noteDraft} onChange={e => setNoteDraft(e.target.value)}
+                                  className="insight-note-editor min-h-0 flex-1"
+                                  placeholder="Write your revision note for this definition..." />
                               ) : (
-                                <IconButton title="Save note" onClick={() => saveInsightNote(activeInsightKey, noteDraft, true)} disabled={!activeInsightKey}>
-                                  <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
-                                  </svg>
-                                </IconButton>
-                              )}
-                              <IconButton title="Reset note to original" onClick={resetInsightNote} disabled={!activeInsightKey}>
-                                <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h5M20 20v-5h-5M5.64 18.36A9 9 0 1020 12" />
-                                </svg>
-                              </IconButton>
-                              <IconButton title="Export notes" onClick={() => setShowExportDialog(true)} disabled={!canExportNotes}>
-                                <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 16V4m0 12l4-4m-4 4l-4-4M5 20h14" />
-                                </svg>
-                              </IconButton>
-                            </div>
-                          </div>
-
-                          <div className="mt-4 flex min-h-0 flex-1 flex-col">
-                            {isInsightEditing ? (
-                              <textarea value={noteDraft} onChange={e => setNoteDraft(e.target.value)}
-                                className="insight-note-editor min-h-0 flex-1"
-                                placeholder="Write your revision note for this definition..." />
-                            ) : (
-                              <p className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap text-slate-300 leading-relaxed">
-                                {activeInsightText || 'No note is available for this definition yet.'}
-                              </p>
-                            )}
-                            <div className="mt-3 text-[11px] text-slate-500">
-                              {isInsightEditing
-                                ? 'Saves automatically if execution moves to another definition or the program stops.'
-                                : activeInsightKey
-                                  ? hasCustomInsightNote ? 'Your saved note is shown here.' : 'The built-in note is shown until you save your own version.'
-                                  : 'Start tracing to attach documentation notes to live execution points.'}
-                            </div>
-                          </div>
-
-                          {showExportDialog && (
-                            <div className="export-modal-backdrop" onClick={() => setShowExportDialog(false)}>
-                              <div className="export-modal-card" onClick={e => e.stopPropagation()}>
-                                <div className="text-sm font-bold text-white">Export Notes</div>
-                                <p className="mt-2 text-sm text-slate-300 leading-relaxed">
-                                  Choose a plain text revision outline or an annotated Python file with your notes inserted as docstrings.
+                                <p className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap text-slate-300 leading-relaxed">
+                                  {activeInsightText || 'No note is available for this definition yet.'}
                                 </p>
-                                <div className="mt-4 flex flex-col gap-3">
-                                  <button type="button" onClick={() => downloadNotesExport('comments')}
-                                    className="rounded border border-slate-600 bg-slate-900 px-4 py-3 text-left transition-colors hover:border-emerald-400">
-                                    <div className="font-semibold text-slate-200">Comments Only</div>
-                                    <div className="mt-1 text-xs text-slate-400">Exports class and function interfaces with the notes listed underneath in code order.</div>
-                                  </button>
-                                  <button type="button" onClick={() => downloadNotesExport('docstrings')}
-                                    className="rounded border border-slate-600 bg-slate-900 px-4 py-3 text-left transition-colors hover:border-emerald-400">
-                                    <div className="font-semibold text-slate-200">Docstrings</div>
-                                    <div className="mt-1 text-xs text-slate-400">Exports the current Python code with each note inserted as a function docstring.</div>
-                                  </button>
-                                </div>
-                                <div className="mt-4 flex justify-end">
-                                  <button type="button" onClick={() => setShowExportDialog(false)}
-                                    className="rounded border border-slate-600 px-3 py-1.5 text-sm font-semibold text-slate-300 transition-colors hover:border-slate-400">
-                                    Cancel
-                                  </button>
-                                </div>
+                              )}
+                              <div className="mt-3 text-[11px] text-slate-500">
+                                {isInsightEditing
+                                  ? 'Saves automatically if execution moves to another definition or the program stops.'
+                                  : activeInsightKey
+                                    ? hasCustomInsightNote ? 'Your saved note is shown here.' : 'The built-in note is shown until you save your own version.'
+                                    : 'Start tracing to attach documentation notes to live execution points.'}
                               </div>
                             </div>
-                          )}
-                        </div>
-                      )}
 
-                      {/* Console output */}
-                      <div className={`${(isPygameRunActive || isConsolePresentationMode) ? 'w-full' : 'w-1/2'} flex flex-col overflow-hidden bg-slate-900/40 p-3`}>
-                        <div ref={outputRef} className="flex-1 overflow-y-auto font-mono text-xs leading-relaxed text-slate-300 whitespace-pre-wrap break-words">
-                          {outputLog || <span className="text-slate-500 italic">Console output will appear here.</span>}
-                        </div>
+                            {showExportDialog && (
+                              <div className="export-modal-backdrop" onClick={() => setShowExportDialog(false)}>
+                                <div className="export-modal-card" onClick={e => e.stopPropagation()}>
+                                  <div className="text-sm font-bold text-white">Export Notes</div>
+                                  <p className="mt-2 text-sm text-slate-300 leading-relaxed">
+                                    Choose a plain text revision outline or an annotated Python file with your notes inserted as docstrings.
+                                  </p>
+                                  <div className="mt-4 flex flex-col gap-3">
+                                    <button type="button" onClick={() => downloadNotesExport('comments')}
+                                      className="rounded border border-slate-600 bg-slate-900 px-4 py-3 text-left transition-colors hover:border-emerald-400">
+                                      <div className="font-semibold text-slate-200">Comments Only</div>
+                                      <div className="mt-1 text-xs text-slate-400">Exports class and function interfaces with the notes listed underneath in code order.</div>
+                                    </button>
+                                    <button type="button" onClick={() => downloadNotesExport('docstrings')}
+                                      className="rounded border border-slate-600 bg-slate-900 px-4 py-3 text-left transition-colors hover:border-emerald-400">
+                                      <div className="font-semibold text-slate-200">Docstrings</div>
+                                      <div className="mt-1 text-xs text-slate-400">Exports the current Python code with each note inserted as a function docstring.</div>
+                                    </button>
+                                  </div>
+                                  <div className="mt-4 flex justify-end">
+                                    <button type="button" onClick={() => setShowExportDialog(false)}
+                                      className="rounded border border-slate-600 px-3 py-1.5 text-sm font-semibold text-slate-300 transition-colors hover:border-slate-400">
+                                      Cancel
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Console output */}
+                        {showOutput && (
+                          <div className={`${outputWidth} flex flex-col overflow-hidden bg-slate-900/40 p-3`}>
+                            <div ref={outputRef} className="flex-1 overflow-y-auto font-mono text-xs leading-relaxed text-slate-300 whitespace-pre-wrap break-words">
+                              {outputLog || <span className="text-slate-500 italic">Console output will appear here.</span>}
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </div>
-                  </div>
-                )}
+                  )
+                })()}
               </div>
             )}
           </div>
         )}
       </div>
+
+      <SettingsDialog isOpen={isSettingsOpen} settings={appSettings} onClose={() => setIsSettingsOpen(false)} onSettingsChange={setAppSettings} />
 
       {/* Code file save dialog */}
       {showCodeSaveDialog && pendingCodeLoad && (

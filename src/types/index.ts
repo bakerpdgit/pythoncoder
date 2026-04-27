@@ -1,12 +1,18 @@
 export type Theme = 'dark' | 'light'
 export type RuntimeKey = 'trace-worker' | 'main-thread'
-export type DiagramView = 'hierarchy' | 'outline' | 'uml'
+export type DiagramView = 'hierarchy' | 'outline' | 'uml' | 'turtle'
+export type TurtleMode = 'pyo-js-turtle' | 'basthon-svg'
+
+export interface AppSettings {
+  turtleMode: TurtleMode
+}
 
 export interface PanelVisibility {
   code: boolean
   visualizer: boolean
   diagram: boolean
-  insight: boolean
+  notes: boolean
+  output: boolean
   filesystem: boolean
 }
 
@@ -173,11 +179,12 @@ export interface OutlineModel {
 // ── Worker message types ───────────────────────────────────────────────────
 
 export type WorkerMessage =
-  | { type: 'trace'; line: number; func: string; cls: string; state: string }
+  | { type: 'trace'; line: number; func: string; cls: string; state: string; turtleSvg?: string }
   | { type: 'print'; text: string }
-  | { type: 'error'; error: string }
-  | { type: 'done' }
+  | { type: 'error'; error: string; files?: Array<{ path: string; content: ArrayBuffer; mimeType: string }> }
+  | { type: 'done'; files?: Array<{ path: string; content: ArrayBuffer; mimeType: string }> }
   | { type: 'input'; prompt: string }
+  | { type: 'turtle_update'; svg: string }
 
 // ── Diagram layout types ───────────────────────────────────────────────────
 

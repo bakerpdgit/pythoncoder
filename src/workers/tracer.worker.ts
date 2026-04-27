@@ -1,5 +1,6 @@
 /// <reference lib="webworker" />
 
+
 const PYODIDE_URL = 'https://cdn.jsdelivr.net/pyodide/v0.29.3/full/pyodide.js'
 
 const SETUP_CODE = `
@@ -331,14 +332,23 @@ self.onmessage = async function (e: MessageEvent) {
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ;(self as any).importScripts(PYODIDE_URL)
-  } catch (error) {
-    self.postMessage({
-      type: 'error',
-      error:
-        'Failed to load Pyodide in the worker. If Cross-Origin Isolation is enabled, all remote scripts must allow CORS/CORP. ' +
-        (error instanceof Error ? error.message : String(error)),
-    })
-    return
+  } catch {
+    // Module worker context (Vite dev mode): importScripts unavailable, fall back to dynamic import
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const mod = await (import(/* @vite-ignore */ PYODIDE_URL) as Promise<any>)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if (!(self as any).loadPyodide && mod?.loadPyodide) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(self as any).loadPyodide = mod.loadPyodide
+      }
+    } catch (dynErr) {
+      self.postMessage({
+        type: 'error',
+        error: 'Failed to load Pyodide in the worker. ' + (dynErr instanceof Error ? dynErr.message : String(dynErr)),
+      })
+      return
+    }
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -347,8 +357,14 @@ self.onmessage = async function (e: MessageEvent) {
     stderr: (text: string) => self.postMessage({ type: 'error', error: text }),
   })
 
+  const useSvgTurtle = Boolean(e.data.svgTurtleBootstrap)
+
   pyodide.globals.set('js_trace_callback', (line: number, func: string, cls: string, stateStr: string) => {
-    self.postMessage({ type: 'trace', line, func, cls, state: stateStr })
+    let turtleSvg = ''
+    if (useSvgTurtle) {
+      try { turtleSvg = String(pyodide.globals.get('__turtle_svg__') ?? '') } catch { /* ignore */ }
+    }
+    self.postMessage({ type: 'trace', line, func, cls, state: stateStr, turtleSvg })
     Atomics.store(int32View, 0, 1)
     Atomics.wait(int32View, 0, 1)
     const cmd = Atomics.load(int32View, 1)
@@ -420,6 +436,9 @@ self.onmessage = async function (e: MessageEvent) {
   try {
     const userCode: string = e.data.code
     await pyodide.loadPackagesFromImports(userCode)
+    if (useSvgTurtle) {
+      await pyodide.runPythonAsync(e.data.svgTurtleBootstrap as string)
+    }
     pyodide.globals.set('user_code_str', userCode)
     await pyodide.runPythonAsync(SETUP_CODE)
     await pyodide.runPythonAsync(`
@@ -427,9 +446,19 @@ code_obj = compile(user_code_str, "simulation.py", "exec")
 exec(code_obj, globals())
     `)
     const updatedFiles = collectUpdatedFiles()
+    let finalTurtleSvg = ''
+    if (useSvgTurtle) {
+      try { finalTurtleSvg = String(pyodide.globals.get('__turtle_svg__') ?? '') } catch { /* ignore */ }
+    }
+    if (finalTurtleSvg) self.postMessage({ type: 'turtle_update', svg: finalTurtleSvg })
     self.postMessage({ type: 'done', files: updatedFiles })
   } catch (err) {
     const updatedFiles = collectUpdatedFiles()
+    let finalTurtleSvg = ''
+    if (useSvgTurtle) {
+      try { finalTurtleSvg = String(pyodide.globals.get('__turtle_svg__') ?? '') } catch { /* ignore */ }
+    }
+    if (finalTurtleSvg) self.postMessage({ type: 'turtle_update', svg: finalTurtleSvg })
     self.postMessage({ type: 'error', error: String(err), files: updatedFiles })
   }
 }

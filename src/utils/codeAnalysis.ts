@@ -1,4 +1,4 @@
-import { PYGAME_IMPORT_REGEX } from '../constants'
+import { PYGAME_IMPORT_REGEX, TURTLE_IMPORT_REGEX } from '../constants'
 import type {
   StructureModel,
   FunctionDef,
@@ -21,6 +21,9 @@ export const cleanCodeText = (text: string): string =>
 
 export const codeUsesPygame = (source: string): boolean =>
   PYGAME_IMPORT_REGEX.test(cleanCodeText(source))
+
+export const codeUsesTurtle = (source: string): boolean =>
+  TURTLE_IMPORT_REGEX.test(cleanCodeText(source))
 
 // ── Structure model ────────────────────────────────────────────────────────
 

@@ -140,7 +140,7 @@ export const InspectorPane = ({ title, root, path, setPath, emptyMessage, unavai
           </div>
           {activeNode?.truncated && <div className="mt-3 text-xs text-amber-300">Showing the first 120 entries in this collection.</div>}
           {!isInspectorCompound(activeNode) && (
-            <pre className="mt-2 whitespace-pre-wrap rounded bg-black/40 p-2 text-xs text-emerald-300">{formatInspectorPrimitive(activeNode)}</pre>
+            <pre className="mt-2 whitespace-pre-wrap rounded bg-black/40 p-2 text-sm text-emerald-300">{formatInspectorPrimitive(activeNode)}</pre>
           )}
         </div>
 
