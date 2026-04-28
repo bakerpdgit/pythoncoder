@@ -145,6 +145,7 @@ export default function App() {
   const pygameLayoutSnapshotRef = useRef<{ visiblePanels: PanelVisibility; leftWidth: number; rightTopHeight: number; bottomLeftWidth: number } | null>(null)
   const consoleLayoutSnapshotRef = useRef<{ visiblePanels: PanelVisibility; leftWidth: number; rightTopHeight: number; bottomLeftWidth: number } | null>(null)
   const turtleLayoutSnapshotRef = useRef<{ visiblePanels: PanelVisibility; leftWidth: number; rightTopHeight: number; bottomLeftWidth: number } | null>(null)
+  const svgTurtleLayoutSnapshotRef = useRef<{ visiblePanels: PanelVisibility; leftWidth: number; rightTopHeight: number; bottomLeftWidth: number } | null>(null)
   const mainThreadRunIdRef = useRef(0)
   const noteDraftRef = useRef('')
   const isInsightEditingRef = useRef(false)
@@ -701,6 +702,25 @@ export default function App() {
     setBottomLeftWidth(snapshot.bottomLeftWidth)
   }
 
+  const enterSvgTurtlePresentationMode = () => {
+    if (!svgTurtleLayoutSnapshotRef.current) {
+      svgTurtleLayoutSnapshotRef.current = { visiblePanels: { ...visiblePanels }, leftWidth, rightTopHeight, bottomLeftWidth }
+    }
+    setShowExportDialog(false)
+    setVisiblePanels({ code: false, visualizer: false, diagram: true, notes: false, output: true, filesystem: false })
+    setBottomLeftWidth(74)
+  }
+
+  const restoreSvgTurtlePresentationMode = () => {
+    const snapshot = svgTurtleLayoutSnapshotRef.current
+    svgTurtleLayoutSnapshotRef.current = null
+    if (!snapshot) return
+    setVisiblePanels(snapshot.visiblePanels)
+    setLeftWidth(snapshot.leftWidth)
+    setRightTopHeight(snapshot.rightTopHeight)
+    setBottomLeftWidth(snapshot.bottomLeftWidth)
+  }
+
   // ── Filesystem switching ─────────────────────────────────────────────────
 
   const clearEditorForSwitch = () => {
@@ -838,6 +858,7 @@ export default function App() {
     mainThreadStopRequestedRef.current = false
     if (shouldRunPygame) enterPygamePresentationMode()
     else if (shouldRunTurtleCanvas) enterTurtleCanvasPresentationMode()
+    else if (shouldRunTurtleSvg) enterSvgTurtlePresentationMode()
     else enterConsolePresentationMode()
 
     resetExecutionState()
@@ -979,6 +1000,7 @@ exec(code_obj, globals())
       stopMainThreadCanvasWatcher({ restoreSnapshot: shouldRunPygame || shouldRunTurtleCanvas })
       const restore = shouldRunPygame ? restorePygamePresentationMode
         : shouldRunTurtleCanvas ? restoreTurtleCanvasPresentationMode
+        : shouldRunTurtleSvg ? restoreSvgTurtlePresentationMode
         : restoreConsolePresentationMode
       setPendingRestore(() => restore)
     }
