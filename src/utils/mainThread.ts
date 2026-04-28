@@ -21,6 +21,8 @@ const loadExternalScript = (src: string): Promise<void> =>
     document.head.appendChild(script)
   })
 
+export const resetMainThreadPyodide = () => { mainPyodidePromise = null }
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export const loadMainThreadPyodide = async (): Promise<any> => {
   await loadExternalScript(`${PYODIDE_BASE_URL}/pyodide.js`)
@@ -853,8 +855,21 @@ def _get_svg():
     parts=[f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}">',
            f'<rect width="{w}" height="{h}" fill="{_turtle_bg}"/>']
     parts.extend(_turtle_elements)
+    if _svg_turtle._visible:
+        hr=math.radians(_svg_turtle._heading)
+        fx=math.cos(hr);fy=-math.sin(hr)
+        px=math.sin(hr);py=math.cos(hr)
+        tx=_tx(_svg_turtle._x);ty=_ty(_svg_turtle._y)
+        tip_x=tx+10*fx;tip_y=ty+10*fy
+        bl_x=tx-7*fx+5*px;bl_y=ty-7*fy+5*py
+        br_x=tx-7*fx-5*px;br_y=ty-7*fy-5*py
+        pts=f'{tip_x:.1f},{tip_y:.1f} {bl_x:.1f},{bl_y:.1f} {br_x:.1f},{br_y:.1f}'
+        parts.append(f'<polygon points="{pts}" fill="{_safe(_svg_turtle._fc)}" stroke="white" stroke-width="1" stroke-linejoin="round"/>')
     parts.append('</svg>')
     return ''.join(parts)
+
+def _emit():
+    js_turtle_update_svg(_get_svg())
 
 class _SvgScreen:
     def __init__(self): self._bgcolor='white'
@@ -905,6 +920,7 @@ class _SvgTurtle:
                 f'stroke="{_safe(self._pc2)}" stroke-width="{self._pw}" stroke-linecap="round"/>')
         if self._filling: self._fp.append((nx,ny))
         self._x=nx;self._y=ny
+        _emit()
 
     def forward(self,d):
         rad=math.radians(self._heading)
@@ -912,9 +928,9 @@ class _SvgTurtle:
     fd=forward
     def backward(self,d): self.forward(-d)
     bk=backward;back=backward
-    def right(self,a): self._heading=(self._heading-a)%360
+    def right(self,a): self._heading=(self._heading-a)%360; _emit()
     rt=right
-    def left(self,a): self._heading=(self._heading+a)%360
+    def left(self,a): self._heading=(self._heading+a)%360; _emit()
     lt=left
     def goto(self,x,y=None):
         if y is None and hasattr(x,'__iter__'): x,y=tuple(x)
@@ -922,9 +938,9 @@ class _SvgTurtle:
     setpos=goto;setposition=goto
     def setx(self,x): self._line(x,self._y)
     def sety(self,y): self._line(self._x,y)
-    def setheading(self,a): self._heading=float(a)%360
+    def setheading(self,a): self._heading=float(a)%360; _emit()
     seth=setheading
-    def home(self): self._line(0.0,0.0);self._heading=0.0
+    def home(self): self._line(0.0,0.0);self._heading=0.0; _emit()
 
     def circle(self,radius,extent=None,steps=None):
         if extent is None: extent=360
@@ -938,27 +954,28 @@ class _SvgTurtle:
         if size is None: size=max(self._pw+4,self._pw*2)
         c=_pc(color) if color else self._pc2
         _turtle_elements.append(f'<circle cx="{_tx(self._x):.1f}" cy="{_ty(self._y):.1f}" r="{size/2:.1f}" fill="{_safe(c)}"/>')
+        _emit()
 
     def stamp(self): return id(self)
     def clearstamp(self,s): pass
     def clearstamps(self,n=None): pass
-    def penup(self): self._pen=False
+    def penup(self): self._pen=False; _emit()
     pu=penup;up=penup
-    def pendown(self): self._pen=True
+    def pendown(self): self._pen=True; _emit()
     pd=pendown;down=pendown
     def pensize(self,w=None):
         if w is not None: self._pw=max(1,int(w))
         return self._pw
     width=pensize
     def pencolor(self,*a):
-        if a: self._pc2=_pc(a[0] if len(a)==1 else list(a))
+        if a: self._pc2=_pc(a[0] if len(a)==1 else list(a)); _emit()
         return self._pc2
     def fillcolor(self,*a):
-        if a: self._fc=_pc(a[0] if len(a)==1 else list(a))
+        if a: self._fc=_pc(a[0] if len(a)==1 else list(a)); _emit()
         return self._fc
     def color(self,*a):
-        if len(a)==1: self._pc2=self._fc=_pc(a[0])
-        elif len(a)==2: self._pc2=_pc(a[0]);self._fc=_pc(a[1])
+        if len(a)==1: self._pc2=self._fc=_pc(a[0]); _emit()
+        elif len(a)==2: self._pc2=_pc(a[0]);self._fc=_pc(a[1]); _emit()
         return self._pc2,self._fc
     def begin_fill(self): self._filling=True;self._fp=[(self._x,self._y)]
     def end_fill(self):
@@ -966,16 +983,19 @@ class _SvgTurtle:
             pts=' '.join(f'{_tx(x):.1f},{_ty(y):.1f}' for x,y in self._fp)
             _turtle_elements.append(f'<polygon points="{pts}" fill="{_safe(self._fc)}" stroke="none"/>')
         self._filling=False;self._fp=[]
+        _emit()
     def clear(self):
         global _turtle_elements
         _turtle_elements=[]
         self._x=self._y=0.0;self._heading=0.0
+        _emit()
     def reset(self):
         self.clear()
         self._pen=True;self._pc2='black';self._fc='black';self._pw=1
-    def hideturtle(self): self._visible=False
+        _emit()
+    def hideturtle(self): self._visible=False; _emit()
     ht=hideturtle
-    def showturtle(self): self._visible=True
+    def showturtle(self): self._visible=True; _emit()
     st=showturtle
     def isvisible(self): return self._visible
     def isdown(self): return self._pen
@@ -1006,9 +1026,11 @@ class _SvgTurtle:
             f'<text x="{_tx(self._x):.1f}" y="{_ty(self._y):.1f}" '
             f'font-family="{_safe(fname)}" font-size="{fsize}" font-weight="{fb}" '
             f'fill="{_safe(self._pc2)}">{_safe(str(arg))}</text>')
+        _emit()
 
 _svg_screen=_SvgScreen()
 _svg_turtle=_SvgTurtle()
+_emit()
 
 _turtle_mod=_types_mod.ModuleType('turtle')
 for _fn,_tgt in [
@@ -1105,7 +1127,18 @@ def _refresh_svg():
     w,h=_turtle_sw,_turtle_sh
     parts=[f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}">',
            f'<rect width="{w}" height="{h}" fill="{_turtle_bg}"/>']
-    parts.extend(_turtle_elements); parts.append('</svg>')
+    parts.extend(_turtle_elements)
+    if _wturtle._visible:
+        hr=_math.radians(_wturtle._heading)
+        fx=_math.cos(hr);fy=-_math.sin(hr)
+        px=_math.sin(hr);py=_math.cos(hr)
+        tx=_tx(_wturtle._x);ty=_ty(_wturtle._y)
+        tip_x=tx+10*fx;tip_y=ty+10*fy
+        bl_x=tx-7*fx+5*px;bl_y=ty-7*fy+5*py
+        br_x=tx-7*fx-5*px;br_y=ty-7*fy-5*py
+        pts=f'{tip_x:.1f},{tip_y:.1f} {bl_x:.1f},{bl_y:.1f} {br_x:.1f},{br_y:.1f}'
+        parts.append(f'<polygon points="{pts}" fill="{_safe(_wturtle._fc)}" stroke="white" stroke-width="1" stroke-linejoin="round"/>')
+    parts.append('</svg>')
     __turtle_svg__=''.join(parts)
 
 class _WScreen:
@@ -1160,9 +1193,9 @@ class _WTurtle:
     fd=forward
     def backward(self,d): self.forward(-d)
     bk=backward;back=backward
-    def right(self,a): self._heading=(self._heading-a)%360
+    def right(self,a): self._heading=(self._heading-a)%360; _refresh_svg()
     rt=right
-    def left(self,a): self._heading=(self._heading+a)%360
+    def left(self,a): self._heading=(self._heading+a)%360; _refresh_svg()
     lt=left
     def goto(self,x,y=None):
         if y is None and hasattr(x,'__iter__'): x,y=tuple(x)
@@ -1170,9 +1203,9 @@ class _WTurtle:
     setpos=goto;setposition=goto
     def setx(self,x): self._line(x,self._y)
     def sety(self,y): self._line(self._x,y)
-    def setheading(self,a): self._heading=float(a)%360
+    def setheading(self,a): self._heading=float(a)%360; _refresh_svg()
     seth=setheading
-    def home(self): self._line(0.0,0.0);self._heading=0.0
+    def home(self): self._line(0.0,0.0);self._heading=0.0; _refresh_svg()
     def circle(self,radius,extent=None,steps=None):
         if extent is None: extent=360
         if steps is None: steps=max(int(abs(radius)*abs(extent)/60),4)
@@ -1188,23 +1221,23 @@ class _WTurtle:
     def stamp(self): return id(self)
     def clearstamp(self,s): pass
     def clearstamps(self,n=None): pass
-    def penup(self): self._pen=False
+    def penup(self): self._pen=False; _refresh_svg()
     pu=penup;up=penup
-    def pendown(self): self._pen=True
+    def pendown(self): self._pen=True; _refresh_svg()
     pd=pendown;down=pendown
     def pensize(self,w=None):
         if w is not None: self._pw=max(1,int(w))
         return self._pw
     width=pensize
     def pencolor(self,*a):
-        if a: self._pc2=_pc(a[0] if len(a)==1 else list(a))
+        if a: self._pc2=_pc(a[0] if len(a)==1 else list(a)); _refresh_svg()
         return self._pc2
     def fillcolor(self,*a):
-        if a: self._fc=_pc(a[0] if len(a)==1 else list(a))
+        if a: self._fc=_pc(a[0] if len(a)==1 else list(a)); _refresh_svg()
         return self._fc
     def color(self,*a):
-        if len(a)==1: self._pc2=self._fc=_pc(a[0])
-        elif len(a)==2: self._pc2=_pc(a[0]);self._fc=_pc(a[1])
+        if len(a)==1: self._pc2=self._fc=_pc(a[0]); _refresh_svg()
+        elif len(a)==2: self._pc2=_pc(a[0]);self._fc=_pc(a[1]); _refresh_svg()
         return self._pc2,self._fc
     def begin_fill(self): self._filling=True;self._fp=[(self._x,self._y)]
     def end_fill(self):
@@ -1218,10 +1251,10 @@ class _WTurtle:
         self._x=self._y=0.0;self._heading=0.0; _refresh_svg()
     def reset(self):
         self.clear()
-        self._pen=True;self._pc2='black';self._fc='black';self._pw=1
-    def hideturtle(self): self._visible=False
+        self._pen=True;self._pc2='black';self._fc='black';self._pw=1; _refresh_svg()
+    def hideturtle(self): self._visible=False; _refresh_svg()
     ht=hideturtle
-    def showturtle(self): self._visible=True
+    def showturtle(self): self._visible=True; _refresh_svg()
     st=showturtle
     def isvisible(self): return self._visible
     def isdown(self): return self._pen

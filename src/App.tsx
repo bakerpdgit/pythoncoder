@@ -9,7 +9,7 @@ import {
 import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides, getStoredSettings, persistSettings } from './utils/storage'
 import { triggerDownload, getBaseFileStem } from './utils/download'
 import { buildCommentExport, buildDocstringExport, getDefinitionNote, getDefaultDefinitionNote, sanitizeNoteText } from './utils/export'
-import { loadMainThreadPyodide, PYGAME_MAIN_THREAD_BOOTSTRAP, TURTLE_CANVAS_BOOTSTRAP, TURTLE_SVG_BOOTSTRAP, SVG_TURTLE_WORKER_SETUP } from './utils/mainThread'
+import { loadMainThreadPyodide, resetMainThreadPyodide, PYGAME_MAIN_THREAD_BOOTSTRAP, TURTLE_CANVAS_BOOTSTRAP, TURTLE_SVG_BOOTSTRAP, SVG_TURTLE_WORKER_SETUP } from './utils/mainThread'
 import {
   ensureDefaultFilesystem, getAllFiles, syncFilesFromPyodide, writeFile,
   isTextMime, guessMimeType, mountFilesToPyodide, readFilesFromPyodide,
@@ -27,6 +27,7 @@ import { SettingsDialog } from './components/ui/SettingsDialog'
 import { HierarchyChart } from './components/diagrams/HierarchyChart'
 import { UmlDiagram } from './components/diagrams/UmlDiagram'
 import { OutlinePanel } from './components/diagrams/OutlinePanel'
+import { TurtleScrubber } from './components/TurtleScrubber'
 import { InspectorPane } from './components/InspectorPane'
 import { clampDiagramFontSize } from './components/diagrams/diagramLayout'
 import {
@@ -100,6 +101,10 @@ export default function App() {
   const [isTurtleCanvasRunActive, setIsTurtleCanvasRunActive] = useState(false)
   const [pendingRestore, setPendingRestore] = useState<(() => void) | null>(null)
   const [turtleSvg, setTurtleSvg] = useState('')
+  const [turtleSvgHistory, setTurtleSvgHistory] = useState<string[]>([])
+  const [turtleScrubStep, setTurtleScrubStep] = useState(0)
+  const [turtleScrubPlaying, setTurtleScrubPlaying] = useState(false)
+  const [turtleScrubSpeed, setTurtleScrubSpeed] = useState(400)
   const [isConsolePresentationMode, setIsConsolePresentationMode] = useState(false)
   const [runtimePreference, setRuntimePreference] = useState<RuntimeKey>('trace-worker')
   const [appSettings, setAppSettings] = useState<AppSettings>(() => getStoredSettings())
@@ -158,6 +163,8 @@ export default function App() {
   const workerRunModeRef = useRef(false)
   const rightSideRef = useRef<HTMLDivElement | null>(null)
   const bottomRowRef = useRef<HTMLDivElement | null>(null)
+  const turtleSvgHistoryRef = useRef<string[]>([])
+  const turtleScrubLockedRef = useRef(false)
 
   const deferredCodeText = useDeferredValue(codeText)
   const hasCode = codeText.trim().length > 0
@@ -187,6 +194,9 @@ export default function App() {
   const hasCustomInsightNote = !!activeInsightDefinition && Object.prototype.hasOwnProperty.call(noteOverrides, activeInsightDefinition.key)
   const canExportNotes = structureModel.orderedDefinitions.length > 0 && hasCode
   const hasNotesOrOutput = visiblePanels.notes || visiblePanels.output
+  const displayedTurtleSvg = turtleSvgHistory.length > 0 && turtleScrubStep >= 0 && turtleScrubStep < turtleSvgHistory.length
+    ? turtleSvgHistory[turtleScrubStep]
+    : turtleSvg
   const hasBottomPanels = visiblePanels.diagram || hasNotesOrOutput
   const hasRightSidePanels = visiblePanels.visualizer || hasBottomPanels
 
@@ -367,6 +377,17 @@ export default function App() {
     }])
     editor.revealLineInCenterIfOutsideViewport(currentLine)
   }, [currentLine])
+
+  // Turtle scrubber playback: advance one step per interval, stop at end
+  useEffect(() => {
+    if (!turtleScrubPlaying) return
+    const maxStep = turtleSvgHistory.length - 1
+    if (turtleScrubStep >= maxStep) { setTurtleScrubPlaying(false); return }
+    const id = window.setTimeout(() => {
+      setTurtleScrubStep(prev => Math.min(prev + 1, turtleSvgHistoryRef.current.length - 1))
+    }, turtleScrubSpeed)
+    return () => window.clearTimeout(id)
+  }, [turtleScrubPlaying, turtleScrubStep, turtleSvgHistory.length, turtleScrubSpeed])
 
   // ── Monaco editor handlers ────────────────────────────────────────────────
 
@@ -760,23 +781,73 @@ export default function App() {
 
   // ── Runtime execution ─────────────────────────────────────────────────────
 
+  const addToTurtleHistory = (svg: string) => {
+    if (!svg) return
+    const current = turtleSvgHistoryRef.current
+    if (current.length > 0 && current[current.length - 1] === svg) return
+    const newHistory = [...current, svg]
+    turtleSvgHistoryRef.current = newHistory
+    setTurtleSvgHistory(newHistory)
+    if (!turtleScrubLockedRef.current) setTurtleScrubStep(newHistory.length - 1)
+  }
+
+  const resetTurtleHistory = () => {
+    turtleSvgHistoryRef.current = []
+    turtleScrubLockedRef.current = false
+    setTurtleSvgHistory([])
+    setTurtleScrubStep(0)
+    setTurtleScrubPlaying(false)
+    setTurtleSvg('')
+    setDiagramView(prev => prev === 'turtle' ? 'hierarchy' : prev)
+  }
+
+  const closeScrubberAndClear = () => {
+    turtleSvgHistoryRef.current = []
+    turtleScrubLockedRef.current = false
+    setTurtleSvgHistory([])
+    setTurtleScrubStep(0)
+    setTurtleScrubPlaying(false)
+    setTurtleSvg('')
+    setDiagramView('outline')
+  }
+
   const resetExecutionState = () => {
     setCurrentLine(-1); setCurrentFunc(''); setCurrentClass(''); setSimState(null)
     setInputRequest(null); setInputValue(''); setOutputLog('')
   }
 
+  const handlePyodideReset = () => {
+    if (isRunning && activeRuntime === 'main-thread') {
+      mainThreadAbandonedRef.current = true
+      mainThreadRunIdRef.current++
+      setIsRunning(false)
+      setActiveRuntime('')
+    }
+    resetMainThreadPyodide()
+    setMainThreadStatus('Pyodide reset. Ready.')
+    setOutputLog(prev => prev + '\n[INFO] Pyodide environment reset. Files are preserved.\n')
+  }
+
   const startTraceWorker = async (runMode = false) => {
     if (!hasSab || !hasCode) return
+    if (pendingRestore) pendingRestore()
     setPendingRestore(null)
     await saveCurrentToVFS()
     const vfsFiles = await getAllFiles(activeFilesystemId)
     const capturedFsId = activeFilesystemId
     const capturedCwd = currentWorkingDir
 
+    const hasTurtleForMode = codeUsesTurtle(codeText)
+    const isSvgTurtleRun = runMode && hasTurtleForMode && appSettings.turtleMode === 'basthon-svg'
+
     workerRunModeRef.current = runMode
-    if (runMode) enterConsolePresentationMode()
+    if (runMode) {
+      if (isSvgTurtleRun) enterSvgTurtlePresentationMode()
+      else enterConsolePresentationMode()
+    }
 
     resetExecutionState()
+    resetTurtleHistory()
     setIsRunning(true); setActiveRuntime('trace-worker')
     setCodeStatus(runMode ? 'Worker runtime starting...' : 'Trace-worker runtime starting...')
     setMainThreadStatus('Trace-worker runtime is active.')
@@ -790,7 +861,7 @@ export default function App() {
     worker.onmessage = (e: MessageEvent) => {
       const data = e.data
       if (data.type === 'trace') {
-        if (data.turtleSvg) { setTurtleSvg(data.turtleSvg); setDiagramView('turtle') }
+        if (data.turtleSvg) { setTurtleSvg(data.turtleSvg); setDiagramView('turtle'); addToTurtleHistory(data.turtleSvg) }
         if (workerRunModeRef.current) {
           sendTraceCommand(TRACE_CMD_CONTINUE)
         } else {
@@ -811,7 +882,10 @@ export default function App() {
         setInputRequest(null); setInputValue(''); setIsRunning(false); setActiveRuntime('')
         setCodeStatus('Worker runtime failed.')
         if (workerRunModeRef.current) {
-          setPendingRestore(() => restoreConsolePresentationMode)
+          const inSvgMode = svgTurtleLayoutSnapshotRef.current !== null
+          setPendingRestore(() => inSvgMode
+            ? () => { restoreSvgTurtlePresentationMode(); closeScrubberAndClear() }
+            : restoreConsolePresentationMode)
           workerRunModeRef.current = false
         }
         workerRef.current = null; sabRef.current = null
@@ -819,30 +893,34 @@ export default function App() {
         if (data.files?.length) {
           void syncFilesFromPyodide(capturedFsId, data.files).then(() => setVfsReloadTrigger(t => t + 1))
         }
-        if (data.turtleSvg) { setTurtleSvg(data.turtleSvg); setDiagramView('turtle') }
+        if (data.turtleSvg) { setTurtleSvg(data.turtleSvg); setDiagramView('turtle'); addToTurtleHistory(data.turtleSvg) }
         const label = workerRunModeRef.current ? '[RUN FINISHED]' : '[TRACE RUN FINISHED]'
         setOutputLog(prev => prev + `\n${label}\n`)
         setInputRequest(null); setInputValue(''); setIsRunning(false); setActiveRuntime('')
         setCurrentLine(-1)
         setCodeStatus(workerRunModeRef.current ? 'Worker runtime finished.' : 'Trace-worker runtime finished.')
         if (workerRunModeRef.current) {
-          setPendingRestore(() => restoreConsolePresentationMode)
+          const inSvgMode = svgTurtleLayoutSnapshotRef.current !== null
+          setPendingRestore(() => inSvgMode
+            ? () => { restoreSvgTurtlePresentationMode(); closeScrubberAndClear() }
+            : restoreConsolePresentationMode)
           workerRunModeRef.current = false
         }
         workerRef.current = null; sabRef.current = null
       } else if (data.type === 'turtle_update') {
-        setTurtleSvg(data.svg || '')
-        setDiagramView('turtle')
+        const svg = data.svg || ''
+        setTurtleSvg(svg)
+        if (svg) { setDiagramView('turtle'); addToTurtleHistory(svg) }
       }
     }
 
-    const hasTurtle = codeUsesTurtle(codeText)
-    const svgTurtleBootstrap = hasTurtle && appSettings.turtleMode === 'basthon-svg' ? SVG_TURTLE_WORKER_SETUP : ''
+    const svgTurtleBootstrap = hasTurtleForMode && appSettings.turtleMode === 'basthon-svg' ? SVG_TURTLE_WORKER_SETUP : ''
     worker.postMessage({ type: 'init', sab: sabRef.current.sab, code: codeText, files: vfsFiles, cwd: capturedCwd, svgTurtleBootstrap })
   }
 
   const startMainThreadRun = async () => {
     if (!hasCode) return
+    if (pendingRestore) pendingRestore()
     setPendingRestore(null)
     await saveCurrentToVFS()
     const vfsFiles = await getAllFiles(activeFilesystemId)
@@ -864,6 +942,7 @@ export default function App() {
     else enterConsolePresentationMode()
 
     resetExecutionState()
+    resetTurtleHistory()
     if (shouldRunPygame || shouldRunTurtleCanvas) clearMainThreadCanvas()
     setIsRunning(true); setActiveRuntime('main-thread')
     setCodeStatus('Main-thread runtime starting...')
@@ -891,12 +970,14 @@ export default function App() {
       mainThreadMountedPathsRef.current = vfsFiles.map(f => f.path)
 
       if (shouldRunPygame) {
+        if (!mainThreadCanvasRef.current) await new Promise<void>(r => requestAnimationFrame(() => r()))
         const canvas = ensureMainThreadCanvas()
         if (!pyodide.canvas?.setCanvas2D) throw new Error('Pyodide canvas support is unavailable.')
         pyodide.canvas.setCanvas2D(canvas)
         focusMainThreadCanvas()
         startMainThreadCanvasWatcher()
       } else if (shouldRunTurtleCanvas) {
+        if (!mainThreadCanvasRef.current) await new Promise<void>(r => requestAnimationFrame(() => r()))
         ensureMainThreadCanvas()
         focusMainThreadCanvas()
         startMainThreadCanvasWatcher()
@@ -942,7 +1023,7 @@ export default function App() {
         execGlobalsObj.js_turtle_update_svg = (svg: string) => {
           const svgStr = String(svg ?? '')
           setTurtleSvg(svgStr)
-          if (svgStr) setDiagramView('turtle')
+          if (svgStr) { setDiagramView('turtle'); addToTurtleHistory(svgStr) }
         }
       }
       const execGlobals = pyodide.toPy(execGlobalsObj)
@@ -1003,7 +1084,7 @@ exec(code_obj, globals())
       if (!mainThreadAbandonedRef.current) {
         const restore = shouldRunPygame ? restorePygamePresentationMode
           : shouldRunTurtleCanvas ? restoreTurtleCanvasPresentationMode
-          : shouldRunTurtleSvg ? restoreSvgTurtlePresentationMode
+          : shouldRunTurtleSvg ? () => { restoreSvgTurtlePresentationMode(); closeScrubberAndClear() }
           : restoreConsolePresentationMode
         setPendingRestore(() => restore)
       }
@@ -1015,6 +1096,11 @@ exec(code_obj, globals())
     if (!sabRef.current) return
     const { int32 } = sabRef.current
     if (Atomics.load(int32, 0) === 1) {
+      if (turtleScrubLockedRef.current) {
+        turtleScrubLockedRef.current = false
+        setTurtleScrubPlaying(false)
+        setTurtleScrubStep(turtleSvgHistoryRef.current.length - 1)
+      }
       const bpArr = [...breakpointsRef.current]
       int32[500] = bpArr.length
       bpArr.forEach((ln, i) => { if (i < 99) int32[501 + i] = ln })
@@ -1040,7 +1126,10 @@ exec(code_obj, globals())
       workerRef.current.terminate(); workerRef.current = null; sabRef.current = null
       setCodeStatus('Worker runtime stopped.')
       if (workerRunModeRef.current) {
-        setPendingRestore(() => restoreConsolePresentationMode)
+        const inSvgMode = svgTurtleLayoutSnapshotRef.current !== null
+        setPendingRestore(() => inSvgMode
+          ? () => { restoreSvgTurtlePresentationMode(); closeScrubberAndClear() }
+          : restoreConsolePresentationMode)
         workerRunModeRef.current = false
       }
     } else if (activeRuntime === 'main-thread') {
@@ -1057,7 +1146,7 @@ exec(code_obj, globals())
       setMainThreadStatus('Main-thread run stopped.')
       setOutputLog(prev => prev + '\n[INFO] Main-thread run stopped.\n')
       const restoreFn = isConsolePresentationMode ? restoreConsolePresentationMode
-        : svgTurtleLayoutSnapshotRef.current ? restoreSvgTurtlePresentationMode
+        : svgTurtleLayoutSnapshotRef.current ? () => { restoreSvgTurtlePresentationMode(); closeScrubberAndClear() }
         : null
       if (restoreFn) setPendingRestore(() => restoreFn)
       return
@@ -1110,12 +1199,21 @@ exec(code_obj, globals())
                 </button>
               </>
             ) : (
-              <button onClick={() => void startMainThreadRun()} disabled={!hasCode}
-                className="bg-sky-600 hover:bg-sky-500 text-white px-5 py-2 rounded font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
-                Run
-              </button>
+              <>
+                <button onClick={() => void startMainThreadRun()} disabled={!hasCode}
+                  className="bg-sky-600 hover:bg-sky-500 text-white px-5 py-2 rounded font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                  Run
+                </button>
+                <button onClick={handlePyodideReset}
+                  title="Reset Pyodide environment (clears Python state, keeps files)"
+                  className="rounded border border-slate-600 p-1.5 text-slate-400 hover:border-amber-400 hover:text-amber-300 transition-colors">
+                  <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                </button>
+              </>
             )
-          ) : activeRuntime === 'trace-worker' && !isConsolePresentationMode ? (
+          ) : activeRuntime === 'trace-worker' && !isConsolePresentationMode && !workerRunModeRef.current ? (
             <>
               <button onClick={() => sendTraceCommand(TRACE_CMD_STEP_INTO)} disabled={inputRequest !== null}
                 className="bg-emerald-700 hover:bg-emerald-600 text-white px-5 py-2 rounded font-semibold transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed">
@@ -1141,7 +1239,7 @@ exec(code_obj, globals())
               </button>
               <button onClick={forceStop} className="bg-red-600 hover:bg-red-500 text-white px-5 py-2 rounded font-semibold transition-colors">Stop</button>
             </>
-          ) : (activeRuntime === 'trace-worker' && isConsolePresentationMode) ? (
+          ) : (activeRuntime === 'trace-worker' && (isConsolePresentationMode || workerRunModeRef.current)) ? (
             <div className="flex items-center overflow-hidden rounded border border-sky-500/70 bg-sky-900/30 text-sm font-semibold text-sky-100">
               <div className="px-4 py-2">Worker running</div>
               <button type="button" onClick={forceStop}
@@ -1409,6 +1507,29 @@ exec(code_obj, globals())
                         </div>
                       </div>
                     </div>
+                    {!isPygameRunActive && !isTurtleCanvasRunActive && diagramView === 'turtle' && turtleSvgHistory.length > 0 && (
+                      <TurtleScrubber
+                        history={turtleSvgHistory}
+                        step={turtleScrubStep}
+                        isPlaying={turtleScrubPlaying}
+                        speed={turtleScrubSpeed}
+                        onStepChange={s => {
+                          setTurtleScrubStep(s)
+                          turtleScrubLockedRef.current = s < turtleSvgHistory.length - 1
+                        }}
+                        onTogglePlay={() => {
+                          if (turtleScrubPlaying) {
+                            setTurtleScrubPlaying(false)
+                          } else {
+                            turtleScrubLockedRef.current = true
+                            if (turtleScrubStep >= turtleSvgHistory.length - 1) setTurtleScrubStep(0)
+                            setTurtleScrubPlaying(true)
+                          }
+                        }}
+                        onSpeedChange={s => setTurtleScrubSpeed(s)}
+                        onClose={() => { setTurtleScrubPlaying(false); closeScrubberAndClear() }}
+                      />
+                    )}
                     <div className="flex-1 overflow-auto p-4 relative">
                       {/* Canvas always in DOM so ref is valid on re-run; hidden via CSS when inactive */}
                       <div className={`mx-auto flex h-full w-full max-w-6xl flex-col ${!(isPygameRunActive || isTurtleCanvasRunActive) ? 'hidden' : ''}`}>
@@ -1422,7 +1543,7 @@ exec(code_obj, globals())
                       {!(isPygameRunActive || isTurtleCanvasRunActive) && (
                         diagramView === 'turtle' ? (
                           <div className="mx-auto h-full min-h-[280px] min-w-[320px] flex items-start justify-center">
-                            <div dangerouslySetInnerHTML={{ __html: turtleSvg }} className="max-w-full" />
+                            <div dangerouslySetInnerHTML={{ __html: displayedTurtleSvg }} className="max-w-full" />
                           </div>
                         ) : (
                           <div className="mx-auto h-full min-h-[280px] min-w-[320px]">
