@@ -147,6 +147,7 @@ export default function App() {
   const turtleLayoutSnapshotRef = useRef<{ visiblePanels: PanelVisibility; leftWidth: number; rightTopHeight: number; bottomLeftWidth: number } | null>(null)
   const svgTurtleLayoutSnapshotRef = useRef<{ visiblePanels: PanelVisibility; leftWidth: number; rightTopHeight: number; bottomLeftWidth: number } | null>(null)
   const mainThreadRunIdRef = useRef(0)
+  const mainThreadAbandonedRef = useRef(false)
   const noteDraftRef = useRef('')
   const isInsightEditingRef = useRef(false)
   const activeInsightKeyRef = useRef('')
@@ -849,6 +850,7 @@ export default function App() {
     const capturedCwd = currentWorkingDir
 
     const runId = ++mainThreadRunIdRef.current
+    mainThreadAbandonedRef.current = false
     const shouldRunPygame = codeUsesPygame(codeText)
     const shouldRunTurtle = !shouldRunPygame && codeUsesTurtle(codeText)
     const turtleMode = shouldRunTurtle ? appSettings.turtleMode : null
@@ -998,11 +1000,14 @@ exec(code_obj, globals())
     } finally {
       mainThreadStopRequestedRef.current = false
       stopMainThreadCanvasWatcher({ restoreSnapshot: shouldRunPygame || shouldRunTurtleCanvas })
-      const restore = shouldRunPygame ? restorePygamePresentationMode
-        : shouldRunTurtleCanvas ? restoreTurtleCanvasPresentationMode
-        : shouldRunTurtleSvg ? restoreSvgTurtlePresentationMode
-        : restoreConsolePresentationMode
-      setPendingRestore(() => restore)
+      if (!mainThreadAbandonedRef.current) {
+        const restore = shouldRunPygame ? restorePygamePresentationMode
+          : shouldRunTurtleCanvas ? restoreTurtleCanvasPresentationMode
+          : shouldRunTurtleSvg ? restoreSvgTurtlePresentationMode
+          : restoreConsolePresentationMode
+        setPendingRestore(() => restore)
+      }
+      mainThreadAbandonedRef.current = false
     }
   }
 
@@ -1045,8 +1050,16 @@ exec(code_obj, globals())
         setMainThreadStatus('Stopping main-thread run...')
         return
       }
-      setOutputLog(prev => prev + '\n[INFO] Force stop is not available in main-thread mode yet.\n')
-      setMainThreadStatus('Main-thread mode cannot be forcibly stopped in this phase.')
+      mainThreadAbandonedRef.current = true
+      mainThreadRunIdRef.current++
+      setIsRunning(false)
+      setActiveRuntime('')
+      setMainThreadStatus('Main-thread run stopped.')
+      setOutputLog(prev => prev + '\n[INFO] Main-thread run stopped.\n')
+      const restoreFn = isConsolePresentationMode ? restoreConsolePresentationMode
+        : svgTurtleLayoutSnapshotRef.current ? restoreSvgTurtlePresentationMode
+        : null
+      if (restoreFn) setPendingRestore(() => restoreFn)
       return
     }
     setIsRunning(false); setActiveRuntime(''); setCurrentLine(-1); setCurrentFunc(''); setCurrentClass('')
