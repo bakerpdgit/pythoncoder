@@ -6,16 +6,18 @@ import {
   buildPythonStructureModel, analyzePythonClasses, analyzePythonFunctions,
   analyzePythonOutline, cleanCodeText, codeUsesPygame, codeUsesTurtle, getExpandableOutlineIds,
 } from './utils/codeAnalysis'
-import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides, getStoredSettings, persistSettings } from './utils/storage'
+import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides, getStoredSettings, persistSettings, getStoredBookNavState, persistBookNavState } from './utils/storage'
 import { triggerDownload, getBaseFileStem } from './utils/download'
 import { buildCommentExport, buildDocstringExport, getDefinitionNote, getDefaultDefinitionNote, sanitizeNoteText } from './utils/export'
 import { loadMainThreadPyodide, resetMainThreadPyodide, PYGAME_MAIN_THREAD_BOOTSTRAP, TURTLE_CANVAS_BOOTSTRAP, TURTLE_SVG_BOOTSTRAP, SVG_TURTLE_WORKER_SETUP } from './utils/mainThread'
+import { fetchBookManifest, getOrCreateChallengeFs, getHiddenPathsForFs } from './utils/bookLoader'
 import {
   ensureDefaultFilesystem, getAllFiles, syncFilesFromPyodide, writeFile,
   isTextMime, guessMimeType, mountFilesToPyodide, readFilesFromPyodide,
   getEntryByPath, cleanFilesFromPyodide, ensureFilesystemFromUrl,
 } from './utils/virtualFS'
 import { FileSystemPanel } from './components/FileSystemPanel'
+import { BookPanel } from './components/BookPanel'
 import { SaveFileDialog } from './components/dialogs/SaveFileDialog'
 import { getExplanation, getDefinitionKey } from './data/explanations'
 import { ThemeToggleButton } from './components/ui/ThemeToggleButton'
@@ -38,7 +40,7 @@ import {
 import type {
   Theme, RuntimeKey, PanelVisibility, InputRequest, SabRef, SimState, InspectorPath,
   StructureModel, DiagramModel, HierarchyModel, OutlineModel, DiagramView, VFSEntry,
-  AppSettings,
+  AppSettings, BookNavState, BookChallenge,
 } from './types'
 
 const MONACO_DARK_THEME: MonacoEditor.IStandaloneThemeData = {
@@ -113,6 +115,8 @@ export default function App() {
   const [activeFilesystemId, setActiveFilesystemId] = useState<string>('default')
   const [currentWorkingDir, setCurrentWorkingDir] = useState<string>('/')
   const [openFilePath, setOpenFilePath] = useState<string | null>(null)
+  const [bookNavState, setBookNavState] = useState<BookNavState | null>(() => getStoredBookNavState())
+  const [challengeHiddenPaths, setChallengeHiddenPaths] = useState<string[]>([])
   const [vfsReloadTrigger, setVfsReloadTrigger] = useState(0)
   const [isUnsaved, setIsUnsaved] = useState(false)
   const [pendingCodeLoad, setPendingCodeLoad] = useState<{ content: string; name: string; rawBuffer: ArrayBuffer; mimeType: string } | null>(null)
@@ -219,6 +223,28 @@ export default function App() {
           setVfsReloadTrigger(t => t + 1)
           return
         } catch { /* fall through to default */ }
+      }
+
+      // Restore book challenge filesystem if one was active
+      const savedNav = getStoredBookNavState()
+      if (savedNav?.activeChallengeId) {
+        const { listFilesystems: lfs, listChildren: lc } = await import('./utils/virtualFS')
+        const { getChallengeFsName } = await import('./utils/bookLoader')
+        const fsList = await lfs()
+        const fsName = getChallengeFsName(savedNav.activeChallengeId)
+        const challengeFs = fsList.find(f => f.name === fsName)
+        if (challengeFs) {
+          setActiveFilesystemId(challengeFs.id)
+          setChallengeHiddenPaths(getHiddenPathsForFs(challengeFs.id))
+          const children = await lc(challengeFs.id, '/')
+          const pyFile = children.find(e => e.type === 'file' && e.name.endsWith('.py'))
+          if (pyFile?.content) {
+            const text = new TextDecoder().decode(pyFile.content)
+            loadCodeText(text, pyFile.name, pyFile.path)
+          }
+          setVfsReloadTrigger(t => t + 1)
+          return
+        }
       }
 
       const entry = await getEntryByPath('default', '/main.py')
@@ -816,6 +842,53 @@ export default function App() {
     setInputRequest(null); setInputValue(''); setOutputLog('')
   }
 
+  const handleBookOpen = async (url: string) => {
+    try {
+      const manifest = await fetchBookManifest(url)
+      const newState: BookNavState = {
+        rootUrl: url,
+        currentBookUrl: url,
+        breadcrumb: [],
+        activeChallengeId: null,
+      }
+      setBookNavState(newState)
+      persistBookNavState(newState)
+    } catch (e) {
+      setCodeStatus(`Failed to open book: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
+  const handleBookNavStateChange = (state: BookNavState) => {
+    setBookNavState(state)
+    persistBookNavState(state)
+    // If no longer in a challenge, restore default filesystem visibility
+    if (!state.activeChallengeId) {
+      setChallengeHiddenPaths([])
+    }
+  }
+
+  const handleEnterChallenge = async (bookUrl: string, challenge: BookChallenge, forceReset = false) => {
+    try {
+      const { fsId, pyFilename, hiddenPaths } = await getOrCreateChallengeFs(bookUrl, challenge, forceReset)
+      setActiveFilesystemId(fsId)
+      setChallengeHiddenPaths(hiddenPaths)
+      setCurrentWorkingDir('/')
+      setVfsReloadTrigger(t => t + 1)
+      if (pyFilename) {
+        const entry = await getEntryByPath(fsId, `/${pyFilename}`)
+        if (entry) void onOpenVFSFile(entry)
+      }
+    } catch (e) {
+      setCodeStatus(`Failed to load challenge: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
+  const handleCloseBook = () => {
+    setBookNavState(null)
+    persistBookNavState(null)
+    setChallengeHiddenPaths([])
+  }
+
   const handlePyodideReset = () => {
     if (isRunning && activeRuntime === 'main-thread') {
       mainThreadAbandonedRef.current = true
@@ -1328,19 +1401,32 @@ exec(code_obj, globals())
                 <div className="bg-slate-900 py-2 px-3 border-b border-slate-700 text-[10px] font-bold uppercase tracking-wider text-slate-400 flex-shrink-0">
                   File System
                 </div>
-                <div className="flex-1 overflow-hidden min-h-0">
+                <div className={`overflow-hidden min-h-0 ${bookNavState ? 'flex-none' : 'flex-1'}`}
+                  style={bookNavState ? { height: '42%' } : {}}>
                   <FileSystemPanel
                     activeFilesystemId={activeFilesystemId}
                     currentWorkingDir={currentWorkingDir}
                     openFilePath={openFilePath}
+                    hiddenPaths={challengeHiddenPaths}
                     onFilesystemChange={id => void handleFilesystemChange(id)}
                     onFilesystemForcedChange={handleFilesystemForcedChange}
                     onCwdChange={setCurrentWorkingDir}
                     onOpenFile={entry => void onOpenVFSFile(entry)}
                     onError={msg => setCodeStatus(msg)}
+                    onBookOpen={url => void handleBookOpen(url)}
                     reloadTrigger={vfsReloadTrigger}
                   />
                 </div>
+                {bookNavState && (
+                  <div className="flex-1 border-t border-slate-700 overflow-hidden min-h-0">
+                    <BookPanel
+                      navState={bookNavState}
+                      onNavStateChange={handleBookNavStateChange}
+                      onEnterChallenge={(bookUrl, challenge, forceReset) => void handleEnterChallenge(bookUrl, challenge, forceReset)}
+                      onClose={handleCloseBook}
+                    />
+                  </div>
+                )}
               </div>
             )}
             {/* Code editor area */}

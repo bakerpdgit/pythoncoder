@@ -5,6 +5,7 @@ import {
   isTextMime, isImageMime, downloadEntryAsZip, downloadSingleFile, writeFile,
   getParentPath, loadFilesystemFromUrl,
 } from '../utils/virtualFS'
+import { isBookUrl, BOOK_FS_PREFIX } from '../utils/bookLoader'
 import { ConfirmDialog } from './dialogs/ConfirmDialog'
 import { SaveFileDialog } from './dialogs/SaveFileDialog'
 import type { VFSEntry, VFSFilesystem } from '../types'
@@ -13,11 +14,13 @@ interface Props {
   activeFilesystemId: string
   currentWorkingDir: string
   openFilePath: string | null
+  hiddenPaths?: string[]
   onFilesystemChange: (id: string) => void
   onFilesystemForcedChange: (id: string) => void
   onCwdChange: (path: string) => void
   onOpenFile: (entry: VFSEntry) => void
   onError: (msg: string) => void
+  onBookOpen?: (url: string) => void
   reloadTrigger: number
 }
 
@@ -30,8 +33,8 @@ interface ImagePreview {
 }
 
 export function FileSystemPanel({
-  activeFilesystemId, currentWorkingDir, openFilePath,
-  onFilesystemChange, onFilesystemForcedChange, onCwdChange, onOpenFile, onError, reloadTrigger,
+  activeFilesystemId, currentWorkingDir, openFilePath, hiddenPaths,
+  onFilesystemChange, onFilesystemForcedChange, onCwdChange, onOpenFile, onError, onBookOpen, reloadTrigger,
 }: Props) {
   const [filesystems, setFilesystems] = useState<VFSFilesystem[]>([])
   const [currentPath, setCurrentPath] = useState('/')
@@ -62,13 +65,15 @@ export function FileSystemPanel({
         listFilesystems(),
         listChildren(activeFilesystemId, currentPath),
       ])
-      setFilesystems(fsList.sort((a, b) => a.createdAt - b.createdAt))
-      setEntries(children.sort((a, b) => {
+      // Hide book-managed filesystems from the user-facing dropdown
+      setFilesystems(fsList.filter(f => !f.name.startsWith(BOOK_FS_PREFIX)).sort((a, b) => a.createdAt - b.createdAt))
+      const hidden = new Set(hiddenPaths ?? [])
+      setEntries(children.filter(e => !hidden.has(e.path)).sort((a, b) => {
         if (a.type !== b.type) return a.type === 'folder' ? -1 : 1
         return a.name.localeCompare(b.name)
       }))
     } catch { /* ignore */ }
-  }, [activeFilesystemId, currentPath])
+  }, [activeFilesystemId, currentPath, hiddenPaths])
 
   useEffect(() => { void reload() }, [reload, reloadTrigger])
 
@@ -239,6 +244,15 @@ export function FileSystemPanel({
   const handleLoadFromUrl = async () => {
     const url = urlInput.trim()
     if (!url) return
+
+    // Book.json URL → open as learning book
+    if (isBookUrl(url)) {
+      setShowUrlDialog(false)
+      setUrlInput('')
+      onBookOpen?.(url)
+      return
+    }
+
     setUrlLoading(true)
     setUrlError('')
     try {
@@ -336,7 +350,7 @@ export function FileSystemPanel({
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
           </svg>
         </ToolbarBtn>
-        <ToolbarBtn title="Load filesystem from URL (ZIP)" onClick={() => { setUrlError(''); setShowUrlDialog(true) }}>
+        <ToolbarBtn title="Open from URL (ZIP or book.json)" onClick={() => { setUrlError(''); setShowUrlDialog(true) }}>
           <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <circle cx="12" cy="12" r="10" strokeWidth="2" />
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M2 12h20M12 2a15.3 15.3 0 010 20M12 2a15.3 15.3 0 000 20" />
@@ -487,10 +501,10 @@ export function FileSystemPanel({
           onClick={() => { if (!urlLoading) { setShowUrlDialog(false); setUrlInput(''); setUrlError('') } }}>
           <div className="bg-slate-800 border border-slate-600 rounded-lg shadow-2xl p-5 w-[440px] max-w-[95vw] text-xs"
             onClick={e => e.stopPropagation()}>
-            <div className="text-sm font-bold text-white mb-1">Load Filesystem from URL</div>
+            <div className="text-sm font-bold text-white mb-1">Open from URL</div>
             <p className="text-slate-400 mb-3 leading-relaxed">
-              Enter a URL to a ZIP file. GitHub raw URLs are automatically routed via jsDelivr to avoid CORS issues.<br />
-              e.g. <span className="text-slate-300 font-mono">https://raw.githubusercontent.com/user/repo/main/files.zip</span>
+              Enter a URL to a <strong className="text-slate-300">book.json</strong> to open a learning book, or a <strong className="text-slate-300">ZIP file</strong> to load as a filesystem.<br />
+              GitHub raw URLs are automatically routed via jsDelivr to avoid CORS issues.
             </p>
             <input
               autoFocus

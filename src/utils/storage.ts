@@ -1,5 +1,25 @@
 import { THEME_STORAGE_KEY, NOTES_STORAGE_KEY, SETTINGS_STORAGE_KEY } from '../constants'
-import type { Theme, AppSettings } from '../types'
+import type { Theme, AppSettings, BookNavState } from '../types'
+
+const BOOK_NAV_KEY = 'pythoncoder-book-nav'
+
+export const getStoredBookNavState = (): BookNavState | null => {
+  try {
+    const raw = localStorage.getItem(BOOK_NAV_KEY)
+    return raw ? (JSON.parse(raw) as BookNavState) : null
+  } catch {
+    return null
+  }
+}
+
+export const persistBookNavState = (state: BookNavState | null): void => {
+  try {
+    if (state) localStorage.setItem(BOOK_NAV_KEY, JSON.stringify(state))
+    else localStorage.removeItem(BOOK_NAV_KEY)
+  } catch {
+    // ignore
+  }
+}
 
 export const getStoredTheme = (): Theme => {
   try {

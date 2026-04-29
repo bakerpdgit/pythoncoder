@@ -186,6 +186,49 @@ export type WorkerMessage =
   | { type: 'input'; prompt: string }
   | { type: 'turtle_update'; svg: string }
 
+// ── Book / learning types ──────────────────────────────────────────────────
+
+export interface BookRef {
+  id: string
+  name: string
+  bookLink: string
+}
+
+export interface BookAdditionalFile {
+  filename: string
+  visible: boolean
+}
+
+export interface BookChallenge {
+  id: string
+  name: string
+  guide?: string
+  py?: string
+  isExample?: string | boolean
+  tests?: Array<{ in: string; out: string }>
+  additionalFiles?: BookAdditionalFile[]
+}
+
+export type BookChild = BookRef | BookChallenge
+
+export interface BookManifest {
+  id?: string
+  name?: string
+  children: BookChild[]
+}
+
+export interface BreadcrumbEntry {
+  name: string
+  bookUrl: string
+}
+
+export interface BookNavState {
+  rootUrl: string
+  currentBookUrl: string
+  breadcrumb: BreadcrumbEntry[]
+  activeChallengeId: string | null
+}
+
 // ── Diagram layout types ───────────────────────────────────────────────────
 
 export interface DiagramMetrics {
