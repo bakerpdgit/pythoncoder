@@ -361,6 +361,12 @@ function toJsDelivrUrl(url: string): string | null {
   return null
 }
 
+function toRawGithubUrl(url: string): string | null {
+  const ghMatch = url.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/(raw|blob)\/([^/]+)\/(.+)$/)
+  if (ghMatch) return `https://raw.githubusercontent.com/${ghMatch[1]}/${ghMatch[2]}/${ghMatch[4]}/${ghMatch[5]}`
+  return null
+}
+
 function detectCommonPrefix(filenames: string[]): string {
   if (filenames.length === 0) return ''
   if (filenames.some(f => !f.includes('/'))) return ''
@@ -376,7 +382,14 @@ async function fetchZip(url: string): Promise<ArrayBuffer> {
     try {
       const r = await fetch(jsdelivrUrl)
       if (r.ok) return r.arrayBuffer()
-    } catch { /* fall through to direct */ }
+    } catch { /* fall through */ }
+  }
+  const rawUrl = toRawGithubUrl(url)
+  if (rawUrl) {
+    try {
+      const r = await fetch(rawUrl)
+      if (r.ok) return r.arrayBuffer()
+    } catch { /* fall through */ }
   }
   const r = await fetch(url)
   if (!r.ok) throw new Error(`HTTP ${r.status} fetching ${url}`)
@@ -387,7 +400,7 @@ export async function loadFilesystemFromUrl(url: string): Promise<string> {
   const { default: JSZip } = await import('jszip')
   const buffer = await fetchZip(url)
   const zip = await JSZip.loadAsync(buffer)
-  const allNames = Object.keys(zip.files).filter(n => !zip.files[n].dir)
+  const allNames = Object.keys(zip.files).filter(n => !zip.files[n].dir && !n.startsWith('__MACOSX'))
   const prefix = detectCommonPrefix(allNames)
   const newFs = await createFilesystem(url)
   for (const [filename, zipFile] of Object.entries(zip.files)) {
