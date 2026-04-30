@@ -1,6 +1,13 @@
 import { useState, useEffect, useRef, useDeferredValue, startTransition } from 'react'
 import TracerWorker from './workers/tracer.worker.ts?worker'
-import Editor, { type Monaco } from '@monaco-editor/react'
+import Editor, { type Monaco, loader } from '@monaco-editor/react'
+
+// In dev, use the locally-installed monaco-editor instead of CDN to avoid the
+// 404 source map error (jsdelivr serves the bundle with a sourceMappingURL that
+// points to a path that doesn't exist on that CDN).
+if (import.meta.env.DEV) {
+  import('monaco-editor').then(m => loader.config({ monaco: m }))
+}
 import type { editor as MonacoEditor } from 'monaco-editor'
 import {
   buildPythonStructureModel, analyzePythonClasses, analyzePythonFunctions,
@@ -485,6 +492,28 @@ export default function App() {
         breakpointsRef.current = next
         setBreakpoints(new Set(next))
       }
+    })
+
+    // Ctrl+Alt+> / Ctrl+Alt+< — editor font size
+    const KM = monaco.KeyMod
+    const KC = monaco.KeyCode
+    editor.addAction({
+      id: 'increase-font-size',
+      label: 'Increase Font Size',
+      keybindings: [KM.CtrlCmd | KM.Alt | KM.Shift | KC.Period],
+      run: (ed) => {
+        const size = ed.getOption(monaco.editor.EditorOption.fontSize)
+        ed.updateOptions({ fontSize: Math.min(size + 1, 40) })
+      },
+    })
+    editor.addAction({
+      id: 'decrease-font-size',
+      label: 'Decrease Font Size',
+      keybindings: [KM.CtrlCmd | KM.Alt | KM.Shift | KC.Comma],
+      run: (ed) => {
+        const size = ed.getOption(monaco.editor.EditorOption.fontSize)
+        ed.updateOptions({ fontSize: Math.max(size - 1, 8) })
+      },
     })
 
     setIsEditorReady(true)
