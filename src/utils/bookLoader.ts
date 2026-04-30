@@ -1,7 +1,19 @@
 import type { BookAdditionalFile, BookChild, BookChallenge, BookManifest, BookRef } from '../types'
-import { listFilesystems, createFilesystem, writeFile, guessMimeType, deleteFilesystem } from './virtualFS'
+import { listFilesystems, createFilesystem, writeFile, guessMimeType, deleteFilesystem, getEntryByPath } from './virtualFS'
+
+function isVfsUrl(url: string): boolean {
+  return url.startsWith('vfs://fs:')
+}
+
+function parseVfsUrl(url: string): { fsId: string; path: string } {
+  const inner = url.slice('vfs://fs:'.length)
+  const slash = inner.indexOf('/')
+  if (slash === -1) return { fsId: inner, path: '/' }
+  return { fsId: inner.slice(0, slash), path: inner.slice(slash) }
+}
 
 export const BOOK_FS_PREFIX = '__book__:'
+export const BOOK_SRC_PREFIX = '__booksrc__:'
 const HIDDEN_KEY = 'pythoncoder-book-hidden'
 
 export function isBookRef(child: BookChild): child is BookRef {
@@ -15,10 +27,19 @@ export function isBookUrl(url: string): boolean {
 
 export function resolveBookUrl(baseUrl: string, relative: string): string {
   const base = baseUrl.endsWith('/') ? baseUrl : baseUrl.slice(0, baseUrl.lastIndexOf('/') + 1)
+  if (base.startsWith('vfs://')) {
+    return base + relative.replace(/^\.\//, '')
+  }
   return new URL(relative, base).href
 }
 
 export async function fetchBookManifest(url: string): Promise<BookManifest> {
+  if (isVfsUrl(url)) {
+    const { fsId, path } = parseVfsUrl(url)
+    const entry = await getEntryByPath(fsId, path)
+    if (!entry?.content) throw new Error(`Cannot load book.json from VFS: ${url}`)
+    return JSON.parse(new TextDecoder().decode(entry.content)) as BookManifest
+  }
   const resp = await fetch(url)
   if (!resp.ok) throw new Error(`Cannot load book.json from ${url}: HTTP ${resp.status}`)
   return resp.json() as Promise<BookManifest>
@@ -43,8 +64,17 @@ export function getHiddenPathsForFs(fsId: string): string[] {
   return getStoredHidden()[fsId] ?? []
 }
 
-export function getChallengeFsName(challengeId: string): string {
-  return `${BOOK_FS_PREFIX}${challengeId}`
+export function getChallengeFsName(challengeId: string, displayName?: string): string {
+  return displayName
+    ? `${BOOK_FS_PREFIX}${challengeId}:${displayName}`
+    : `${BOOK_FS_PREFIX}${challengeId}`
+}
+
+export function getBookFsDisplayName(fsName: string): string {
+  if (!fsName.startsWith(BOOK_FS_PREFIX)) return fsName
+  const inner = fsName.slice(BOOK_FS_PREFIX.length)
+  const colon = inner.indexOf(':')
+  return colon === -1 ? inner : inner.slice(colon + 1)
 }
 
 async function fetchFileIntoFs(
@@ -55,6 +85,13 @@ async function fetchFileIntoFs(
 ): Promise<boolean> {
   const url = resolveBookUrl(baseUrl, relPath)
   try {
+    if (isVfsUrl(url)) {
+      const { fsId: srcFsId, path } = parseVfsUrl(url)
+      const entry = await getEntryByPath(srcFsId, path)
+      if (!entry?.content) return false
+      await writeFile(fsId, `/${relPath}`, entry.content, mime)
+      return true
+    }
     const resp = await fetch(url)
     if (!resp.ok) return false
     const content = await resp.arrayBuffer()
@@ -63,16 +100,21 @@ async function fetchFileIntoFs(
   } catch { return false }
 }
 
+function findExistingChallengeFs(fsList: Array<{ id: string; name: string }>, challengeId: string) {
+  const prefix = BOOK_FS_PREFIX + challengeId
+  return fsList.find(f => f.name === prefix || f.name.startsWith(prefix + ':'))
+}
+
 export async function getOrCreateChallengeFs(
   bookUrl: string,
   challenge: BookChallenge,
   forceReset = false
 ): Promise<{ fsId: string; pyFilename: string | null; hiddenPaths: string[] }> {
-  const fsName = getChallengeFsName(challenge.id)
+  const fsName = getChallengeFsName(challenge.id, challenge.name)
   const fsList = await listFilesystems()
 
   if (!forceReset) {
-    const existing = fsList.find(f => f.name === fsName)
+    const existing = findExistingChallengeFs(fsList, challenge.id)
     if (existing) {
       return {
         fsId: existing.id,
@@ -81,11 +123,11 @@ export async function getOrCreateChallengeFs(
       }
     }
   } else {
-    const existing = fsList.find(f => f.name === fsName)
+    const existing = findExistingChallengeFs(fsList, challenge.id)
     if (existing) await deleteFilesystem(existing.id)
   }
 
-  const fsId = await createFilesystem(fsName)
+  const { id: fsId } = await createFilesystem(fsName)
   const baseUrl = bookUrl.endsWith('/') ? bookUrl : bookUrl.slice(0, bookUrl.lastIndexOf('/') + 1)
   const hiddenPaths: string[] = []
 
@@ -111,6 +153,12 @@ export async function getOrCreateChallengeFs(
 export async function fetchGuideContent(bookUrl: string, guide: string): Promise<string> {
   const baseUrl = bookUrl.endsWith('/') ? bookUrl : bookUrl.slice(0, bookUrl.lastIndexOf('/') + 1)
   const url = resolveBookUrl(baseUrl, normPath(guide))
+  if (isVfsUrl(url)) {
+    const { fsId, path } = parseVfsUrl(url)
+    const entry = await getEntryByPath(fsId, path)
+    if (!entry?.content) throw new Error(`Cannot load guide from VFS: ${url}`)
+    return new TextDecoder().decode(entry.content)
+  }
   const resp = await fetch(url)
   if (!resp.ok) throw new Error(`Cannot load guide: HTTP ${resp.status}`)
   return resp.text()

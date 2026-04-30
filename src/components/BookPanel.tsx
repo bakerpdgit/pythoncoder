@@ -40,9 +40,9 @@ function renderMarkdown(md: string): string {
 
   // Process headings and inline formatting
   text = text
-    .replace(/^### (.+)$/gm, '<h3 class="text-sm font-bold text-slate-200 mt-3 mb-1">$1</h3>')
-    .replace(/^## (.+)$/gm, '<h2 class="text-sm font-bold text-sky-300 mt-3 mb-1">$1</h2>')
-    .replace(/^# (.+)$/gm, '<h1 class="text-sm font-bold text-emerald-300 mt-2 mb-1">$1</h1>')
+    .replace(/^### (.+)$/gm, '<h3 class="text-base font-bold text-slate-200 mt-4 mb-1">$1</h3>')
+    .replace(/^## (.+)$/gm, '<h2 class="text-base font-bold text-sky-300 mt-4 mb-1">$1</h2>')
+    .replace(/^# (.+)$/gm, '<h1 class="text-lg font-bold text-emerald-300 mt-3 mb-2">$1</h1>')
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
     .replace(/\*([^*\n]+)\*/g, '<em>$1</em>')
 
@@ -55,7 +55,7 @@ function renderMarkdown(md: string): string {
     if (s.startsWith('<h') || s.startsWith('\x00B')) {
       parts.push(s.replace(/\n/g, ' '))
     } else {
-      parts.push(`<p class="mb-2 leading-relaxed">${s.replace(/\n/g, ' ')}</p>`)
+      parts.push(`<p class="mb-3 leading-relaxed">${s.replace(/\n/g, ' ')}</p>`)
     }
   }
   text = parts.join('\n')
@@ -307,7 +307,7 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
               </div>
             ) : (
               <div
-                className="text-slate-300 text-xs leading-relaxed"
+                className="text-slate-300 text-sm leading-relaxed"
                 dangerouslySetInnerHTML={{ __html: renderMarkdown(guideMarkdown) }}
               />
             )}

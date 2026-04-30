@@ -5,7 +5,7 @@ import {
   isTextMime, isImageMime, downloadEntryAsZip, downloadSingleFile, writeFile,
   getParentPath, loadFilesystemFromUrl,
 } from '../utils/virtualFS'
-import { isBookUrl, BOOK_FS_PREFIX } from '../utils/bookLoader'
+import { isBookUrl, BOOK_FS_PREFIX, BOOK_SRC_PREFIX, getBookFsDisplayName } from '../utils/bookLoader'
 import { ConfirmDialog } from './dialogs/ConfirmDialog'
 import { SaveFileDialog } from './dialogs/SaveFileDialog'
 import type { VFSEntry, VFSFilesystem } from '../types'
@@ -15,12 +15,15 @@ interface Props {
   currentWorkingDir: string
   openFilePath: string | null
   hiddenPaths?: string[]
+  isChallengeMode?: boolean
   onFilesystemChange: (id: string) => void
   onFilesystemForcedChange: (id: string) => void
   onCwdChange: (path: string) => void
   onOpenFile: (entry: VFSEntry) => void
   onError: (msg: string) => void
   onBookOpen?: (url: string) => void
+  onLocalFileImport?: (fileMap: Map<string, ArrayBuffer>, sourceName: string) => Promise<void>
+  onFolderConnect?: (handle: FileSystemDirectoryHandle) => Promise<void>
   reloadTrigger: number
 }
 
@@ -33,10 +36,12 @@ interface ImagePreview {
 }
 
 export function FileSystemPanel({
-  activeFilesystemId, currentWorkingDir, openFilePath, hiddenPaths,
-  onFilesystemChange, onFilesystemForcedChange, onCwdChange, onOpenFile, onError, onBookOpen, reloadTrigger,
+  activeFilesystemId, currentWorkingDir, openFilePath, hiddenPaths, isChallengeMode,
+  onFilesystemChange, onFilesystemForcedChange, onCwdChange, onOpenFile, onError, onBookOpen,
+  onLocalFileImport, onFolderConnect, reloadTrigger,
 }: Props) {
   const [filesystems, setFilesystems] = useState<VFSFilesystem[]>([])
+  const [currentFsEntry, setCurrentFsEntry] = useState<VFSFilesystem | null>(null)
   const [currentPath, setCurrentPath] = useState('/')
   const [entries, setEntries] = useState<VFSEntry[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -57,6 +62,7 @@ export function FileSystemPanel({
   const [urlLoading, setUrlLoading] = useState(false)
   const [urlError, setUrlError] = useState('')
   const uploadInputRef = useRef<HTMLInputElement>(null)
+  const zipInputRef = useRef<HTMLInputElement>(null)
   const fsMenuRef = useRef<HTMLDivElement>(null)
 
   const reload = useCallback(async () => {
@@ -65,8 +71,9 @@ export function FileSystemPanel({
         listFilesystems(),
         listChildren(activeFilesystemId, currentPath),
       ])
-      // Hide book-managed filesystems from the user-facing dropdown
-      setFilesystems(fsList.filter(f => !f.name.startsWith(BOOK_FS_PREFIX)).sort((a, b) => a.createdAt - b.createdAt))
+      const activeFsEntry = fsList.find(f => f.id === activeFilesystemId)
+      setCurrentFsEntry(activeFsEntry ?? null)
+      setFilesystems(fsList.filter(f => !f.name.startsWith(BOOK_FS_PREFIX) && !f.name.startsWith(BOOK_SRC_PREFIX)).sort((a, b) => a.createdAt - b.createdAt))
       const hidden = new Set(hiddenPaths ?? [])
       setEntries(children.filter(e => !hidden.has(e.path)).sort((a, b) => {
         if (a.type !== b.type) return a.type === 'folder' ? -1 : 1
@@ -209,10 +216,10 @@ export function FileSystemPanel({
   const handleCreateFs = async () => {
     if (!newFsName.trim()) return
     try {
-      await createFilesystem(newFsName.trim())
+      const { id: newFsId } = await createFilesystem(newFsName.trim())
       setNewFsName(''); setShowNewFsDialog(false)
-      const fsList = await listFilesystems()
-      setFilesystems(fsList.sort((a, b) => a.createdAt - b.createdAt))
+      void reload()
+      onFilesystemChange(newFsId)
     } catch (err) { onError(String(err)) }
   }
 
@@ -225,7 +232,7 @@ export function FileSystemPanel({
           await deleteFilesystem(fs.id)
           if (activeFilesystemId === fs.id) onFilesystemForcedChange('default')
           const fsList = await listFilesystems()
-          setFilesystems(fsList.sort((a, b) => a.createdAt - b.createdAt))
+          setFilesystems(fsList.filter(f => !f.name.startsWith(BOOK_FS_PREFIX) && !f.name.startsWith(BOOK_SRC_PREFIX)).sort((a, b) => a.createdAt - b.createdAt))
         } catch (err) { onError(String(err)) }
         setConfirmConfig(null)
       },
@@ -276,65 +283,120 @@ export function FileSystemPanel({
     }
   }
 
+  const handleZipFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    try {
+      const { default: JSZip } = await import('jszip')
+      const zip = await JSZip.loadAsync(await file.arrayBuffer())
+      const allNames = Object.keys(zip.files).filter(n => !zip.files[n].dir && !n.startsWith('__MACOSX'))
+      const prefix = (() => {
+        if (allNames.length === 0) return ''
+        const parts0 = allNames[0].split('/')
+        let common = parts0.slice(0, -1).join('/') + (parts0.length > 1 ? '/' : '')
+        for (const n of allNames) {
+          while (common && !n.startsWith(common)) common = common.slice(0, common.lastIndexOf('/', common.length - 2) + 1)
+          if (!common) break
+        }
+        return common
+      })()
+      const fileMap = new Map<string, ArrayBuffer>()
+      for (const name of allNames) {
+        const stripped = prefix ? name.slice(prefix.length) : name
+        if (!stripped) continue
+        fileMap.set(stripped, await zip.files[name].async('arraybuffer'))
+      }
+      const zipName = file.name.replace(/\.zip$/i, '')
+      await onLocalFileImport?.(fileMap, zipName)
+    } catch (err) { onError(err instanceof Error ? err.message : String(err)) }
+  }
+
+  const handleFolderOpen = async () => {
+    if (!('showDirectoryPicker' in window)) {
+      onError('Your browser does not support the File System Access API.')
+      return
+    }
+    try {
+      const handle = await (window as typeof window & { showDirectoryPicker: (o?: object) => Promise<FileSystemDirectoryHandle> }).showDirectoryPicker({ mode: 'readwrite' })
+      await onFolderConnect?.(handle)
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return
+      onError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
   const currentFs = filesystems.find(f => f.id === activeFilesystemId)
 
   return (
     <div className="flex flex-col h-full overflow-hidden text-xs select-none">
-      {/* Filesystem selector */}
+      {/* Filesystem selector / challenge label */}
       <div className="px-2 py-2 border-b border-slate-700 flex items-center gap-1 flex-shrink-0">
-        <div className="relative flex-1" ref={fsMenuRef}>
-          <button onClick={() => setShowFsMenu(o => !o)}
-            className="w-full flex items-center justify-between gap-1 px-2 py-1.5 rounded border border-slate-600 bg-slate-900 text-slate-300 text-xs hover:border-slate-500 transition-colors">
-            <span className="truncate">{currentFs?.name ?? '...'}</span>
-            <svg className="w-3 h-3 flex-shrink-0 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
+        {isChallengeMode ? (
+          <div className="flex items-center gap-1.5 px-2 py-1.5 rounded border border-slate-700 bg-slate-900 text-amber-400 text-xs flex-1 min-w-0">
+            <svg className="w-3 h-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
             </svg>
-          </button>
-          {showFsMenu && (
-            <div className="absolute top-full left-0 right-0 mt-1 z-40 bg-slate-800 border border-slate-600 rounded shadow-xl">
-              {filesystems.map(fs => (
-                <div key={fs.id} className="flex items-center justify-between px-2 py-1.5 hover:bg-slate-700 transition-colors">
-                  <button className={`flex-1 text-left truncate ${fs.id === activeFilesystemId ? 'text-emerald-400' : 'text-slate-300'}`}
-                    onClick={() => { onFilesystemChange(fs.id); setShowFsMenu(false) }}>
-                    {fs.name}
-                  </button>
-                  {fs.id !== 'default' && (
-                    <button onClick={() => { handleDeleteFs(fs); setShowFsMenu(false) }}
-                      className="text-slate-500 hover:text-red-400 ml-2 flex-shrink-0">
+            <span className="truncate font-medium">
+              {currentFsEntry ? getBookFsDisplayName(currentFsEntry.name) : 'Challenge Files'}
+            </span>
+          </div>
+        ) : (
+          <div className="relative flex-1" ref={fsMenuRef}>
+            <button onClick={() => setShowFsMenu(o => !o)}
+              className="w-full flex items-center justify-between gap-1 px-2 py-1.5 rounded border border-slate-600 bg-slate-900 text-slate-300 text-xs hover:border-slate-500 transition-colors">
+              <span className="truncate">{currentFs?.name ?? '...'}</span>
+              <svg className="w-3 h-3 flex-shrink-0 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+            {showFsMenu && (
+              <div className="absolute top-full left-0 right-0 mt-1 z-40 bg-slate-800 border border-slate-600 rounded shadow-xl">
+                {filesystems.map(fs => (
+                  <div key={fs.id} className="flex items-center justify-between px-2 py-1.5 hover:bg-slate-700 transition-colors">
+                    <button className={`flex-1 text-left truncate ${fs.id === activeFilesystemId ? 'text-emerald-400' : 'text-slate-300'}`}
+                      onClick={() => { onFilesystemChange(fs.id); setShowFsMenu(false) }}>
+                      {fs.name}
+                    </button>
+                    {fs.id !== 'default' && (
+                      <button onClick={() => { handleDeleteFs(fs); setShowFsMenu(false) }}
+                        className="text-slate-500 hover:text-red-400 ml-2 flex-shrink-0">
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                      </button>
+                    )}
+                  </div>
+                ))}
+                <div className="border-t border-slate-700">
+                  {showNewFsDialog ? (
+                    <div className="px-2 py-2 flex gap-1">
+                      <input autoFocus value={newFsName} onChange={e => setNewFsName(e.target.value)}
+                        onKeyDown={e => { if (e.key === 'Enter') void handleCreateFs(); if (e.key === 'Escape') { setShowNewFsDialog(false); setNewFsName('') } }}
+                        className="flex-1 bg-slate-900 border border-slate-600 rounded px-2 py-1 text-xs text-white focus:outline-none focus:ring-1 focus:ring-sky-400"
+                        placeholder="FS name..." />
+                      <button onClick={() => void handleCreateFs()} className="px-2 py-1 bg-sky-600 text-white text-xs rounded">OK</button>
+                    </div>
+                  ) : (
+                    <button onClick={() => setShowNewFsDialog(true)}
+                      className="w-full text-left px-2 py-2 text-slate-400 hover:text-slate-200 hover:bg-slate-700 flex items-center gap-1 transition-colors">
                       <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
                       </svg>
+                      New filesystem
                     </button>
                   )}
                 </div>
-              ))}
-              <div className="border-t border-slate-700">
-                {showNewFsDialog ? (
-                  <div className="px-2 py-2 flex gap-1">
-                    <input autoFocus value={newFsName} onChange={e => setNewFsName(e.target.value)}
-                      onKeyDown={e => { if (e.key === 'Enter') void handleCreateFs(); if (e.key === 'Escape') { setShowNewFsDialog(false); setNewFsName('') } }}
-                      className="flex-1 bg-slate-900 border border-slate-600 rounded px-2 py-1 text-xs text-white focus:outline-none focus:ring-1 focus:ring-sky-400"
-                      placeholder="FS name..." />
-                    <button onClick={() => void handleCreateFs()} className="px-2 py-1 bg-sky-600 text-white text-xs rounded">OK</button>
-                  </div>
-                ) : (
-                  <button onClick={() => setShowNewFsDialog(true)}
-                    className="w-full text-left px-2 py-2 text-slate-400 hover:text-slate-200 hover:bg-slate-700 flex items-center gap-1 transition-colors">
-                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
-                    </svg>
-                    New filesystem
-                  </button>
-                )}
               </div>
-            </div>
-          )}
-        </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Toolbar */}
       <div className="px-2 py-1 border-b border-slate-700 flex items-center gap-1 flex-shrink-0">
         <input ref={uploadInputRef} type="file" className="hidden" onChange={handleUpload} />
+        <input ref={zipInputRef} type="file" accept=".zip" className="hidden" onChange={e => void handleZipFileChange(e)} />
         <ToolbarBtn title="New file" onClick={handleNewFile}>
           <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 13h6m-3-3v6m-9 1V7a2 2 0 012-2h6l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
@@ -348,6 +410,18 @@ export function FileSystemPanel({
         <ToolbarBtn title="Upload file" onClick={() => uploadInputRef.current?.click()}>
           <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+          </svg>
+        </ToolbarBtn>
+        <ToolbarBtn title="Open local ZIP file (import as filesystem or learning book)" onClick={() => zipInputRef.current?.click()}>
+          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8l1 12a2 2 0 002 2h8a2 2 0 002-2l1-12" />
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 12h4" />
+          </svg>
+        </ToolbarBtn>
+        <ToolbarBtn title="Connect local folder (live filesystem or learning book)" onClick={() => void handleFolderOpen()}>
+          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 11v6m-3-3l3 3 3-3" />
           </svg>
         </ToolbarBtn>
         <ToolbarBtn title="Open from URL (ZIP or book.json)" onClick={() => { setUrlError(''); setShowUrlDialog(true) }}>

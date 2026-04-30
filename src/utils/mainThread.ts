@@ -755,6 +755,7 @@ class _TurtleYielder(ast.NodeTransformer):
         self.generic_visit(node); node.body.append(self._yield()); return node
     def visit_While(self, node):
         self.generic_visit(node); node.body.append(self._yield()); return node
+    def visit_FunctionDef(self, node): return node
     def visit_Module(self, node):
         self.generic_visit(node)
         # import * is illegal inside a function; hoist those stmts to module level
@@ -822,6 +823,7 @@ builtins.input = __coder_prompt_input
 
 _turtle_sw = 600; _turtle_sh = 600; _turtle_bg = 'white'
 _turtle_elements = []
+_all_turtles = []
 
 def _tx(x): return x + _turtle_sw / 2
 def _ty(y): return _turtle_sh / 2 - y
@@ -855,16 +857,17 @@ def _get_svg():
     parts=[f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}">',
            f'<rect width="{w}" height="{h}" fill="{_turtle_bg}"/>']
     parts.extend(_turtle_elements)
-    if _svg_turtle._visible:
-        hr=math.radians(_svg_turtle._heading)
-        fx=math.cos(hr);fy=-math.sin(hr)
-        px=math.sin(hr);py=math.cos(hr)
-        tx=_tx(_svg_turtle._x);ty=_ty(_svg_turtle._y)
-        tip_x=tx+10*fx;tip_y=ty+10*fy
-        bl_x=tx-7*fx+5*px;bl_y=ty-7*fy+5*py
-        br_x=tx-7*fx-5*px;br_y=ty-7*fy-5*py
-        pts=f'{tip_x:.1f},{tip_y:.1f} {bl_x:.1f},{bl_y:.1f} {br_x:.1f},{br_y:.1f}'
-        parts.append(f'<polygon points="{pts}" fill="{_safe(_svg_turtle._fc)}" stroke="white" stroke-width="1" stroke-linejoin="round"/>')
+    for _t in (_all_turtles if _all_turtles else [_svg_turtle]):
+        if _t._visible:
+            hr=math.radians(_t._heading)
+            fx=math.cos(hr);fy=-math.sin(hr)
+            px=math.sin(hr);py=math.cos(hr)
+            tx=_tx(_t._x);ty=_ty(_t._y)
+            tip_x=tx+10*fx;tip_y=ty+10*fy
+            bl_x=tx-7*fx+5*px;bl_y=ty-7*fy+5*py
+            br_x=tx-7*fx-5*px;br_y=ty-7*fy-5*py
+            pts=f'{tip_x:.1f},{tip_y:.1f} {bl_x:.1f},{bl_y:.1f} {br_x:.1f},{br_y:.1f}'
+            parts.append(f'<polygon points="{pts}" fill="{_safe(_t._fc)}" stroke="white" stroke-width="1" stroke-linejoin="round"/>')
     parts.append('</svg>')
     return ''.join(parts)
 
@@ -911,6 +914,7 @@ class _SvgTurtle:
         self._pen=True;self._pc2='black';self._fc='black'
         self._pw=1;self._visible=True;self._speed=6
         self._filling=False;self._fp=[]
+        _all_turtles.append(self)
 
     def _line(self,nx,ny):
         if self._pen:
@@ -1030,6 +1034,7 @@ class _SvgTurtle:
 
 _svg_screen=_SvgScreen()
 _svg_turtle=_SvgTurtle()
+_all_turtles.pop()
 _emit()
 
 _turtle_mod=_types_mod.ModuleType('turtle')
@@ -1095,6 +1100,7 @@ import math as _math, sys as _sys, types as _types_mod
 
 _turtle_sw = 600; _turtle_sh = 600; _turtle_bg = 'white'
 _turtle_elements = []
+_all_turtles = []
 __turtle_svg__ = ''
 
 def _tx(x): return x + _turtle_sw / 2
@@ -1128,16 +1134,17 @@ def _refresh_svg():
     parts=[f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}">',
            f'<rect width="{w}" height="{h}" fill="{_turtle_bg}"/>']
     parts.extend(_turtle_elements)
-    if _wturtle._visible:
-        hr=_math.radians(_wturtle._heading)
+    for _t in (_all_turtles if _all_turtles else [_wturtle]):
+        hr=_math.radians(_t._heading)
         fx=_math.cos(hr);fy=-_math.sin(hr)
         px=_math.sin(hr);py=_math.cos(hr)
-        tx=_tx(_wturtle._x);ty=_ty(_wturtle._y)
+        tx=_tx(_t._x);ty=_ty(_t._y)
         tip_x=tx+10*fx;tip_y=ty+10*fy
         bl_x=tx-7*fx+5*px;bl_y=ty-7*fy+5*py
         br_x=tx-7*fx-5*px;br_y=ty-7*fy-5*py
         pts=f'{tip_x:.1f},{tip_y:.1f} {bl_x:.1f},{bl_y:.1f} {br_x:.1f},{br_y:.1f}'
-        parts.append(f'<polygon points="{pts}" fill="{_safe(_wturtle._fc)}" stroke="white" stroke-width="1" stroke-linejoin="round"/>')
+        fc=_safe(_t._fc) if _t._visible else 'none'
+        parts.append(f'<polygon points="{pts}" fill="{fc}" stroke="white" stroke-width="1" stroke-linejoin="round"/>')
     parts.append('</svg>')
     __turtle_svg__=''.join(parts)
 
@@ -1179,6 +1186,7 @@ class _WTurtle:
         self._pen=True;self._pc2='black';self._fc='black'
         self._pw=1;self._visible=True;self._speed=6
         self._filling=False;self._fp=[]
+        _all_turtles.append(self)
     def _line(self,nx,ny):
         if self._pen:
             _turtle_elements.append(
@@ -1289,6 +1297,7 @@ class _WTurtle:
 
 _wscreen=_WScreen()
 _wturtle=_WTurtle()
+_all_turtles.pop()
 _refresh_svg()
 
 _turtle_mod=_types_mod.ModuleType('turtle')

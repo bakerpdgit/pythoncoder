@@ -420,3 +420,33 @@ export async function ensureFilesystemFromUrl(url: string): Promise<string> {
   if (existing) return existing.id
   return loadFilesystemFromUrl(url)
 }
+
+export async function importFileMapToFs(
+  fsId: string,
+  fileMap: Map<string, ArrayBuffer>,
+  overwrite = true
+): Promise<void> {
+  for (const [rawPath, content] of fileMap) {
+    const cleanPath = '/' + rawPath.replace(/^\//, '')
+    const parentPath = getParentPath(cleanPath)
+    const name = cleanPath.substring(cleanPath.lastIndexOf('/') + 1)
+    if (!name) continue
+    if (parentPath !== '/') {
+      const parts = parentPath.split('/').filter(Boolean)
+      let accPath = ''
+      for (const part of parts) {
+        accPath += '/' + part
+        if (!(await getEntryByPath(fsId, accPath))) {
+          await createEntry(fsId, getParentPath(accPath), part, 'folder')
+        }
+      }
+    }
+    const mime = guessMimeType(name)
+    if (overwrite) {
+      await writeFile(fsId, cleanPath, content, mime)
+    } else {
+      const existing = await getEntryByPath(fsId, cleanPath)
+      if (!existing) await createEntry(fsId, parentPath, name, 'file', content, mime)
+    }
+  }
+}

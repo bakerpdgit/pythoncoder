@@ -1,6 +1,6 @@
 export type Theme = 'dark' | 'light'
 export type RuntimeKey = 'trace-worker' | 'main-thread'
-export type DiagramView = 'hierarchy' | 'outline' | 'uml' | 'turtle'
+export type DiagramView = 'hierarchy' | 'outline' | 'uml' | 'turtle' | 'notes'
 export type TurtleMode = 'pyo-js-turtle' | 'basthon-svg'
 
 export interface AppSettings {

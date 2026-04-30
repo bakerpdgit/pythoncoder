@@ -48,23 +48,18 @@ export const PANEL_OPTIONS = [
   },
   {
     key: 'visualizer',
-    label: 'Inspectors',
-    description: 'Fixed globals and current-locals inspectors.',
-  },
-  {
-    key: 'diagram',
-    label: 'Structure / Canvas',
-    description: 'Function hierarchy, UML view, or canvas output.',
-  },
-  {
-    key: 'notes',
-    label: 'Documentation Notes',
-    description: 'Editable per-function notes attached to live execution.',
+    label: 'Variable Inspector',
+    description: 'Globals and locals inspectors stacked below the file system.',
   },
   {
     key: 'output',
     label: 'Console Output',
     description: 'stdout, stderr and runtime messages.',
+  },
+  {
+    key: 'diagram',
+    label: 'Structure',
+    description: 'Outline, hierarchy, UML, turtle and notes tabs.',
   },
 ] as const
 

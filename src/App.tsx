@@ -10,11 +10,12 @@ import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides, getStored
 import { triggerDownload, getBaseFileStem } from './utils/download'
 import { buildCommentExport, buildDocstringExport, getDefinitionNote, getDefaultDefinitionNote, sanitizeNoteText } from './utils/export'
 import { loadMainThreadPyodide, resetMainThreadPyodide, PYGAME_MAIN_THREAD_BOOTSTRAP, TURTLE_CANVAS_BOOTSTRAP, TURTLE_SVG_BOOTSTRAP, SVG_TURTLE_WORKER_SETUP } from './utils/mainThread'
-import { fetchBookManifest, getOrCreateChallengeFs, getHiddenPathsForFs } from './utils/bookLoader'
+import { fetchBookManifest, getOrCreateChallengeFs, getHiddenPathsForFs, BOOK_FS_PREFIX, BOOK_SRC_PREFIX } from './utils/bookLoader'
 import {
   ensureDefaultFilesystem, getAllFiles, syncFilesFromPyodide, writeFile,
   isTextMime, guessMimeType, mountFilesToPyodide, readFilesFromPyodide,
   getEntryByPath, cleanFilesFromPyodide, ensureFilesystemFromUrl,
+  createFilesystem, deleteFilesystem, listFilesystems, importFileMapToFs,
 } from './utils/virtualFS'
 import { FileSystemPanel } from './components/FileSystemPanel'
 import { BookPanel } from './components/BookPanel'
@@ -42,6 +43,32 @@ import type {
   StructureModel, DiagramModel, HierarchyModel, OutlineModel, DiagramView, VFSEntry,
   AppSettings, BookNavState, BookChallenge,
 } from './types'
+
+async function readDirectoryToMap(handle: FileSystemDirectoryHandle, prefix = ''): Promise<Map<string, ArrayBuffer>> {
+  const map = new Map<string, ArrayBuffer>()
+  for await (const [name, entry] of handle) {
+    const relPath = prefix ? `${prefix}/${name}` : name
+    if (entry.kind === 'directory') {
+      const sub = await readDirectoryToMap(entry as FileSystemDirectoryHandle, relPath)
+      for (const [k, v] of sub) map.set(k, v)
+    } else {
+      const file = await (entry as FileSystemFileHandle).getFile()
+      map.set(relPath, await file.arrayBuffer())
+    }
+  }
+  return map
+}
+
+async function writeFileToFolderHandle(root: FileSystemDirectoryHandle, vfsPath: string, content: ArrayBuffer): Promise<void> {
+  const parts = vfsPath.replace(/^\//, '').split('/')
+  const filename = parts.pop()!
+  let dir = root
+  for (const part of parts) dir = await dir.getDirectoryHandle(part, { create: true })
+  const fh = await dir.getFileHandle(filename, { create: true })
+  const w = await fh.createWritable()
+  await w.write(content)
+  await w.close()
+}
 
 const MONACO_DARK_THEME: MonacoEditor.IStandaloneThemeData = {
   base: 'vs-dark', inherit: true,
@@ -112,6 +139,7 @@ export default function App() {
   const [appSettings, setAppSettings] = useState<AppSettings>(() => getStoredSettings())
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [visiblePanels, setVisiblePanels] = useState<PanelVisibility>({ code: true, visualizer: true, diagram: true, notes: true, output: true, filesystem: true })
+  // notes is now a tab inside Structure, not a separate panel — kept in type for compat
   const [activeFilesystemId, setActiveFilesystemId] = useState<string>('default')
   const [currentWorkingDir, setCurrentWorkingDir] = useState<string>('/')
   const [openFilePath, setOpenFilePath] = useState<string | null>(null)
@@ -124,16 +152,19 @@ export default function App() {
   const [diagramFontSize, setDiagramFontSize] = useState(DIAGRAM_FONT_DEFAULT)
   const [isPanelMenuOpen, setIsPanelMenuOpen] = useState(false)
   const [isRuntimeMenuOpen, setIsRuntimeMenuOpen] = useState(false)
-  const [diagramView, setDiagramView] = useState<DiagramView>('hierarchy')
+  const [diagramView, setDiagramView] = useState<DiagramView>('outline')
   const [outlineExpandedIds, setOutlineExpandedIds] = useState<Set<string>>(() => new Set())
   const [showInterpreterVars] = useState(false)
   const [globalsInspectorPath, setGlobalsInspectorPath] = useState<InspectorPath>([])
   const [localsInspectorPath, setLocalsInspectorPath] = useState<InspectorPath>([])
   const [breakpoints, setBreakpoints] = useState<Set<number>>(new Set())
   const breakpointsRef = useRef<Set<number>>(new Set())
-  const [leftWidth, setLeftWidth] = useState(41.67)
-  const [rightTopHeight, setRightTopHeight] = useState(50)
-  const [bottomLeftWidth, setBottomLeftWidth] = useState(42.86)
+  const [leftWidth, setLeftWidth] = useState(55)         // % of center for code vs right col
+  const [fsSidebarWidth, setFsSidebarWidth] = useState(224)  // px width of left sidebar
+  const [leftSidebarSplit, setLeftSidebarSplit] = useState(55) // % of left sidebar for FS (top)
+  const [inspectorSplit, setInspectorSplit] = useState(50)    // % of inspector for globals (top)
+  const [rightColSplit, setRightColSplit] = useState(42)      // % of right col for Console (top)
+  const [bookPanelWidth, setBookPanelWidth] = useState(360)   // px width of book panel
 
   const workerRef = useRef<Worker | null>(null)
   const sabRef = useRef<SabRef | null>(null)
@@ -151,22 +182,26 @@ export default function App() {
   const mainThreadCanvasSnapshotRef = useRef<HTMLCanvasElement | null>(null)
   const mainThreadCanvasWatcherRef = useRef(0)
   const mainThreadStopRequestedRef = useRef<boolean>(false)
-  const pygameLayoutSnapshotRef = useRef<{ visiblePanels: PanelVisibility; leftWidth: number; rightTopHeight: number; bottomLeftWidth: number } | null>(null)
-  const consoleLayoutSnapshotRef = useRef<{ visiblePanels: PanelVisibility; leftWidth: number; rightTopHeight: number; bottomLeftWidth: number } | null>(null)
-  const turtleLayoutSnapshotRef = useRef<{ visiblePanels: PanelVisibility; leftWidth: number; rightTopHeight: number; bottomLeftWidth: number } | null>(null)
-  const svgTurtleLayoutSnapshotRef = useRef<{ visiblePanels: PanelVisibility; leftWidth: number; rightTopHeight: number; bottomLeftWidth: number } | null>(null)
+  const pygameLayoutSnapshotRef = useRef<{ visiblePanels: PanelVisibility; leftWidth: number } | null>(null)
+  const consoleLayoutSnapshotRef = useRef<{ visiblePanels: PanelVisibility; leftWidth: number } | null>(null)
+  const turtleLayoutSnapshotRef = useRef<{ visiblePanels: PanelVisibility; leftWidth: number } | null>(null)
+  const svgTurtleLayoutSnapshotRef = useRef<{ visiblePanels: PanelVisibility; leftWidth: number } | null>(null)
   const mainThreadRunIdRef = useRef(0)
   const mainThreadAbandonedRef = useRef(false)
   const noteDraftRef = useRef('')
   const isInsightEditingRef = useRef(false)
   const activeInsightKeyRef = useRef('')
   const savedCodeRef = useRef('')
-  const resizeDragRef = useRef<string | null>(null)
+  const resizeDragRef = useRef<{ type: string; startX: number; startY: number; startVal: number } | null>(null)
+  const localFolderHandleRef = useRef<FileSystemDirectoryHandle | null>(null)
+  const localFolderFsIdRef = useRef<string | null>(null)
   const mainContainerRef = useRef<HTMLDivElement | null>(null)
+  const centerRef = useRef<HTMLDivElement | null>(null)
+  const leftSidebarRef = useRef<HTMLDivElement | null>(null)
+  const rightColRef = useRef<HTMLDivElement | null>(null)
+  const inspectorRef = useRef<HTMLDivElement | null>(null)
   const mainThreadMountedPathsRef = useRef<string[]>([])
   const workerRunModeRef = useRef(false)
-  const rightSideRef = useRef<HTMLDivElement | null>(null)
-  const bottomRowRef = useRef<HTMLDivElement | null>(null)
   const turtleSvgHistoryRef = useRef<string[]>([])
   const turtleScrubLockedRef = useRef(false)
 
@@ -197,12 +232,14 @@ export default function App() {
     || (currentClass ? `${currentClass}.${currentFunc}()` : currentFunc ? `${currentFunc}()` : 'Global Scope')
   const hasCustomInsightNote = !!activeInsightDefinition && Object.prototype.hasOwnProperty.call(noteOverrides, activeInsightDefinition.key)
   const canExportNotes = structureModel.orderedDefinitions.length > 0 && hasCode
-  const hasNotesOrOutput = visiblePanels.notes || visiblePanels.output
   const displayedTurtleSvg = turtleSvgHistory.length > 0 && turtleScrubStep >= 0 && turtleScrubStep < turtleSvgHistory.length
     ? turtleSvgHistory[turtleScrubStep]
     : turtleSvg
-  const hasBottomPanels = visiblePanels.diagram || hasNotesOrOutput
-  const hasRightSidePanels = visiblePanels.visualizer || hasBottomPanels
+  const hasLeftSidebar = visiblePanels.filesystem || visiblePanels.visualizer
+  const hasInspectorAndFs = visiblePanels.filesystem && visiblePanels.visualizer
+  const hasRightCol = visiblePanels.output || visiblePanels.diagram
+  const hasConsoleAndStructure = visiblePanels.output && visiblePanels.diagram
+  const hasBookPanel = !!bookNavState
 
   // ── Effects ──────────────────────────────────────────────────────────────
 
@@ -229,10 +266,9 @@ export default function App() {
       const savedNav = getStoredBookNavState()
       if (savedNav?.activeChallengeId) {
         const { listFilesystems: lfs, listChildren: lc } = await import('./utils/virtualFS')
-        const { getChallengeFsName } = await import('./utils/bookLoader')
         const fsList = await lfs()
-        const fsName = getChallengeFsName(savedNav.activeChallengeId)
-        const challengeFs = fsList.find(f => f.name === fsName)
+        const idPrefix = BOOK_FS_PREFIX + savedNav.activeChallengeId
+        const challengeFs = fsList.find(f => f.name === idPrefix || f.name.startsWith(idPrefix + ':'))
         if (challengeFs) {
           setActiveFilesystemId(challengeFs.id)
           setChallengeHiddenPaths(getHiddenPathsForFs(challengeFs.id))
@@ -267,11 +303,11 @@ export default function App() {
     if (!editorRef.current || !visiblePanels.code) return
     const frameId = requestAnimationFrame(() => editorRef.current?.layout())
     return () => cancelAnimationFrame(frameId)
-  }, [leftWidth, rightTopHeight, bottomLeftWidth, visiblePanels.code, visiblePanels.visualizer, visiblePanels.diagram, visiblePanels.notes, visiblePanels.output, visiblePanels.filesystem])
+  }, [leftWidth, fsSidebarWidth, leftSidebarSplit, inspectorSplit, rightColSplit, bookPanelWidth, visiblePanels.code, visiblePanels.visualizer, visiblePanels.diagram, visiblePanels.output, visiblePanels.filesystem])
 
   useEffect(() => {
-    if (!visiblePanels.notes) setShowExportDialog(false)
-  }, [visiblePanels.notes])
+    if (!visiblePanels.diagram) setShowExportDialog(false)
+  }, [visiblePanels.diagram])
 
   useEffect(() => { persistNoteOverrides(noteOverrides) }, [noteOverrides])
   useEffect(() => { persistSettings(appSettings) }, [appSettings])
@@ -311,16 +347,24 @@ export default function App() {
 
   useEffect(() => {
     const onMouseMove = (e: MouseEvent) => {
-      if (!resizeDragRef.current) return
-      if (resizeDragRef.current === 'col-main' && mainContainerRef.current) {
-        const rect = mainContainerRef.current.getBoundingClientRect()
-        setLeftWidth(Math.max(15, Math.min(75, ((e.clientX - rect.left) / rect.width) * 100)))
-      } else if (resizeDragRef.current === 'row-right' && rightSideRef.current) {
-        const rect = rightSideRef.current.getBoundingClientRect()
-        setRightTopHeight(Math.max(15, Math.min(85, ((e.clientY - rect.top) / rect.height) * 100)))
-      } else if (resizeDragRef.current === 'col-bottom' && bottomRowRef.current) {
-        const rect = bottomRowRef.current.getBoundingClientRect()
-        setBottomLeftWidth(Math.max(15, Math.min(85, ((e.clientX - rect.left) / rect.width) * 100)))
+      const drag = resizeDragRef.current
+      if (!drag) return
+      if (drag.type === 'col-main' && centerRef.current) {
+        const rect = centerRef.current.getBoundingClientRect()
+        setLeftWidth(Math.max(20, Math.min(80, ((e.clientX - rect.left) / rect.width) * 100)))
+      } else if (drag.type === 'col-fssidebar') {
+        setFsSidebarWidth(Math.max(160, Math.min(400, drag.startVal + (e.clientX - drag.startX))))
+      } else if (drag.type === 'col-bookpanel') {
+        setBookPanelWidth(Math.max(240, Math.min(600, drag.startVal + (drag.startX - e.clientX))))
+      } else if (drag.type === 'row-leftsidebar' && leftSidebarRef.current) {
+        const rect = leftSidebarRef.current.getBoundingClientRect()
+        setLeftSidebarSplit(Math.max(20, Math.min(80, ((e.clientY - rect.top) / rect.height) * 100)))
+      } else if (drag.type === 'row-inspector' && inspectorRef.current) {
+        const rect = inspectorRef.current.getBoundingClientRect()
+        setInspectorSplit(Math.max(20, Math.min(80, ((e.clientY - rect.top) / rect.height) * 100)))
+      } else if (drag.type === 'row-rightcol' && rightColRef.current) {
+        const rect = rightColRef.current.getBoundingClientRect()
+        setRightColSplit(Math.max(20, Math.min(80, ((e.clientY - rect.top) / rect.height) * 100)))
       }
     }
     const onMouseUp = () => { resizeDragRef.current = null; document.body.style.cursor = ''; document.body.style.userSelect = '' }
@@ -540,6 +584,14 @@ export default function App() {
       setIsUnsaved(false)
       setVfsReloadTrigger(t => t + 1)
     } catch { /* ignore */ }
+    if (localFolderFsIdRef.current === activeFilesystemId && localFolderHandleRef.current) {
+      try {
+        const perm = await localFolderHandleRef.current.queryPermission({ mode: 'readwrite' })
+        if (perm === 'granted') {
+          await writeFileToFolderHandle(localFolderHandleRef.current, openFilePath, content.buffer as ArrayBuffer)
+        }
+      } catch { /* ignore */ }
+    }
   }
 
   const onOpenVFSFile = async (entry: VFSEntry) => {
@@ -690,11 +742,10 @@ export default function App() {
 
   const enterPygamePresentationMode = () => {
     if (!pygameLayoutSnapshotRef.current) {
-      pygameLayoutSnapshotRef.current = { visiblePanels: { ...visiblePanels }, leftWidth, rightTopHeight, bottomLeftWidth }
+      pygameLayoutSnapshotRef.current = { visiblePanels: { ...visiblePanels }, leftWidth }
     }
     setShowExportDialog(false)
     setVisiblePanels({ code: false, visualizer: false, diagram: true, notes: false, output: true, filesystem: false })
-    setBottomLeftWidth(74)
     setIsPygameRunActive(true)
   }
 
@@ -705,13 +756,11 @@ export default function App() {
     if (!snapshot) return
     setVisiblePanels(snapshot.visiblePanels)
     setLeftWidth(snapshot.leftWidth)
-    setRightTopHeight(snapshot.rightTopHeight)
-    setBottomLeftWidth(snapshot.bottomLeftWidth)
   }
 
   const enterConsolePresentationMode = () => {
     if (!consoleLayoutSnapshotRef.current) {
-      consoleLayoutSnapshotRef.current = { visiblePanels: { ...visiblePanels }, leftWidth, rightTopHeight, bottomLeftWidth }
+      consoleLayoutSnapshotRef.current = { visiblePanels: { ...visiblePanels }, leftWidth }
     }
     setShowExportDialog(false)
     setVisiblePanels({ code: false, visualizer: false, diagram: false, notes: false, output: true, filesystem: false })
@@ -725,17 +774,14 @@ export default function App() {
     if (!snapshot) return
     setVisiblePanels(snapshot.visiblePanels)
     setLeftWidth(snapshot.leftWidth)
-    setRightTopHeight(snapshot.rightTopHeight)
-    setBottomLeftWidth(snapshot.bottomLeftWidth)
   }
 
   const enterTurtleCanvasPresentationMode = () => {
     if (!turtleLayoutSnapshotRef.current) {
-      turtleLayoutSnapshotRef.current = { visiblePanels: { ...visiblePanels }, leftWidth, rightTopHeight, bottomLeftWidth }
+      turtleLayoutSnapshotRef.current = { visiblePanels: { ...visiblePanels }, leftWidth }
     }
     setShowExportDialog(false)
     setVisiblePanels({ code: false, visualizer: false, diagram: true, notes: false, output: true, filesystem: false })
-    setBottomLeftWidth(74)
     setIsTurtleCanvasRunActive(true)
   }
 
@@ -746,17 +792,14 @@ export default function App() {
     if (!snapshot) return
     setVisiblePanels(snapshot.visiblePanels)
     setLeftWidth(snapshot.leftWidth)
-    setRightTopHeight(snapshot.rightTopHeight)
-    setBottomLeftWidth(snapshot.bottomLeftWidth)
   }
 
   const enterSvgTurtlePresentationMode = () => {
     if (!svgTurtleLayoutSnapshotRef.current) {
-      svgTurtleLayoutSnapshotRef.current = { visiblePanels: { ...visiblePanels }, leftWidth, rightTopHeight, bottomLeftWidth }
+      svgTurtleLayoutSnapshotRef.current = { visiblePanels: { ...visiblePanels }, leftWidth }
     }
     setShowExportDialog(false)
     setVisiblePanels({ code: false, visualizer: false, diagram: true, notes: false, output: true, filesystem: false })
-    setBottomLeftWidth(74)
   }
 
   const restoreSvgTurtlePresentationMode = () => {
@@ -765,8 +808,6 @@ export default function App() {
     if (!snapshot) return
     setVisiblePanels(snapshot.visiblePanels)
     setLeftWidth(snapshot.leftWidth)
-    setRightTopHeight(snapshot.rightTopHeight)
-    setBottomLeftWidth(snapshot.bottomLeftWidth)
   }
 
   // ── Filesystem switching ─────────────────────────────────────────────────
@@ -861,14 +902,18 @@ export default function App() {
   const handleBookNavStateChange = (state: BookNavState) => {
     setBookNavState(state)
     persistBookNavState(state)
-    // If no longer in a challenge, restore default filesystem visibility
     if (!state.activeChallengeId) {
       setChallengeHiddenPaths([])
+      clearEditorForSwitch()
+      setActiveFilesystemId('default')
+      setCurrentWorkingDir('/')
     }
   }
 
   const handleEnterChallenge = async (bookUrl: string, challenge: BookChallenge, forceReset = false) => {
     try {
+      await saveCurrentToVFS()
+      clearEditorForSwitch()
       const { fsId, pyFilename, hiddenPaths } = await getOrCreateChallengeFs(bookUrl, challenge, forceReset)
       setActiveFilesystemId(fsId)
       setChallengeHiddenPaths(hiddenPaths)
@@ -876,7 +921,11 @@ export default function App() {
       setVfsReloadTrigger(t => t + 1)
       if (pyFilename) {
         const entry = await getEntryByPath(fsId, `/${pyFilename}`)
-        if (entry) void onOpenVFSFile(entry)
+        if (entry?.content) {
+          const text = new TextDecoder().decode(entry.content)
+          savedCodeRef.current = text
+          loadCodeText(text, entry.name, entry.path)
+        }
       }
     } catch (e) {
       setCodeStatus(`Failed to load challenge: ${e instanceof Error ? e.message : String(e)}`)
@@ -887,6 +936,75 @@ export default function App() {
     setBookNavState(null)
     persistBookNavState(null)
     setChallengeHiddenPaths([])
+    clearEditorForSwitch()
+    setActiveFilesystemId('default')
+    setCurrentWorkingDir('/')
+  }
+
+  const importLocalFiles = async (fileMap: Map<string, ArrayBuffer>, sourceName: string) => {
+    const bookJsonBuf = fileMap.get('book.json')
+    if (bookJsonBuf) {
+      const stagingName = BOOK_SRC_PREFIX + sourceName
+      const fsList = await listFilesystems()
+      const existing = fsList.find(f => f.name === stagingName)
+      if (existing) await deleteFilesystem(existing.id)
+      const { id: stagingFsId } = await createFilesystem(stagingName)
+      await importFileMapToFs(stagingFsId, fileMap, true)
+      await handleBookOpen(`vfs://fs:${stagingFsId}/book.json`)
+    } else {
+      const fsList = await listFilesystems()
+      const existing = fsList.find(f => f.name === sourceName)
+      let fsId: string
+      if (existing) {
+        const doReset = window.confirm(
+          `Filesystem "${sourceName}" already exists.\n\nOK = reset (replace all files)\nCancel = merge (keep existing, add new only)`
+        )
+        if (doReset) {
+          await deleteFilesystem(existing.id)
+          const { id } = await createFilesystem(sourceName)
+          await importFileMapToFs(id, fileMap, true)
+          fsId = id
+        } else {
+          await importFileMapToFs(existing.id, fileMap, false)
+          fsId = existing.id
+        }
+      } else {
+        const { id } = await createFilesystem(sourceName)
+        await importFileMapToFs(id, fileMap, true)
+        fsId = id
+      }
+      localFolderHandleRef.current = null
+      localFolderFsIdRef.current = null
+      setVfsReloadTrigger(t => t + 1)
+      clearEditorForSwitch()
+      setActiveFilesystemId(fsId)
+      setCurrentWorkingDir('/')
+    }
+  }
+
+  const handleLocalFileImport = async (fileMap: Map<string, ArrayBuffer>, sourceName: string) => {
+    try { await importLocalFiles(fileMap, sourceName) }
+    catch (e) { setCodeStatus(`Import failed: ${e instanceof Error ? e.message : String(e)}`) }
+  }
+
+  const handleFolderConnect = async (handle: FileSystemDirectoryHandle) => {
+    try {
+      const perm = await handle.requestPermission({ mode: 'readwrite' })
+      if (perm !== 'granted') { setCodeStatus('Folder permission denied.'); return }
+      const fileMap = await readDirectoryToMap(handle)
+      const bookJsonBuf = fileMap.get('book.json')
+      if (bookJsonBuf) {
+        await importLocalFiles(fileMap, handle.name)
+      } else {
+        await importLocalFiles(fileMap, handle.name)
+        const fsList = await listFilesystems()
+        const fs = fsList.find(f => f.name === handle.name)
+        if (fs) {
+          localFolderHandleRef.current = handle
+          localFolderFsIdRef.current = fs.id
+        }
+      }
+    } catch (e) { setCodeStatus(`Folder connect failed: ${e instanceof Error ? e.message : String(e)}`) }
   }
 
   const handlePyodideReset = () => {
@@ -1389,46 +1507,105 @@ exec(code_obj, globals())
       )}
 
       {/* Main Layout */}
-      <div ref={mainContainerRef} className="flex-1 flex overflow-hidden p-2">
+      <div ref={mainContainerRef} className="flex-1 flex overflow-hidden p-2 gap-1.5">
 
-        {/* PANEL 1: Code Trace (+ optional FS sidebar) */}
-        {visiblePanels.code && (
-          <div className="bg-slate-800 rounded-lg shadow border border-slate-700 flex overflow-hidden flex-shrink-0"
-            style={{ width: hasRightSidePanels ? `calc(${leftWidth}% - 6px)` : '100%' }}>
-            {/* FS Sidebar */}
-            {visiblePanels.filesystem && (
-              <div className="w-56 flex-shrink-0 border-r border-slate-700 flex flex-col overflow-hidden">
-                <div className="bg-slate-900 py-2 px-3 border-b border-slate-700 text-[10px] font-bold uppercase tracking-wider text-slate-400 flex-shrink-0">
-                  File System
-                </div>
-                <div className={`overflow-hidden min-h-0 ${bookNavState ? 'flex-none' : 'flex-1'}`}
-                  style={bookNavState ? { height: '42%' } : {}}>
-                  <FileSystemPanel
-                    activeFilesystemId={activeFilesystemId}
-                    currentWorkingDir={currentWorkingDir}
-                    openFilePath={openFilePath}
-                    hiddenPaths={challengeHiddenPaths}
-                    onFilesystemChange={id => void handleFilesystemChange(id)}
-                    onFilesystemForcedChange={handleFilesystemForcedChange}
-                    onCwdChange={setCurrentWorkingDir}
-                    onOpenFile={entry => void onOpenVFSFile(entry)}
-                    onError={msg => setCodeStatus(msg)}
-                    onBookOpen={url => void handleBookOpen(url)}
-                    reloadTrigger={vfsReloadTrigger}
-                  />
-                </div>
-                {bookNavState && (
-                  <div className="flex-1 border-t border-slate-700 overflow-hidden min-h-0">
-                    <BookPanel
-                      navState={bookNavState}
-                      onNavStateChange={handleBookNavStateChange}
-                      onEnterChallenge={(bookUrl, challenge, forceReset) => void handleEnterChallenge(bookUrl, challenge, forceReset)}
-                      onClose={handleCloseBook}
+        {/* LEFT SIDEBAR: File System (top) + Variable Inspector (bottom) */}
+        {hasLeftSidebar && (
+          <>
+            <div ref={leftSidebarRef}
+              className="flex-shrink-0 bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden"
+              style={{ width: fsSidebarWidth }}>
+
+              {/* File System */}
+              {visiblePanels.filesystem && (
+                <div className="flex flex-col overflow-hidden min-h-0 flex-shrink-0"
+                  style={{ height: hasInspectorAndFs ? `${leftSidebarSplit}%` : '100%' }}>
+                  <div className="bg-slate-900 py-2 px-3 border-b border-slate-700 text-[10px] font-bold uppercase tracking-wider text-slate-400 flex-shrink-0">
+                    File System
+                  </div>
+                  <div className="overflow-hidden min-h-0 flex-1">
+                    <FileSystemPanel
+                      activeFilesystemId={activeFilesystemId}
+                      currentWorkingDir={currentWorkingDir}
+                      openFilePath={openFilePath}
+                      hiddenPaths={challengeHiddenPaths}
+                      isChallengeMode={!!bookNavState?.activeChallengeId}
+                      onFilesystemChange={id => void handleFilesystemChange(id)}
+                      onFilesystemForcedChange={handleFilesystemForcedChange}
+                      onCwdChange={setCurrentWorkingDir}
+                      onOpenFile={entry => void onOpenVFSFile(entry)}
+                      onError={msg => setCodeStatus(msg)}
+                      onBookOpen={url => void handleBookOpen(url)}
+                      onLocalFileImport={(m, n) => handleLocalFileImport(m, n)}
+                      onFolderConnect={h => handleFolderConnect(h)}
+                      reloadTrigger={vfsReloadTrigger}
                     />
                   </div>
-                )}
-              </div>
-            )}
+                </div>
+              )}
+
+              {/* Resize handle: FS ↔ Inspector */}
+              {hasInspectorAndFs && (
+                <div className="resize-handle-row flex-shrink-0"
+                  onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'row-leftsidebar', startX: e.clientX, startY: e.clientY, startVal: leftSidebarSplit }; document.body.style.cursor = 'row-resize'; document.body.style.userSelect = 'none' }}>
+                  <div className="resize-bar" style={{ height: '3px', width: '48px' }} />
+                </div>
+              )}
+
+              {/* Variable Inspector */}
+              {visiblePanels.visualizer && (
+                <div ref={inspectorRef} className="flex-1 flex flex-col overflow-hidden min-h-0">
+                  <div className="bg-slate-900 py-2 px-3 border-b border-slate-700 flex items-center justify-between flex-shrink-0">
+                    <div className="font-bold uppercase tracking-wider text-[10px] text-sky-300">Variables</div>
+                    <div className="flex items-center gap-1.5">
+                      <span className={`text-[10px] uppercase tracking-wider ${hasSab ? 'text-emerald-400' : 'text-red-400'}`}>
+                        {hasSab ? 'SAB ✓' : 'SAB ✗'}
+                      </span>
+                      {isRunning && activeRuntime === 'main-thread' && (
+                        <span className="text-[10px] text-amber-400 truncate max-w-[100px]">{mainThreadStatus}</span>
+                      )}
+                    </div>
+                  </div>
+                  {/* Globals */}
+                  <div className="flex-shrink-0 overflow-hidden min-h-0"
+                    style={{ height: `${inspectorSplit}%` }}>
+                    <InspectorPane title="Global Variables" root={globalsInspectorRoot}
+                      path={globalsInspectorPath} setPath={setGlobalsInspectorPath}
+                      emptyMessage="Run code to see globals."
+                      unavailableMessage={isMainThreadRuntime ? 'Live inspection unavailable in main-thread mode.' : ''} />
+                  </div>
+                  {/* Resize handle: globals ↔ locals */}
+                  <div className="resize-handle-row flex-shrink-0"
+                    onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'row-inspector', startX: e.clientX, startY: e.clientY, startVal: inspectorSplit }; document.body.style.cursor = 'row-resize'; document.body.style.userSelect = 'none' }}>
+                    <div className="resize-bar" style={{ height: '3px', width: '48px' }} />
+                  </div>
+                  {/* Locals */}
+                  <div className="flex-1 overflow-hidden min-h-0">
+                    <InspectorPane title="Local Variables" root={localsInspectorRoot}
+                      path={localsInspectorPath} setPath={setLocalsInspectorPath}
+                      emptyMessage="Waiting for code to enter a function..."
+                      unavailableMessage={isMainThreadRuntime ? 'Live inspection unavailable in main-thread mode.' : ''} />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Resize handle: left sidebar width */}
+            <div className="resize-handle-col"
+              onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'col-fssidebar', startX: e.clientX, startY: e.clientY, startVal: fsSidebarWidth }; document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none' }}>
+              <div className="resize-bar" style={{ width: '3px', height: '48px' }} />
+            </div>
+          </>
+        )}
+
+        {/* CENTER: Code Editor + Right Column */}
+        {(visiblePanels.code || hasRightCol) && (
+        <div ref={centerRef} className="flex-1 flex overflow-hidden gap-1.5 min-w-0">
+
+        {/* Code Editor */}
+        {visiblePanels.code && (
+          <div className="bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden flex-shrink-0"
+            style={{ width: hasRightCol ? `calc(${leftWidth}% - 6px)` : '100%' }}>
             {/* Code editor area */}
             <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
               <input ref={fileInputRef} type="file" className="hidden" onChange={handleCodeFileChange} />
@@ -1513,272 +1690,215 @@ exec(code_obj, globals())
           </div>
         )}
 
-        {/* Resize handle: Panel 1 ↔ right side */}
-        {visiblePanels.code && hasRightSidePanels && (
-          <div className="resize-handle-col" onMouseDown={e => { e.preventDefault(); resizeDragRef.current = 'col-main'; document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none' }}>
+        {/* Resize handle: code ↔ right column */}
+        {visiblePanels.code && hasRightCol && (
+          <div className="resize-handle-col"
+            onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'col-main', startX: e.clientX, startY: e.clientY, startVal: leftWidth }; document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none' }}>
             <div className="resize-bar" style={{ width: '3px', height: '48px' }} />
           </div>
         )}
 
-        {/* Right side panels */}
-        {hasRightSidePanels && (
-          <div ref={rightSideRef} className="flex-1 flex flex-col overflow-hidden min-w-0">
+        {/* RIGHT COLUMN: Console Output (top) + Structure (bottom) */}
+        {hasRightCol && (
+          <div ref={rightColRef} className="flex-1 bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden min-w-0">
 
-            {/* PANEL 2: Inspectors */}
-            {visiblePanels.visualizer && (
-              <div className="bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden flex-shrink-0"
-                style={{ height: hasBottomPanels ? `calc(${rightTopHeight}% - 6px)` : '100%' }}>
-                <div className="bg-slate-900 py-2 px-4 border-b border-slate-700 flex items-center justify-between">
-                  <div className="font-bold uppercase tracking-wider text-xs text-sky-300">Variable Inspectors</div>
-                  <div className="flex items-center gap-2">
-                    <span className={`text-[10px] uppercase tracking-wider ${hasSab ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {hasSab ? 'SAB ✓' : 'SAB ✗'}
-                    </span>
-                    {isRunning && activeRuntime === 'main-thread' && (
-                      <span className="text-[10px] text-amber-400 truncate max-w-[160px]">{mainThreadStatus}</span>
-                    )}
-                  </div>
+            {/* Console Output */}
+            {visiblePanels.output && (
+              <div className="flex flex-col overflow-hidden min-h-0 flex-shrink-0"
+                style={{ height: hasConsoleAndStructure ? `${rightColSplit}%` : '100%' }}>
+                <div className="bg-slate-900 py-2 px-4 border-b border-slate-700 flex-shrink-0">
+                  <div className="font-bold uppercase tracking-wider text-xs text-teal-400">Console Output</div>
                 </div>
-                <div className="flex-1 flex gap-2 overflow-hidden p-2">
-                  <InspectorPane title="Global Variables" root={globalsInspectorRoot}
-                    path={globalsInspectorPath} setPath={setGlobalsInspectorPath}
-                    emptyMessage="Run code to see globals."
-                    unavailableMessage={isMainThreadRuntime ? 'Live inspection is unavailable in main-thread mode.' : ''} />
-                  <InspectorPane title="Local Variables" root={localsInspectorRoot}
-                    path={localsInspectorPath} setPath={setLocalsInspectorPath}
-                    emptyMessage="Waiting for code to enter a function..."
-                    unavailableMessage={isMainThreadRuntime ? 'Live inspection is unavailable in main-thread mode.' : ''} />
+                <div className="flex-1 overflow-hidden bg-slate-900/40 p-3 min-h-0">
+                  <div ref={outputRef} className="h-full overflow-y-auto font-mono text-xs leading-relaxed text-slate-300 whitespace-pre-wrap break-words">
+                    {outputLog || <span className="text-slate-500 italic">Console output will appear here.</span>}
+                  </div>
                 </div>
               </div>
             )}
 
-            {/* Resize handle: inspectors ↔ bottom panels */}
-            {visiblePanels.visualizer && hasBottomPanels && (
-              <div className="resize-handle-row" onMouseDown={e => { e.preventDefault(); resizeDragRef.current = 'row-right'; document.body.style.cursor = 'row-resize'; document.body.style.userSelect = 'none' }}>
+            {/* Resize handle: console ↔ structure */}
+            {hasConsoleAndStructure && (
+              <div className="resize-handle-row flex-shrink-0"
+                onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'row-rightcol', startX: e.clientX, startY: e.clientY, startVal: rightColSplit }; document.body.style.cursor = 'row-resize'; document.body.style.userSelect = 'none' }}>
                 <div className="resize-bar" style={{ height: '3px', width: '48px' }} />
               </div>
             )}
 
-            {/* Bottom row */}
-            {hasBottomPanels && (
-              <div ref={bottomRowRef} className="flex-1 flex overflow-hidden min-h-0">
-
-                {/* PANEL 3: Structure / Canvas */}
-                {visiblePanels.diagram && (
-                  <div className="bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden flex-shrink-0"
-                    style={{ width: hasNotesOrOutput ? `calc(${bottomLeftWidth}% - 6px)` : '100%' }}>
-                    <div className="bg-slate-900 py-2 px-4 border-b border-slate-700">
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="font-bold uppercase tracking-wider text-xs text-emerald-400">
-                          {isPygameRunActive ? 'Pygame Canvas' : isTurtleCanvasRunActive ? 'Turtle Canvas' : 'Structure Diagram'}
-                        </div>
-                        <div className="flex items-center gap-3">
-                          {!isPygameRunActive && !isTurtleCanvasRunActive && (
-                            <div className="flex rounded overflow-hidden border border-slate-700 text-[11px]">
-                              {(['hierarchy', 'outline', 'uml', ...(turtleSvg ? ['turtle'] : [])] as DiagramView[]).map(view => (
-                                <button key={view} onClick={() => setDiagramView(view)}
-                                  className={`px-3 py-1 ${diagramView === view ? 'bg-emerald-700 text-white' : 'bg-slate-800 text-slate-300'}`}>
-                                  {view === 'hierarchy' ? 'Hierarchy' : view === 'outline' ? 'Outline' : view === 'uml' ? 'Class Diagram' : 'Turtle SVG'}
-                                </button>
-                              ))}
-                            </div>
-                          )}
-                          {!isPygameRunActive && !isTurtleCanvasRunActive && diagramView !== 'outline' && diagramView !== 'turtle' && (
-                            <div className="flex flex-col items-end gap-1">
-                              <div className="text-[10px] uppercase tracking-wider text-slate-500">Font</div>
-                              <DiagramFontControls fontSize={diagramFontSize} onDecrease={decreaseDiagramFontSize} onIncrease={increaseDiagramFontSize}
-                                canDecrease={diagramFontSize > DIAGRAM_FONT_MIN} canIncrease={diagramFontSize < DIAGRAM_FONT_MAX} />
-                            </div>
-                          )}
-                        </div>
-                      </div>
+            {/* Structure panel */}
+            {visiblePanels.diagram && (
+              <div className="flex-1 flex flex-col overflow-hidden min-h-0">
+                <div className="bg-slate-900 py-2 px-4 border-b border-slate-700 flex-shrink-0">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="font-bold uppercase tracking-wider text-xs text-emerald-400">
+                      {isPygameRunActive ? 'Pygame Canvas' : isTurtleCanvasRunActive ? 'Turtle Canvas' : 'Structure'}
                     </div>
-                    {!isPygameRunActive && !isTurtleCanvasRunActive && diagramView === 'turtle' && turtleSvgHistory.length > 0 && (
-                      <TurtleScrubber
-                        history={turtleSvgHistory}
-                        step={turtleScrubStep}
-                        isPlaying={turtleScrubPlaying}
-                        speed={turtleScrubSpeed}
-                        onStepChange={s => {
-                          setTurtleScrubStep(s)
-                          turtleScrubLockedRef.current = s < turtleSvgHistory.length - 1
-                        }}
-                        onTogglePlay={() => {
-                          if (turtleScrubPlaying) {
-                            setTurtleScrubPlaying(false)
-                          } else {
-                            turtleScrubLockedRef.current = true
-                            if (turtleScrubStep >= turtleSvgHistory.length - 1) setTurtleScrubStep(0)
-                            setTurtleScrubPlaying(true)
-                          }
-                        }}
-                        onSpeedChange={s => setTurtleScrubSpeed(s)}
-                        onClose={() => { setTurtleScrubPlaying(false); closeScrubberAndClear() }}
-                      />
-                    )}
-                    <div className="flex-1 overflow-auto p-4 relative">
-                      {/* Canvas always in DOM so ref is valid on re-run; hidden via CSS when inactive */}
-                      <div className={`mx-auto flex h-full w-full max-w-6xl flex-col ${!(isPygameRunActive || isTurtleCanvasRunActive) ? 'hidden' : ''}`}>
-                        <div className="flex-1 rounded-xl border border-slate-600 bg-slate-950/80 p-4">
-                          <canvas id="canvas" ref={mainThreadCanvasRef}
-                            className="mx-auto block max-h-full max-w-full rounded bg-slate-950"
-                            style={{ imageRendering: 'pixelated', outline: 'none' }}
-                            onPointerDown={() => mainThreadCanvasRef.current?.focus()} />
+                    <div className="flex items-center gap-2">
+                      {!isPygameRunActive && !isTurtleCanvasRunActive && (
+                        <div className="flex rounded overflow-hidden border border-slate-700 text-[11px]">
+                          {(['outline', 'hierarchy', 'uml', ...(turtleSvg ? ['turtle'] : []), 'notes'] as DiagramView[]).map(view => (
+                            <button key={view} onClick={() => setDiagramView(view)}
+                              className={`px-2.5 py-1 ${diagramView === view ? 'bg-emerald-700 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}>
+                              {view === 'outline' ? 'Outline' : view === 'hierarchy' ? 'Hierarchy' : view === 'uml' ? 'Class' : view === 'turtle' ? 'Turtle' : 'Notes'}
+                            </button>
+                          ))}
                         </div>
-                      </div>
-                      {!(isPygameRunActive || isTurtleCanvasRunActive) && (
-                        diagramView === 'turtle' ? (
-                          <div className="mx-auto h-full min-h-[280px] min-w-[320px] flex items-start justify-center">
-                            <div dangerouslySetInnerHTML={{ __html: displayedTurtleSvg }} className="max-w-full" />
-                          </div>
-                        ) : (
-                          <div className="mx-auto h-full min-h-[280px] min-w-[320px]">
-                            {diagramView === 'uml' ? (
-                              <UmlDiagram currentClass={currentClass} diagramModel={diagramModel} fontSize={diagramFontSize} />
-                            ) : diagramView === 'outline' ? (
-                              <OutlinePanel outlineModel={outlineModel} expandedIds={outlineExpandedIds}
-                                setExpandedIds={setOutlineExpandedIds} onJumpToLine={jumpToSourceLine} currentLine={currentLine} />
-                            ) : (
-                              <HierarchyChart currentFunc={currentFunc} hierarchyModel={hierarchyModel} fontSize={diagramFontSize} />
-                            )}
-                          </div>
-                        )
+                      )}
+                      {!isPygameRunActive && !isTurtleCanvasRunActive && diagramView !== 'outline' && diagramView !== 'turtle' && diagramView !== 'notes' && (
+                        <DiagramFontControls fontSize={diagramFontSize} onDecrease={decreaseDiagramFontSize} onIncrease={increaseDiagramFontSize}
+                          canDecrease={diagramFontSize > DIAGRAM_FONT_MIN} canIncrease={diagramFontSize < DIAGRAM_FONT_MAX} />
                       )}
                     </div>
                   </div>
+                </div>
+                {!isPygameRunActive && !isTurtleCanvasRunActive && diagramView === 'turtle' && turtleSvgHistory.length > 0 && (
+                  <TurtleScrubber
+                    history={turtleSvgHistory}
+                    step={turtleScrubStep}
+                    isPlaying={turtleScrubPlaying}
+                    speed={turtleScrubSpeed}
+                    onStepChange={s => { setTurtleScrubStep(s); turtleScrubLockedRef.current = s < turtleSvgHistory.length - 1 }}
+                    onTogglePlay={() => { if (turtleScrubPlaying) { setTurtleScrubPlaying(false) } else { turtleScrubLockedRef.current = true; if (turtleScrubStep >= turtleSvgHistory.length - 1) setTurtleScrubStep(0); setTurtleScrubPlaying(true) } }}
+                    onSpeedChange={s => setTurtleScrubSpeed(s)}
+                    onClose={() => { setTurtleScrubPlaying(false); closeScrubberAndClear() }}
+                  />
                 )}
-
-                {/* Resize handle: Panel 3 ↔ Panel 4 */}
-                {visiblePanels.diagram && hasNotesOrOutput && (
-                  <div className="resize-handle-col" onMouseDown={e => { e.preventDefault(); resizeDragRef.current = 'col-bottom'; document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none' }}>
-                    <div className="resize-bar" style={{ width: '3px', height: '48px' }} />
-                  </div>
-                )}
-
-                {/* PANEL 4: Notes + Output */}
-                {hasNotesOrOutput && (() => {
-                  const inPresentationMode = isPygameRunActive || isConsolePresentationMode || isTurtleCanvasRunActive
-                  const showNotes = visiblePanels.notes && !inPresentationMode
-                  const showOutput = visiblePanels.output
-                  const notesWidth = showNotes && showOutput ? 'w-1/2' : 'w-full'
-                  const outputWidth = showNotes && showOutput ? 'w-1/2' : 'w-full'
-                  return (
-                    <div className="bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden flex-1">
-                      <div className="flex bg-slate-900 border-b border-slate-700">
-                        {showNotes && (
-                          <div className={`py-2 px-4 font-bold uppercase tracking-wider text-emerald-400 text-xs ${showOutput ? 'border-r border-slate-700 w-1/2' : 'w-full'}`}>
-                            Documentation Notes
-                          </div>
-                        )}
-                        {showOutput && (
-                          <div className={`py-2 px-4 font-bold uppercase tracking-wider text-teal-400 text-xs ${showNotes ? 'w-1/2' : 'w-full'}`}>
-                            Console Output
-                          </div>
-                        )}
-                      </div>
-
-                      <div className="flex-1 flex overflow-hidden">
-                        {/* Notes panel */}
-                        {showNotes && (
-                          <div className={`relative flex ${notesWidth} min-h-0 flex-col ${showOutput ? 'border-r border-slate-700' : ''} bg-slate-800/50 p-4`}>
-                            <div className="flex items-start justify-between gap-3">
-                              <div>
-                                <h3 className="text-sm font-bold text-white mb-1">{activeInsightHeading}</h3>
-                                <div className="text-[11px] uppercase tracking-wider text-slate-500">
-                                  {activeInsightKey ? (hasCustomInsightNote ? 'Custom Note' : 'Default Note') : 'Documentation Notes'}
-                                </div>
-                              </div>
-                              <div className="flex items-center gap-2">
-                                {!isInsightEditing ? (
-                                  <IconButton title="Edit note" onClick={beginEditingInsightNote} disabled={!activeInsightKey}>
-                                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.232 5.232l3.536 3.536M9 13l6.232-6.232a2.5 2.5 0 113.536 3.536L12.536 16.536A4 4 0 019.707 17.707L7 18l.293-2.707A4 4 0 018.464 12.536L14.696 6.304" />
-                                    </svg>
-                                  </IconButton>
-                                ) : (
-                                  <IconButton title="Save note" onClick={() => saveInsightNote(activeInsightKey, noteDraft, true)} disabled={!activeInsightKey}>
-                                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
-                                    </svg>
-                                  </IconButton>
-                                )}
-                                <IconButton title="Reset note to original" onClick={resetInsightNote} disabled={!activeInsightKey}>
-                                  <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h5M20 20v-5h-5M5.64 18.36A9 9 0 1020 12" />
-                                  </svg>
-                                </IconButton>
-                                <IconButton title="Export notes" onClick={() => setShowExportDialog(true)} disabled={!canExportNotes}>
-                                  <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 16V4m0 12l4-4m-4 4l-4-4M5 20h14" />
-                                  </svg>
-                                </IconButton>
-                              </div>
-                            </div>
-
-                            <div className="mt-4 flex min-h-0 flex-1 flex-col">
-                              {isInsightEditing ? (
-                                <textarea value={noteDraft} onChange={e => setNoteDraft(e.target.value)}
-                                  className="insight-note-editor min-h-0 flex-1"
-                                  placeholder="Write your revision note for this definition..." />
-                              ) : (
-                                <p className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap text-slate-300 leading-relaxed">
-                                  {activeInsightText || 'No note is available for this definition yet.'}
-                                </p>
-                              )}
-                              <div className="mt-3 text-[11px] text-slate-500">
-                                {isInsightEditing
-                                  ? 'Saves automatically if execution moves to another definition or the program stops.'
-                                  : activeInsightKey
-                                    ? hasCustomInsightNote ? 'Your saved note is shown here.' : 'The built-in note is shown until you save your own version.'
-                                    : 'Start tracing to attach documentation notes to live execution points.'}
-                              </div>
-                            </div>
-
-                            {showExportDialog && (
-                              <div className="export-modal-backdrop" onClick={() => setShowExportDialog(false)}>
-                                <div className="export-modal-card" onClick={e => e.stopPropagation()}>
-                                  <div className="text-sm font-bold text-white">Export Notes</div>
-                                  <p className="mt-2 text-sm text-slate-300 leading-relaxed">
-                                    Choose a plain text revision outline or an annotated Python file with your notes inserted as docstrings.
-                                  </p>
-                                  <div className="mt-4 flex flex-col gap-3">
-                                    <button type="button" onClick={() => downloadNotesExport('comments')}
-                                      className="rounded border border-slate-600 bg-slate-900 px-4 py-3 text-left transition-colors hover:border-emerald-400">
-                                      <div className="font-semibold text-slate-200">Comments Only</div>
-                                      <div className="mt-1 text-xs text-slate-400">Exports class and function interfaces with the notes listed underneath in code order.</div>
-                                    </button>
-                                    <button type="button" onClick={() => downloadNotesExport('docstrings')}
-                                      className="rounded border border-slate-600 bg-slate-900 px-4 py-3 text-left transition-colors hover:border-emerald-400">
-                                      <div className="font-semibold text-slate-200">Docstrings</div>
-                                      <div className="mt-1 text-xs text-slate-400">Exports the current Python code with each note inserted as a function docstring.</div>
-                                    </button>
-                                  </div>
-                                  <div className="mt-4 flex justify-end">
-                                    <button type="button" onClick={() => setShowExportDialog(false)}
-                                      className="rounded border border-slate-600 px-3 py-1.5 text-sm font-semibold text-slate-300 transition-colors hover:border-slate-400">
-                                      Cancel
-                                    </button>
-                                  </div>
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                        )}
-
-                        {/* Console output */}
-                        {showOutput && (
-                          <div className={`${outputWidth} flex flex-col overflow-hidden bg-slate-900/40 p-3`}>
-                            <div ref={outputRef} className="flex-1 overflow-y-auto font-mono text-xs leading-relaxed text-slate-300 whitespace-pre-wrap break-words">
-                              {outputLog || <span className="text-slate-500 italic">Console output will appear here.</span>}
-                            </div>
-                          </div>
-                        )}
-                      </div>
+                <div className="flex-1 overflow-auto p-4 relative min-h-0">
+                  {/* Canvas — always in DOM so ref is valid on re-run */}
+                  <div className={`mx-auto flex h-full w-full max-w-6xl flex-col ${!(isPygameRunActive || isTurtleCanvasRunActive) ? 'hidden' : ''}`}>
+                    <div className="flex-1 rounded-xl border border-slate-600 bg-slate-950/80 p-4">
+                      <canvas id="canvas" ref={mainThreadCanvasRef}
+                        className="mx-auto block max-h-full max-w-full rounded bg-slate-950"
+                        style={{ imageRendering: 'pixelated', outline: 'none' }}
+                        onPointerDown={() => mainThreadCanvasRef.current?.focus()} />
                     </div>
-                  )
-                })()}
+                  </div>
+                  {!(isPygameRunActive || isTurtleCanvasRunActive) && (
+                    diagramView === 'turtle' ? (
+                      <div className="mx-auto h-full min-h-[280px] flex items-start justify-center">
+                        <div dangerouslySetInnerHTML={{ __html: displayedTurtleSvg }} className="max-w-full" />
+                      </div>
+                    ) : diagramView === 'notes' ? (
+                      <div className="h-full flex flex-col">
+                        <div className="flex items-start justify-between gap-3 mb-3">
+                          <div>
+                            <h3 className="text-sm font-bold text-white mb-0.5">{activeInsightHeading}</h3>
+                            <div className="text-[11px] uppercase tracking-wider text-slate-500">
+                              {activeInsightKey ? (hasCustomInsightNote ? 'Custom Note' : 'Default Note') : 'Documentation Notes'}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-1.5 flex-shrink-0">
+                            {!isInsightEditing ? (
+                              <IconButton title="Edit note" onClick={beginEditingInsightNote} disabled={!activeInsightKey}>
+                                <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.232 5.232l3.536 3.536M9 13l6.232-6.232a2.5 2.5 0 113.536 3.536L12.536 16.536A4 4 0 019.707 17.707L7 18l.293-2.707A4 4 0 018.464 12.536L14.696 6.304" />
+                                </svg>
+                              </IconButton>
+                            ) : (
+                              <IconButton title="Save note" onClick={() => saveInsightNote(activeInsightKey, noteDraft, true)} disabled={!activeInsightKey}>
+                                <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
+                                </svg>
+                              </IconButton>
+                            )}
+                            <IconButton title="Reset note to original" onClick={resetInsightNote} disabled={!activeInsightKey}>
+                              <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h5M20 20v-5h-5M5.64 18.36A9 9 0 1020 12" />
+                              </svg>
+                            </IconButton>
+                            <IconButton title="Export notes" onClick={() => setShowExportDialog(true)} disabled={!canExportNotes}>
+                              <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 16V4m0 12l4-4m-4 4l-4-4M5 20h14" />
+                              </svg>
+                            </IconButton>
+                          </div>
+                        </div>
+                        <div className="flex min-h-0 flex-1 flex-col">
+                          {isInsightEditing ? (
+                            <textarea value={noteDraft} onChange={e => setNoteDraft(e.target.value)}
+                              className="insight-note-editor min-h-0 flex-1"
+                              placeholder="Write your revision note for this definition..." />
+                          ) : (
+                            <p className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap text-slate-300 leading-relaxed text-sm">
+                              {activeInsightText || 'No note is available for this definition yet.'}
+                            </p>
+                          )}
+                          <div className="mt-3 text-[11px] text-slate-500">
+                            {isInsightEditing
+                              ? 'Saves automatically if execution moves to another definition or the program stops.'
+                              : activeInsightKey
+                                ? hasCustomInsightNote ? 'Your saved note is shown here.' : 'The built-in note is shown until you save your own version.'
+                                : 'Start tracing to attach documentation notes to live execution points.'}
+                          </div>
+                        </div>
+                        {showExportDialog && (
+                          <div className="export-modal-backdrop" onClick={() => setShowExportDialog(false)}>
+                            <div className="export-modal-card" onClick={e => e.stopPropagation()}>
+                              <div className="text-sm font-bold text-white">Export Notes</div>
+                              <p className="mt-2 text-sm text-slate-300 leading-relaxed">Choose a plain text revision outline or an annotated Python file with your notes inserted as docstrings.</p>
+                              <div className="mt-4 flex flex-col gap-3">
+                                <button type="button" onClick={() => downloadNotesExport('comments')}
+                                  className="rounded border border-slate-600 bg-slate-900 px-4 py-3 text-left transition-colors hover:border-emerald-400">
+                                  <div className="font-semibold text-slate-200">Comments Only</div>
+                                  <div className="mt-1 text-xs text-slate-400">Exports class and function interfaces with the notes listed underneath in code order.</div>
+                                </button>
+                                <button type="button" onClick={() => downloadNotesExport('docstrings')}
+                                  className="rounded border border-slate-600 bg-slate-900 px-4 py-3 text-left transition-colors hover:border-emerald-400">
+                                  <div className="font-semibold text-slate-200">Docstrings</div>
+                                  <div className="mt-1 text-xs text-slate-400">Exports the current Python code with each note inserted as a function docstring.</div>
+                                </button>
+                              </div>
+                              <div className="mt-4 flex justify-end">
+                                <button type="button" onClick={() => setShowExportDialog(false)}
+                                  className="rounded border border-slate-600 px-3 py-1.5 text-sm font-semibold text-slate-300 transition-colors hover:border-slate-400">
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="mx-auto h-full min-h-[280px]">
+                        {diagramView === 'uml' ? (
+                          <UmlDiagram currentClass={currentClass} diagramModel={diagramModel} fontSize={diagramFontSize} />
+                        ) : diagramView === 'outline' ? (
+                          <OutlinePanel outlineModel={outlineModel} expandedIds={outlineExpandedIds}
+                            setExpandedIds={setOutlineExpandedIds} onJumpToLine={jumpToSourceLine} currentLine={currentLine} />
+                        ) : (
+                          <HierarchyChart currentFunc={currentFunc} hierarchyModel={hierarchyModel} fontSize={diagramFontSize} />
+                        )}
+                      </div>
+                    )
+                  )}
+                </div>
               </div>
             )}
+          </div>
+        )}
+
+        </div>
+        )}
+        {/* end center section */}
+
+        {/* Resize handle: center ↔ book panel */}
+        {hasBookPanel && (visiblePanels.code || hasRightCol) && (
+          <div className="resize-handle-col"
+            onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'col-bookpanel', startX: e.clientX, startY: e.clientY, startVal: bookPanelWidth }; document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none' }}>
+            <div className="resize-bar" style={{ width: '3px', height: '48px' }} />
+          </div>
+        )}
+
+        {/* BOOK PANEL — full height, right edge */}
+        {hasBookPanel && (
+          <div className="flex-shrink-0 bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden"
+            style={{ width: bookPanelWidth }}>
+            <BookPanel
+              navState={bookNavState}
+              onNavStateChange={handleBookNavStateChange}
+              onEnterChallenge={(bookUrl, challenge, forceReset) => void handleEnterChallenge(bookUrl, challenge, forceReset)}
+              onClose={handleCloseBook}
+            />
           </div>
         )}
       </div>
