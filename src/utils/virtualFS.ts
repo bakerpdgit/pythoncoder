@@ -376,20 +376,35 @@ function detectCommonPrefix(filenames: string[]): string {
   return filenames.every(f => f.startsWith(candidate)) ? candidate : ''
 }
 
-async function fetchZip(url: string): Promise<ArrayBuffer> {
-  const jsdelivrUrl = toJsDelivrUrl(url)
-  if (jsdelivrUrl) {
-    try {
-      const r = await fetch(jsdelivrUrl)
-      if (r.ok) return r.arrayBuffer()
-    } catch { /* fall through */ }
+// jsDelivr's CDN occasionally caches a 22-byte empty-EOCD ZIP for binary blobs
+// (HTTP 200, content-type application/zip, but zero files inside). Treat any
+// suspiciously small payload as a miss so we fall through to the next source.
+const MIN_PLAUSIBLE_ZIP_BYTES = 64
+
+async function tryFetchBuffer(url: string): Promise<ArrayBuffer | null> {
+  try {
+    const r = await fetch(url)
+    if (!r.ok) return null
+    const buf = await r.arrayBuffer()
+    if (buf.byteLength < MIN_PLAUSIBLE_ZIP_BYTES) return null
+    return buf
+  } catch {
+    return null
   }
+}
+
+async function fetchZip(url: string): Promise<ArrayBuffer> {
+  // raw.githubusercontent.com sets Access-Control-Allow-Origin: * and serves
+  // the authoritative bytes, so prefer it over jsDelivr for github URLs.
   const rawUrl = toRawGithubUrl(url)
   if (rawUrl) {
-    try {
-      const r = await fetch(rawUrl)
-      if (r.ok) return r.arrayBuffer()
-    } catch { /* fall through */ }
+    const buf = await tryFetchBuffer(rawUrl)
+    if (buf) return buf
+  }
+  const jsdelivrUrl = toJsDelivrUrl(url)
+  if (jsdelivrUrl) {
+    const buf = await tryFetchBuffer(jsdelivrUrl)
+    if (buf) return buf
   }
   const r = await fetch(url)
   if (!r.ok) throw new Error(`HTTP ${r.status} fetching ${url}`)
