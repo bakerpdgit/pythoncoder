@@ -275,7 +275,12 @@ export function FileSystemPanel({
       const fsId = await loadFilesystemFromUrl(url)
       setShowUrlDialog(false)
       setUrlInput('')
-      onFilesystemChange(fsId)
+      const bookEntry = await getEntryByPath(fsId, '/book.json')
+      if (bookEntry && onBookOpen) {
+        onBookOpen(`vfs://fs:${fsId}/book.json`)
+      } else {
+        onFilesystemChange(fsId)
+      }
     } catch (err) {
       setUrlError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -577,8 +582,8 @@ export function FileSystemPanel({
             onClick={e => e.stopPropagation()}>
             <div className="text-sm font-bold text-white mb-1">Open from URL</div>
             <p className="text-slate-400 mb-3 leading-relaxed">
-              Enter a URL to a <strong className="text-slate-300">book.json</strong> to open a learning book, or a <strong className="text-slate-300">ZIP file</strong> to load as a filesystem.<br />
-              GitHub raw URLs are automatically routed via jsDelivr to avoid CORS issues.
+              Enter a URL to a <strong className="text-slate-300">book.json</strong> or a <strong className="text-slate-300">book ZIP</strong> to open a learning book, or any other ZIP to load as a filesystem.<br />
+              GitHub blob/raw URLs are automatically fetched via jsDelivr.
             </p>
             <input
               autoFocus
