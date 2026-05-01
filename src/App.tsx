@@ -13,7 +13,7 @@ import {
   buildPythonStructureModel, analyzePythonClasses, analyzePythonFunctions,
   analyzePythonOutline, cleanCodeText, codeUsesPygame, codeUsesTurtle, getExpandableOutlineIds,
 } from './utils/codeAnalysis'
-import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides, getStoredSettings, persistSettings, getStoredBookNavState, persistBookNavState } from './utils/storage'
+import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides, getStoredSettings, persistSettings, getStoredBookNavState, persistBookNavState, getStoredFixedInputs, persistFixedInputs } from './utils/storage'
 import { triggerDownload, getBaseFileStem } from './utils/download'
 import { buildCommentExport, buildDocstringExport, getDefinitionNote, getDefaultDefinitionNote, sanitizeNoteText } from './utils/export'
 import { loadMainThreadPyodide, resetMainThreadPyodide, PYGAME_MAIN_THREAD_BOOTSTRAP, TURTLE_CANVAS_BOOTSTRAP, TURTLE_SVG_BOOTSTRAP, SVG_TURTLE_WORKER_SETUP } from './utils/mainThread'
@@ -159,6 +159,9 @@ export default function App() {
   const [diagramFontSize, setDiagramFontSize] = useState(DIAGRAM_FONT_DEFAULT)
   const [isPanelMenuOpen, setIsPanelMenuOpen] = useState(false)
   const [isRuntimeMenuOpen, setIsRuntimeMenuOpen] = useState(false)
+  const [isQuickSettingsOpen, setIsQuickSettingsOpen] = useState(false)
+  const [fixedInputsText, setFixedInputsText] = useState<string>('')
+  const [popupInputValue, setPopupInputValue] = useState('')
   const [diagramView, setDiagramView] = useState<DiagramView>('outline')
   const [outlineExpandedIds, setOutlineExpandedIds] = useState<Set<string>>(() => new Set())
   const [showInterpreterVars] = useState(false)
@@ -182,9 +185,13 @@ export default function App() {
   const applyingEditorValueRef = useRef(false)
   const outputRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<HTMLInputElement | null>(null)
+  const inlineInputRef = useRef<HTMLInputElement | null>(null)
+  const popupDialogRef = useRef<HTMLDialogElement | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const panelMenuRef = useRef<HTMLDivElement | null>(null)
   const runtimeMenuRef = useRef<HTMLDivElement | null>(null)
+  const quickSettingsRef = useRef<HTMLDivElement | null>(null)
+  const fixedInputsQueueRef = useRef<string[]>([])
   const mainThreadCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const mainThreadCanvasSnapshotRef = useRef<HTMLCanvasElement | null>(null)
   const mainThreadCanvasWatcherRef = useRef(0)
@@ -318,6 +325,16 @@ export default function App() {
 
   useEffect(() => { persistNoteOverrides(noteOverrides) }, [noteOverrides])
   useEffect(() => { persistSettings(appSettings) }, [appSettings])
+
+  useEffect(() => {
+    const text = getStoredFixedInputs(activeFilesystemId)
+    setFixedInputsText(text)
+  }, [activeFilesystemId])
+
+  useEffect(() => {
+    if (appSettings.useFixedInputs) setDiagramView('inputs')
+    else if (diagramView === 'inputs') setDiagramView('outline')
+  }, [appSettings.useFixedInputs]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { noteDraftRef.current = noteDraft }, [noteDraft])
   useEffect(() => { isInsightEditingRef.current = isInsightEditing }, [isInsightEditing])
 
@@ -336,21 +353,22 @@ export default function App() {
     if (!isRunning) return
     setIsPanelMenuOpen(false)
     setIsRuntimeMenuOpen(false)
+    setIsQuickSettingsOpen(false)
   }, [isRunning])
 
   useEffect(() => {
-    if (!isPanelMenuOpen && !isRuntimeMenuOpen) return
+    if (!isPanelMenuOpen && !isRuntimeMenuOpen && !isQuickSettingsOpen) return
     const handlePointerDown = (event: MouseEvent) => {
-      if (panelMenuRef.current?.contains(event.target as Node) || runtimeMenuRef.current?.contains(event.target as Node)) return
-      setIsPanelMenuOpen(false); setIsRuntimeMenuOpen(false)
+      if (panelMenuRef.current?.contains(event.target as Node) || runtimeMenuRef.current?.contains(event.target as Node) || quickSettingsRef.current?.contains(event.target as Node)) return
+      setIsPanelMenuOpen(false); setIsRuntimeMenuOpen(false); setIsQuickSettingsOpen(false)
     }
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') { setIsPanelMenuOpen(false); setIsRuntimeMenuOpen(false) }
+      if (event.key === 'Escape') { setIsPanelMenuOpen(false); setIsRuntimeMenuOpen(false); setIsQuickSettingsOpen(false) }
     }
     document.addEventListener('mousedown', handlePointerDown)
     document.addEventListener('keydown', handleKeyDown)
     return () => { document.removeEventListener('mousedown', handlePointerDown); document.removeEventListener('keydown', handleKeyDown) }
-  }, [isPanelMenuOpen, isRuntimeMenuOpen])
+  }, [isPanelMenuOpen, isRuntimeMenuOpen, isQuickSettingsOpen])
 
   useEffect(() => {
     const onMouseMove = (e: MouseEvent) => {
@@ -385,10 +403,27 @@ export default function App() {
   }, [outputLog])
 
   useEffect(() => {
-    if (inputRequest !== null && inputRef.current) {
-      inputRef.current.focus()
-      inputRef.current.select()
+    if (inputRequest === null) return
+    if (appSettings.useFixedInputs && fixedInputsQueueRef.current.length > 0) {
+      const next = fixedInputsQueueRef.current.shift()!
+      setOutputLog(prev => prev + (inputRequest.prompt || '') + next + '\n')
+      handleInputSubmit(next)
+      return
     }
+    const mode = appSettings.inputMode
+    if (mode === 'input-bar' && inputRef.current) {
+      inputRef.current.focus(); inputRef.current.select()
+    } else if (mode === 'inline-console' && inlineInputRef.current) {
+      inlineInputRef.current.focus()
+    } else if (mode === 'popup-dialog' && popupDialogRef.current) {
+      if (!popupDialogRef.current.open) popupDialogRef.current.showModal()
+    }
+  }, [inputRequest]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const dialog = popupDialogRef.current
+    if (!dialog) return
+    if (inputRequest === null && dialog.open) dialog.close()
   }, [inputRequest])
 
   useEffect(() => { setGlobalsInspectorPath([]); setLocalsInspectorPath([]) }, [inspectorRootKey])
@@ -1052,6 +1087,9 @@ export default function App() {
     if (!hasSab || !hasCode) return
     if (pendingRestore) pendingRestore()
     setPendingRestore(null)
+    fixedInputsQueueRef.current = appSettings.useFixedInputs
+      ? fixedInputsText.split('\n').filter(l => l.length > 0)
+      : []
     await saveCurrentToVFS()
     const vfsFiles = await getAllFiles(activeFilesystemId)
     const capturedFsId = activeFilesystemId
@@ -1398,12 +1436,33 @@ exec(code_obj, globals())
             runtimePreference={runtimePreference} selectedRuntime={selectedRuntime}
             onSelectRuntime={key => { setRuntimePreference(key); setIsRuntimeMenuOpen(false) }}
             isPygameLocked={isPygameLocked || isTurtleLocked} hasSab={hasSab} disabled={isRunning} />
-          <button type="button" title="Settings" onClick={() => setIsSettingsOpen(true)}
-            className="rounded border border-slate-600 p-1.5 text-slate-400 hover:border-slate-400 hover:text-slate-200 transition-colors">
-            <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065zM15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-            </svg>
-          </button>
+          <div ref={quickSettingsRef} className="relative">
+            <button type="button" title="Settings"
+              onClick={() => { setIsPanelMenuOpen(false); setIsRuntimeMenuOpen(false); setIsQuickSettingsOpen(o => !o) }}
+              className={`rounded border p-1.5 transition-colors ${isQuickSettingsOpen ? 'border-slate-400 text-slate-200' : 'border-slate-600 text-slate-400 hover:border-slate-400 hover:text-slate-200'}`}>
+              <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065zM15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+              </svg>
+            </button>
+            {isQuickSettingsOpen && (
+              <div className="absolute right-0 top-full mt-1.5 z-50 w-52 rounded-lg border border-slate-600 bg-slate-800 shadow-xl py-1">
+                <button type="button"
+                  onClick={() => setAppSettings(s => ({ ...s, useFixedInputs: !s.useFixedInputs }))}
+                  className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-slate-200 hover:bg-slate-700 transition-colors">
+                  <span className={`flex h-4 w-4 items-center justify-center rounded border text-xs ${appSettings.useFixedInputs ? 'border-emerald-500 bg-emerald-600 text-white' : 'border-slate-500'}`}>
+                    {appSettings.useFixedInputs && '✓'}
+                  </span>
+                  Use Fixed Inputs
+                </button>
+                <div className="my-1 border-t border-slate-700" />
+                <button type="button"
+                  onClick={() => { setIsSettingsOpen(true); setIsQuickSettingsOpen(false) }}
+                  className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-slate-400 hover:bg-slate-700 hover:text-slate-200 transition-colors">
+                  More settings…
+                </button>
+              </div>
+            )}
+          </div>
           <ThemeToggleButton theme={theme} onToggle={toggleTheme} />
 
           {!isRunning ? (
@@ -1506,8 +1565,8 @@ exec(code_obj, globals())
         </div>
       )}
 
-      {/* Input bar */}
-      {inputRequest !== null && (
+      {/* Input bar — shown only in input-bar mode */}
+      {inputRequest !== null && appSettings.inputMode === 'input-bar' && !(appSettings.useFixedInputs && fixedInputsQueueRef.current.length > 0) && (
         <div className="flex-shrink-0 bg-slate-800 border-b border-slate-600 border-l-4 border-l-amber-400 px-5 py-2.5 flex items-center gap-4 shadow-md z-10">
           <span className="flex-shrink-0 text-xs font-bold uppercase tracking-widest text-amber-400">Input</span>
           <span className="flex-shrink-0 text-slate-300 text-sm truncate max-w-xs" title={inputRequest.prompt || ''}>
@@ -1518,10 +1577,42 @@ exec(code_obj, globals())
             placeholder="Type your response..."
             onChange={e => setInputValue(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') handleInputSubmit() }} />
-          <button onClick={() => handleInputSubmit()} className="flex-shrink-0 bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-1.5 rounded font-semibold text-sm transition-colors">Submit</button>
-          <button onClick={forceStop} className="flex-shrink-0 bg-slate-700 hover:bg-slate-600 text-red-400 hover:text-red-300 border border-slate-600 px-4 py-1.5 rounded font-semibold text-sm transition-colors">Cancel / Stop</button>
+          <button type="button" onClick={() => handleInputSubmit()} className="flex-shrink-0 bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-1.5 rounded font-semibold text-sm transition-colors">Submit</button>
+          <button type="button" onClick={forceStop} className="flex-shrink-0 bg-slate-700 hover:bg-slate-600 text-red-400 hover:text-red-300 border border-slate-600 px-4 py-1.5 rounded font-semibold text-sm transition-colors">Cancel / Stop</button>
         </div>
       )}
+
+      {/* Popup dialog — always in DOM, shown via showModal() when needed */}
+      <dialog ref={popupDialogRef}
+        className="rounded-xl border border-slate-600 bg-slate-800 p-6 shadow-2xl w-full max-w-sm backdrop:bg-slate-900/70"
+        onCancel={e => e.preventDefault()}>
+        <div className="flex flex-col gap-4">
+          <div className="text-sm font-mono text-amber-300">
+            {inputRequest?.prompt || 'Input required:'}
+          </div>
+          <input
+            type="text"
+            value={popupInputValue}
+            autoFocus
+            className="bg-slate-900 border border-slate-600 rounded px-3 py-2 text-white text-sm focus:outline-none focus:ring-1 focus:ring-amber-400 font-mono"
+            placeholder="Enter value..."
+            onChange={e => setPopupInputValue(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') { handleInputSubmit(popupInputValue); setPopupInputValue('') } }}
+          />
+          <div className="flex gap-2 justify-end">
+            <button type="button"
+              onClick={() => { forceStop(); setPopupInputValue('') }}
+              className="rounded border border-slate-600 px-4 py-1.5 text-sm font-semibold text-red-400 hover:text-red-300 hover:border-red-500 transition-colors">
+              Stop
+            </button>
+            <button type="button"
+              onClick={() => { handleInputSubmit(popupInputValue); setPopupInputValue('') }}
+              className="rounded bg-emerald-600 hover:bg-emerald-500 px-4 py-1.5 text-sm font-semibold text-white transition-colors">
+              OK
+            </button>
+          </div>
+        </div>
+      </dialog>
 
       {/* Post-run return bar */}
       {pendingRestore && (
@@ -1738,10 +1829,32 @@ exec(code_obj, globals())
                 <div className="bg-slate-900 py-2 px-4 border-b border-slate-700 flex-shrink-0">
                   <div className="font-bold uppercase tracking-wider text-xs text-teal-400">Console Output</div>
                 </div>
-                <div className="flex-1 overflow-hidden bg-slate-900/40 p-3 min-h-0">
-                  <div ref={outputRef} className="h-full overflow-y-auto font-mono text-xs leading-relaxed text-slate-300 whitespace-pre-wrap break-words">
+                <div className="flex flex-col flex-1 overflow-hidden bg-slate-900/40 min-h-0">
+                  <div ref={outputRef} className="flex-1 overflow-y-auto font-mono text-xs leading-relaxed text-slate-300 whitespace-pre-wrap break-words p-3">
                     {outputLog || <span className="text-slate-500 italic">Console output will appear here.</span>}
                   </div>
+                  {/* Inline console input */}
+                  {inputRequest !== null && appSettings.inputMode === 'inline-console' && !(appSettings.useFixedInputs && fixedInputsQueueRef.current.length > 0) && (
+                    <div className="flex-shrink-0 border-t border-amber-500/40 bg-slate-900/60 px-3 py-2 flex items-center gap-2">
+                      <span className="flex-shrink-0 font-mono text-xs text-amber-300 truncate max-w-[200px]">
+                        {inputRequest.prompt || '>>>'}
+                      </span>
+                      <input
+                        key={inputRequest.id}
+                        ref={inlineInputRef}
+                        type="text"
+                        value={inputValue}
+                        className="flex-1 min-w-0 bg-transparent border-none outline-none font-mono text-xs text-white caret-amber-400"
+                        placeholder="type here and press Enter…"
+                        onChange={e => setInputValue(e.target.value)}
+                        onKeyDown={e => { if (e.key === 'Enter') handleInputSubmit() }}
+                      />
+                      <button type="button" onClick={forceStop}
+                        className="flex-shrink-0 text-[10px] font-semibold text-red-400 hover:text-red-300 border border-slate-600 rounded px-1.5 py-0.5 transition-colors">
+                        Stop
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -1765,15 +1878,15 @@ exec(code_obj, globals())
                     <div className="flex items-center gap-2">
                       {!isPygameRunActive && !isTurtleCanvasRunActive && (
                         <div className="flex rounded overflow-hidden border border-slate-700 text-[11px]">
-                          {(['outline', 'hierarchy', 'uml', ...(turtleSvg ? ['turtle'] : []), 'notes'] as DiagramView[]).map(view => (
-                            <button key={view} onClick={() => setDiagramView(view)}
+                          {(['outline', 'hierarchy', 'uml', ...(turtleSvg ? ['turtle'] : []), 'notes', ...(appSettings.useFixedInputs ? ['inputs'] : [])] as DiagramView[]).map(view => (
+                            <button type="button" key={view} onClick={() => setDiagramView(view)}
                               className={`px-2.5 py-1 ${diagramView === view ? 'bg-emerald-700 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}>
-                              {view === 'outline' ? 'Outline' : view === 'hierarchy' ? 'Hierarchy' : view === 'uml' ? 'Class' : view === 'turtle' ? 'Turtle' : 'Notes'}
+                              {view === 'outline' ? 'Outline' : view === 'hierarchy' ? 'Hierarchy' : view === 'uml' ? 'Class' : view === 'turtle' ? 'Turtle' : view === 'notes' ? 'Notes' : 'Inputs'}
                             </button>
                           ))}
                         </div>
                       )}
-                      {!isPygameRunActive && !isTurtleCanvasRunActive && diagramView !== 'outline' && diagramView !== 'turtle' && diagramView !== 'notes' && (
+                      {!isPygameRunActive && !isTurtleCanvasRunActive && diagramView !== 'outline' && diagramView !== 'turtle' && diagramView !== 'notes' && diagramView !== 'inputs' && (
                         <DiagramFontControls fontSize={diagramFontSize} onDecrease={decreaseDiagramFontSize} onIncrease={increaseDiagramFontSize}
                           canDecrease={diagramFontSize > DIAGRAM_FONT_MIN} canIncrease={diagramFontSize < DIAGRAM_FONT_MAX} />
                       )}
@@ -1886,6 +1999,22 @@ exec(code_obj, globals())
                             </div>
                           </div>
                         )}
+                      </div>
+                    ) : diagramView === 'inputs' && appSettings.useFixedInputs ? (
+                      <div className="h-full flex flex-col gap-2">
+                        <p className="text-xs text-slate-400 leading-relaxed flex-shrink-0">
+                          One input value per line. Fed automatically to <code className="rounded bg-slate-700 px-1 text-emerald-300">input()</code> calls in order. Unused lines are preserved for re-runs.
+                        </p>
+                        <textarea
+                          value={fixedInputsText}
+                          onChange={e => {
+                            setFixedInputsText(e.target.value)
+                            persistFixedInputs(activeFilesystemId, e.target.value)
+                          }}
+                          className="flex-1 min-h-0 bg-slate-900 border border-slate-700 rounded p-2 font-mono text-xs text-slate-200 resize-none focus:outline-none focus:ring-1 focus:ring-emerald-500 leading-relaxed"
+                          placeholder="Enter inputs, one per line..."
+                          spellCheck={false}
+                        />
                       </div>
                     ) : (
                       <div className="mx-auto h-full min-h-[280px]">

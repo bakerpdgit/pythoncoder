@@ -1,5 +1,22 @@
 import { THEME_STORAGE_KEY, NOTES_STORAGE_KEY, SETTINGS_STORAGE_KEY } from '../constants'
-import type { Theme, AppSettings, BookNavState } from '../types'
+import type { Theme, AppSettings, BookNavState, InputMode } from '../types'
+
+const FIXED_INPUTS_KEY_PREFIX = 'pythoncoder-fixed-inputs-'
+
+export const getStoredFixedInputs = (fsId: string): string => {
+  try {
+    return localStorage.getItem(FIXED_INPUTS_KEY_PREFIX + fsId) ?? ''
+  } catch {
+    return ''
+  }
+}
+
+export const persistFixedInputs = (fsId: string, text: string): void => {
+  try {
+    if (text) localStorage.setItem(FIXED_INPUTS_KEY_PREFIX + fsId, text)
+    else localStorage.removeItem(FIXED_INPUTS_KEY_PREFIX + fsId)
+  } catch { /* ignore */ }
+}
 
 const BOOK_NAV_KEY = 'pythoncoder-book-nav'
 
@@ -47,15 +64,19 @@ export const persistNoteOverrides = (overrides: Record<string, string>): void =>
   }
 }
 
+const VALID_INPUT_MODES: InputMode[] = ['inline-console', 'input-bar', 'popup-dialog']
+
 export const getStoredSettings = (): AppSettings => {
   try {
     const raw = localStorage.getItem(SETTINGS_STORAGE_KEY)
     const parsed = raw ? JSON.parse(raw) : {}
     return {
       turtleMode: parsed.turtleMode === 'basthon-svg' ? 'basthon-svg' : 'pyo-js-turtle',
+      inputMode: VALID_INPUT_MODES.includes(parsed.inputMode) ? (parsed.inputMode as InputMode) : 'inline-console',
+      useFixedInputs: parsed.useFixedInputs === true,
     }
   } catch {
-    return { turtleMode: 'pyo-js-turtle' }
+    return { turtleMode: 'pyo-js-turtle', inputMode: 'inline-console', useFixedInputs: false }
   }
 }
 

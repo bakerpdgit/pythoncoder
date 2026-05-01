@@ -1,10 +1,13 @@
 export type Theme = 'dark' | 'light'
 export type RuntimeKey = 'trace-worker' | 'main-thread'
-export type DiagramView = 'hierarchy' | 'outline' | 'uml' | 'turtle' | 'notes'
+export type DiagramView = 'hierarchy' | 'outline' | 'uml' | 'turtle' | 'notes' | 'inputs'
 export type TurtleMode = 'pyo-js-turtle' | 'basthon-svg'
+export type InputMode = 'inline-console' | 'input-bar' | 'popup-dialog'
 
 export interface AppSettings {
   turtleMode: TurtleMode
+  inputMode: InputMode
+  useFixedInputs: boolean
 }
 
 export interface PanelVisibility {

@@ -162,6 +162,8 @@ def build_scope_snapshot(frame, func_name):
     for name, value in frame.f_locals.items():
         if name in seen_names or not is_serializable_local(name, value):
             continue
+        if name.startswith("_"):
+            continue
         local_entries.append({"label": name, "value": serialize_value(value)})
 
     locals_view = {
@@ -170,10 +172,7 @@ def build_scope_snapshot(frame, func_name):
             "kind": "scope",
             "type": func_name,
             "summary": f"{len(parameter_entries)} params \\u2022 {len(local_entries)} locals",
-            "entries": [
-                {"label": "Parameters", "value": {"kind": "mapping", "type": "parameters", "length": len(parameter_entries), "summary": f"{len(parameter_entries)} parameters", "entries": parameter_entries}},
-                {"label": "Locals", "value": {"kind": "mapping", "type": "locals", "length": len(local_entries), "summary": f"{len(local_entries)} locals", "entries": local_entries}},
-            ],
+            "entries": parameter_entries + local_entries,
         },
     }
 
@@ -193,7 +192,7 @@ def build_scope_snapshot(frame, func_name):
             "kind": "scope",
             "type": "globals",
             "summary": f"{len(global_entries)} globals",
-            "entries": [{"label": "Globals", "value": {"kind": "mapping", "type": "globals", "length": len(global_entries), "summary": f"{len(global_entries)} globals", "entries": global_entries}}],
+            "entries": global_entries,
         },
     }
 
