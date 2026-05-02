@@ -24,7 +24,7 @@ export const RuntimeSettingsMenu = ({
       onClick={onToggleOpen}
       disabled={disabled}
       aria-haspopup="true"
-      aria-expanded={isOpen}
+      aria-expanded={isOpen ? 'true' : 'false'}
       className="flex items-center gap-2 rounded border border-slate-600 px-3 py-2 text-xs font-semibold text-slate-200 transition-colors hover:border-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
       title="Choose the execution mode"
     >
@@ -59,8 +59,7 @@ export const RuntimeSettingsMenu = ({
                   checked={isSelected}
                   onChange={() => onSelectRuntime(key as RuntimeKey)}
                   disabled={isDisabled}
-                  className="mt-0.5 h-4 w-4 border-slate-500 bg-slate-900"
-                  style={{ accentColor: '#34d399' }}
+                  className="mt-0.5 h-4 w-4 border-slate-500 bg-slate-900 accent-emerald"
                 />
                 <span className="min-w-0">
                   <span className="block text-sm font-medium text-slate-200">{label}</span>

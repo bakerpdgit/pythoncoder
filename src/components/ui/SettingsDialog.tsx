@@ -23,18 +23,18 @@ const TURTLE_OPTIONS: { value: TurtleMode; label: string; desc: string }[] = [
 const INPUT_MODE_OPTIONS: { value: InputMode; label: string; desc: string }[] = [
   {
     value: 'inline-console',
-    label: 'Inline console (default)',
-    desc: 'Input prompt appears inside the console output panel with a text cursor. Auto-focused when input is needed.',
+    label: 'Terminal console (default)',
+    desc: 'Full xterm.js terminal in the console panel. Supports ANSI colours, multi-line paste, and right-click paste. Input is typed directly into the terminal.',
   },
   {
     value: 'input-bar',
-    label: 'Input bar',
-    desc: 'A banner bar appears at the top of the editor with a text field. Auto-focused when input is needed.',
+    label: 'Inline input field',
+    desc: 'Console shows plain text output. When input() is called, a text field appears at the bottom of the console panel.',
   },
   {
     value: 'popup-dialog',
     label: 'Pop-up dialog',
-    desc: 'A modal dialog appears with OK and Stop buttons. Auto-focused when input is needed.',
+    desc: 'A modal dialog appears with a text field, OK, and Stop buttons. Auto-focused when input is needed.',
   },
 ]
 
@@ -97,6 +97,28 @@ export const SettingsDialog = ({ isOpen, settings, onClose, onSettingsChange }: 
                 )
               })}
             </div>
+          </div>
+
+            {/* Inline trace values */}
+          <div>
+            <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mb-1">
+              Inline Trace Values
+            </div>
+            <p className="mb-3 text-xs text-slate-400 leading-relaxed">
+              While tracing, show the current values of variables used on each highlighted line as a subtle annotation to the right of the code.
+            </p>
+            <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-slate-600 bg-slate-900/40 px-4 py-3 hover:border-slate-500 transition-colors">
+              <input
+                type="checkbox"
+                checked={settings.inlineTraceValues}
+                onChange={() => onSettingsChange({ ...settings, inlineTraceValues: !settings.inlineTraceValues })}
+                className="mt-0.5 h-4 w-4 rounded border-slate-500 bg-slate-900 accent-emerald"
+              />
+              <span className="min-w-0">
+                <span className="block text-sm font-medium text-slate-200">Show inline variable values</span>
+                <span className="block text-[11px] text-slate-500 mt-0.5">Displays up to 4 variable values per line while stepping through code. Annotations are removed automatically when the trace ends.</span>
+              </span>
+            </label>
           </div>
 
           {/* Turtle graphics */}

@@ -8,6 +8,18 @@ export interface AppSettings {
   turtleMode: TurtleMode
   inputMode: InputMode
   useFixedInputs: boolean
+  inlineTraceValues: boolean
+}
+
+export interface NamedLayout {
+  name: string
+  visiblePanels: PanelVisibility
+  leftWidth: number
+  fsSidebarWidth: number
+  leftSidebarSplit: number
+  inspectorSplit: number
+  rightColSplit: number
+  bookPanelWidth: number
 }
 
 export interface PanelVisibility {

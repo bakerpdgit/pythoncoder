@@ -1,5 +1,32 @@
 import { THEME_STORAGE_KEY, NOTES_STORAGE_KEY, SETTINGS_STORAGE_KEY } from '../constants'
-import type { Theme, AppSettings, BookNavState, InputMode } from '../types'
+import type { Theme, AppSettings, BookNavState, InputMode, NamedLayout } from '../types'
+
+const EDITOR_FONT_SIZE_KEY = 'coder_editor_font_size'
+const CONSOLE_FONT_SIZE_KEY = 'coder_console_font_size'
+
+export const getStoredEditorFontSize = (): number => {
+  try {
+    const v = localStorage.getItem(EDITOR_FONT_SIZE_KEY)
+    const n = v ? parseInt(v, 10) : 14
+    return isNaN(n) ? 14 : Math.max(8, Math.min(40, n))
+  } catch { return 14 }
+}
+
+export const persistEditorFontSize = (size: number): void => {
+  try { localStorage.setItem(EDITOR_FONT_SIZE_KEY, String(size)) } catch { /* ignore */ }
+}
+
+export const getStoredConsoleFontSize = (): number => {
+  try {
+    const v = localStorage.getItem(CONSOLE_FONT_SIZE_KEY)
+    const n = v ? parseInt(v, 10) : 13
+    return isNaN(n) ? 13 : Math.max(8, Math.min(32, n))
+  } catch { return 13 }
+}
+
+export const persistConsoleFontSize = (size: number): void => {
+  try { localStorage.setItem(CONSOLE_FONT_SIZE_KEY, String(size)) } catch { /* ignore */ }
+}
 
 const FIXED_INPUTS_KEY_PREFIX = 'pythoncoder-fixed-inputs-'
 
@@ -74,10 +101,36 @@ export const getStoredSettings = (): AppSettings => {
       turtleMode: parsed.turtleMode === 'basthon-svg' ? 'basthon-svg' : 'pyo-js-turtle',
       inputMode: VALID_INPUT_MODES.includes(parsed.inputMode) ? (parsed.inputMode as InputMode) : 'inline-console',
       useFixedInputs: parsed.useFixedInputs === true,
+      inlineTraceValues: parsed.inlineTraceValues !== false,
     }
   } catch {
-    return { turtleMode: 'pyo-js-turtle', inputMode: 'inline-console', useFixedInputs: false }
+    return { turtleMode: 'pyo-js-turtle', inputMode: 'inline-console', useFixedInputs: false, inlineTraceValues: true }
   }
+}
+
+const WATCHES_KEY = 'pythoncoder-watches'
+const NAMED_LAYOUTS_KEY = 'pythoncoder-named-layouts'
+
+export const getStoredWatches = (): string[] => {
+  try {
+    const raw = localStorage.getItem(WATCHES_KEY)
+    return Array.isArray(JSON.parse(raw ?? 'null')) ? JSON.parse(raw!) : []
+  } catch { return [] }
+}
+
+export const persistWatches = (watches: string[]): void => {
+  try { localStorage.setItem(WATCHES_KEY, JSON.stringify(watches)) } catch { /* ignore */ }
+}
+
+export const getStoredNamedLayouts = (): NamedLayout[] => {
+  try {
+    const raw = localStorage.getItem(NAMED_LAYOUTS_KEY)
+    return Array.isArray(JSON.parse(raw ?? 'null')) ? JSON.parse(raw!) : []
+  } catch { return [] }
+}
+
+export const persistNamedLayouts = (layouts: NamedLayout[]): void => {
+  try { localStorage.setItem(NAMED_LAYOUTS_KEY, JSON.stringify(layouts)) } catch { /* ignore */ }
 }
 
 export const persistSettings = (settings: AppSettings): void => {

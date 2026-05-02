@@ -197,3 +197,29 @@ html[data-theme="light"] .icon-button:hover { border-color: #34d399; background:
 html[data-theme="light"] .insight-note-editor { border-color: #cbd5e1; background: rgba(255, 255, 255, 0.9); color: #0f172a; }
 html[data-theme="light"] .export-modal-backdrop { background: rgba(148, 163, 184, 0.3); }
 html[data-theme="light"] .export-modal-card { border-color: #cbd5e1; background: #ffffff; box-shadow: 0 24px 64px rgba(148, 163, 184, 0.32); }
+
+.console-terminal-wrapper {
+  padding: 6px;
+  height: 100%;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.console-terminal-container {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+input[type="checkbox"].accent-emerald,
+input[type="radio"].accent-emerald {
+  accent-color: #34d399;
+}
+
+/* Inline trace value annotations in the Monaco editor */
+.monaco-trace-inline-value {
+  color: #64748b;
+  font-style: italic;
+  letter-spacing: 0.01em;
+}
+html[data-theme="light"] .monaco-trace-inline-value { color: #94a3b8; }

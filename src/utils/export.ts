@@ -52,7 +52,7 @@ export const buildCommentExport = (structureModel: StructureModel, overrides: Re
   return output.join('\n').trim() + '\n'
 }
 
-const replaceExistingDocstring = (lines: string[], insertIndex: number): number => {
+export const replaceExistingDocstring = (lines: string[], insertIndex: number): number => {
   let firstContentIndex = insertIndex
   while (firstContentIndex < lines.length && lines[firstContentIndex].trim() === '') {
     firstContentIndex++

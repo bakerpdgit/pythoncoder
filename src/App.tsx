@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useDeferredValue, startTransition } from 'react'
+import { useState, useEffect, useRef, useMemo, useDeferredValue, startTransition } from 'react'
 import TracerWorker from './workers/tracer.worker.ts?worker'
 import Editor, { type Monaco, loader } from '@monaco-editor/react'
 
@@ -13,9 +13,9 @@ import {
   buildPythonStructureModel, analyzePythonClasses, analyzePythonFunctions,
   analyzePythonOutline, cleanCodeText, codeUsesPygame, codeUsesTurtle, getExpandableOutlineIds,
 } from './utils/codeAnalysis'
-import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides, getStoredSettings, persistSettings, getStoredBookNavState, persistBookNavState, getStoredFixedInputs, persistFixedInputs } from './utils/storage'
+import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides, getStoredSettings, persistSettings, getStoredBookNavState, persistBookNavState, getStoredFixedInputs, persistFixedInputs, getStoredEditorFontSize, persistEditorFontSize, getStoredConsoleFontSize, persistConsoleFontSize, getStoredWatches, persistWatches, getStoredNamedLayouts, persistNamedLayouts } from './utils/storage'
 import { triggerDownload, getBaseFileStem } from './utils/download'
-import { buildCommentExport, buildDocstringExport, getDefinitionNote, getDefaultDefinitionNote, sanitizeNoteText } from './utils/export'
+import { buildCommentExport, buildDocstringExport, replaceExistingDocstring, getDefinitionNote, getDefaultDefinitionNote, sanitizeNoteText } from './utils/export'
 import { loadMainThreadPyodide, resetMainThreadPyodide, PYGAME_MAIN_THREAD_BOOTSTRAP, TURTLE_CANVAS_BOOTSTRAP, TURTLE_SVG_BOOTSTRAP, SVG_TURTLE_WORKER_SETUP } from './utils/mainThread'
 import { fetchBookManifest, getOrCreateChallengeFs, getHiddenPathsForFs, BOOK_FS_PREFIX, BOOK_SRC_PREFIX } from './utils/bookLoader'
 import {
@@ -39,6 +39,7 @@ import { UmlDiagram } from './components/diagrams/UmlDiagram'
 import { OutlinePanel } from './components/diagrams/OutlinePanel'
 import { TurtleScrubber } from './components/TurtleScrubber'
 import { InspectorPane } from './components/InspectorPane'
+import { ConsoleTerminal, type ConsoleTerminalHandle } from './components/ConsoleTerminal'
 import { clampDiagramFontSize } from './components/diagrams/diagramLayout'
 import {
   TRACE_CMD_STEP_INTO, TRACE_CMD_STEP_OVER, TRACE_CMD_STEP_OUT_BLOCK, TRACE_CMD_CONTINUE,
@@ -48,7 +49,7 @@ import {
 import type {
   Theme, RuntimeKey, PanelVisibility, InputRequest, SabRef, SimState, InspectorPath,
   StructureModel, DiagramModel, HierarchyModel, OutlineModel, DiagramView, VFSEntry,
-  AppSettings, BookNavState, BookChallenge,
+  AppSettings, BookNavState, BookChallenge, NamedLayout,
 } from './types'
 
 async function readDirectoryToMap(handle: FileSystemDirectoryHandle, prefix = ''): Promise<Map<string, ArrayBuffer>> {
@@ -107,6 +108,13 @@ const MONACO_LIGHT_THEME: MonacoEditor.IStandaloneThemeData = {
   },
 }
 
+const PYTHON_KEYWORDS = new Set([
+  'False', 'None', 'True', 'and', 'as', 'assert', 'async', 'await', 'break', 'class',
+  'continue', 'def', 'del', 'elif', 'else', 'except', 'finally', 'for', 'from', 'global',
+  'if', 'import', 'in', 'is', 'lambda', 'nonlocal', 'not', 'or', 'pass', 'raise',
+  'return', 'try', 'while', 'with', 'yield',
+])
+
 export default function App() {
   const [codeText, setCodeText] = useState('')
   const [theme, setTheme] = useState<Theme>(() => getStoredTheme())
@@ -150,7 +158,7 @@ export default function App() {
   const [activeFilesystemId, setActiveFilesystemId] = useState<string>('default')
   const [currentWorkingDir, setCurrentWorkingDir] = useState<string>('/')
   const [openFilePath, setOpenFilePath] = useState<string | null>(null)
-  const [bookNavState, setBookNavState] = useState<BookNavState | null>(() => getStoredBookNavState())
+  const [bookNavState, setBookNavState] = useState<BookNavState | null>(null)
   const [challengeHiddenPaths, setChallengeHiddenPaths] = useState<string[]>([])
   const [vfsReloadTrigger, setVfsReloadTrigger] = useState(0)
   const [isUnsaved, setIsUnsaved] = useState(false)
@@ -169,19 +177,32 @@ export default function App() {
   const [localsInspectorPath, setLocalsInspectorPath] = useState<InspectorPath>([])
   const [breakpoints, setBreakpoints] = useState<Set<number>>(new Set())
   const breakpointsRef = useRef<Set<number>>(new Set())
+  const [runModeChoice, setRunModeChoice] = useState<'trace' | 'run' | 'break'>('trace')
+  const [isRunDropdownOpen, setIsRunDropdownOpen] = useState(false)
+  const [editorFontSize, setEditorFontSize] = useState(() => getStoredEditorFontSize())
+  const [consoleFontSize, setConsoleFontSize] = useState(() => getStoredConsoleFontSize())
+  const [editorCursorLine, setEditorCursorLine] = useState(1)
   const [leftWidth, setLeftWidth] = useState(55)         // % of center for code vs right col
   const [fsSidebarWidth, setFsSidebarWidth] = useState(224)  // px width of left sidebar
   const [leftSidebarSplit, setLeftSidebarSplit] = useState(55) // % of left sidebar for FS (top)
   const [inspectorSplit, setInspectorSplit] = useState(50)    // % of inspector for globals (top)
   const [rightColSplit, setRightColSplit] = useState(42)      // % of right col for Console (top)
   const [bookPanelWidth, setBookPanelWidth] = useState(360)   // px width of book panel
+  const [watches, setWatches] = useState<string[]>(() => getStoredWatches())
+  const [inspectorCollapsed, setInspectorCollapsed] = useState({ globals: false, locals: false, watches: false })
+  const [savedLayouts, setSavedLayouts] = useState<NamedLayout[]>(() => getStoredNamedLayouts())
 
   const workerRef = useRef<Worker | null>(null)
   const sabRef = useRef<SabRef | null>(null)
+  const consoleTermRef = useRef<ConsoleTerminalHandle | null>(null)
+  const inputModeRef = useRef(appSettings.inputMode)
+  const runDropdownRef = useRef<HTMLDivElement>(null)
   const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null)
   const monacoRef = useRef<Monaco | null>(null)
   const editorDecorationsRef = useRef<MonacoEditor.IEditorDecorationsCollection | null>(null)
   const breakpointDecorationsRef = useRef<MonacoEditor.IEditorDecorationsCollection | null>(null)
+  const traceValueDecorationsRef = useRef<MonacoEditor.IEditorDecorationsCollection | null>(null)
+  const prevTraceLineRef = useRef<number>(-1)
   const applyingEditorValueRef = useRef(false)
   const outputRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<HTMLInputElement | null>(null)
@@ -215,7 +236,7 @@ export default function App() {
   const rightColRef = useRef<HTMLDivElement | null>(null)
   const inspectorRef = useRef<HTMLDivElement | null>(null)
   const mainThreadMountedPathsRef = useRef<string[]>([])
-  const workerRunModeRef = useRef(false)
+  const workerRunModeRef = useRef<'trace' | 'run' | 'break'>('trace')
   const turtleSvgHistoryRef = useRef<string[]>([])
   const turtleScrubLockedRef = useRef(false)
 
@@ -235,16 +256,37 @@ export default function App() {
   const inspectorViews = inspectorRoot?.views || {}
   const globalsInspectorRoot = inspectorViews.globals ?? null
   const localsInspectorRoot = inspectorViews.locals ?? null
-  const activeInsightKey = currentFunc ? getDefinitionKey(currentFunc, currentClass) : ''
+  const GLOBAL_NOTE_KEY = '__global__'
+
+  // During a trace, key is set by the traced function; in editing mode use cursor position
+  const traceInsightKey = currentFunc ? getDefinitionKey(currentFunc, currentClass) : ''
+  const cursorInsightKey = useMemo(() => {
+    if (isRunning) return ''
+    const defs = [...structureModel.orderedDefinitions].sort((a, b) => a.line - b.line)
+    let matched = ''
+    for (const def of defs) {
+      if (def.line <= editorCursorLine) matched = def.key
+    }
+    return matched
+  }, [isRunning, editorCursorLine, structureModel.orderedDefinitions])
+  const activeInsightKey = isRunning ? traceInsightKey : cursorInsightKey
+  const effectiveNoteKey = activeInsightKey || GLOBAL_NOTE_KEY
+
   const activeInsightDefinition = structureModel.definitionByKey[activeInsightKey] || null
   const activeInsightText = activeInsightDefinition
     ? getDefinitionNote(activeInsightDefinition, noteOverrides)
-    : currentFunc
-      ? getExplanation(currentFunc, currentClass)
-      : 'Waiting for execution to enter a definition...'
+    : effectiveNoteKey === GLOBAL_NOTE_KEY
+      ? (noteOverrides[GLOBAL_NOTE_KEY] || '')
+      : isRunning && currentFunc
+        ? getExplanation(currentFunc, currentClass)
+        : ''
   const activeInsightHeading = activeInsightDefinition?.interface
-    || (currentClass ? `${currentClass}.${currentFunc}()` : currentFunc ? `${currentFunc}()` : 'Global Scope')
-  const hasCustomInsightNote = !!activeInsightDefinition && Object.prototype.hasOwnProperty.call(noteOverrides, activeInsightDefinition.key)
+    || (effectiveNoteKey === GLOBAL_NOTE_KEY
+      ? 'Module / Global Scope'
+      : currentClass ? `${currentClass}.${currentFunc}()` : currentFunc ? `${currentFunc}()` : 'Global Scope')
+  const hasCustomInsightNote = effectiveNoteKey === GLOBAL_NOTE_KEY
+    ? Object.prototype.hasOwnProperty.call(noteOverrides, GLOBAL_NOTE_KEY)
+    : !!activeInsightDefinition && Object.prototype.hasOwnProperty.call(noteOverrides, activeInsightDefinition.key)
   const canExportNotes = structureModel.orderedDefinitions.length > 0 && hasCode
   const displayedTurtleSvg = turtleSvgHistory.length > 0 && turtleScrubStep >= 0 && turtleScrubStep < turtleSvgHistory.length
     ? turtleSvgHistory[turtleScrubStep]
@@ -286,6 +328,7 @@ export default function App() {
         if (challengeFs) {
           setActiveFilesystemId(challengeFs.id)
           setChallengeHiddenPaths(getHiddenPathsForFs(challengeFs.id))
+          setBookNavState(savedNav)
           const children = await lc(challengeFs.id, '/')
           const pyFile = children.find(e => e.type === 'file' && e.name.endsWith('.py'))
           if (pyFile?.content) {
@@ -296,6 +339,9 @@ export default function App() {
           return
         }
       }
+
+      // No challenge FS found — clear any stale book nav state and load default
+      persistBookNavState(null)
 
       const entry = await getEntryByPath('default', '/main.py')
       if (entry?.content) {
@@ -325,6 +371,11 @@ export default function App() {
 
   useEffect(() => { persistNoteOverrides(noteOverrides) }, [noteOverrides])
   useEffect(() => { persistSettings(appSettings) }, [appSettings])
+  useEffect(() => { inputModeRef.current = appSettings.inputMode }, [appSettings.inputMode])
+  useEffect(() => { persistEditorFontSize(editorFontSize) }, [editorFontSize])
+  useEffect(() => { persistConsoleFontSize(consoleFontSize) }, [consoleFontSize])
+  useEffect(() => { persistWatches(watches) }, [watches])
+  useEffect(() => { persistNamedLayouts(savedLayouts) }, [savedLayouts])
 
   useEffect(() => {
     const text = getStoredFixedInputs(activeFilesystemId)
@@ -354,7 +405,17 @@ export default function App() {
     setIsPanelMenuOpen(false)
     setIsRuntimeMenuOpen(false)
     setIsQuickSettingsOpen(false)
+    setIsRunDropdownOpen(false)
   }, [isRunning])
+
+  useEffect(() => {
+    if (!isRunDropdownOpen) return
+    const handle = (e: MouseEvent) => {
+      if (!runDropdownRef.current?.contains(e.target as Node)) setIsRunDropdownOpen(false)
+    }
+    document.addEventListener('mousedown', handle)
+    return () => document.removeEventListener('mousedown', handle)
+  }, [isRunDropdownOpen])
 
   useEffect(() => {
     if (!isPanelMenuOpen && !isRuntimeMenuOpen && !isQuickSettingsOpen) return
@@ -404,17 +465,10 @@ export default function App() {
 
   useEffect(() => {
     if (inputRequest === null) return
-    if (appSettings.useFixedInputs && fixedInputsQueueRef.current.length > 0) {
-      const next = fixedInputsQueueRef.current.shift()!
-      setOutputLog(prev => prev + (inputRequest.prompt || '') + next + '\n')
-      handleInputSubmit(next)
-      return
-    }
     const mode = appSettings.inputMode
-    if (mode === 'input-bar' && inputRef.current) {
-      inputRef.current.focus(); inputRef.current.select()
-    } else if (mode === 'inline-console' && inlineInputRef.current) {
-      inlineInputRef.current.focus()
+    // inline-console is the xterm terminal — it self-handles prompts via the ConsoleTerminal prop
+    if (mode === 'input-bar' && inlineInputRef.current) {
+      inlineInputRef.current.focus(); inlineInputRef.current.select()
     } else if (mode === 'popup-dialog' && popupDialogRef.current) {
       if (!popupDialogRef.current.open) popupDialogRef.current.showModal()
     }
@@ -490,6 +544,68 @@ export default function App() {
     editor.revealLineInCenterIfOutsideViewport(currentLine)
   }, [currentLine])
 
+  // Sync inline trace value annotations (current line + one-line trail)
+  useEffect(() => {
+    const decorations = traceValueDecorationsRef.current
+    if (!decorations) return
+    if (!appSettings.inlineTraceValues || currentLine < 1 || !simState) {
+      decorations.set([])
+      prevTraceLineRef.current = -1
+      return
+    }
+    const localsNode = localsInspectorRoot?.node
+    const globalsNode = globalsInspectorRoot?.node
+    const allEntries = [
+      ...((localsNode?.kind === 'scope' || localsNode?.kind === 'mapping') ? (localsNode.entries ?? []) : []),
+      ...((globalsNode?.kind === 'scope' || globalsNode?.kind === 'mapping') ? (globalsNode.entries ?? []) : []),
+    ]
+    if (allEntries.length === 0) { decorations.set([]); prevTraceLineRef.current = currentLine; return }
+
+    const model = editorRef.current?.getModel()
+
+    const valueMap = new Map<string, string>()
+    for (const entry of allEntries) {
+      const label = String(entry.label ?? '').replace(/^['"]|['"]$/g, '')
+      if (!label) continue
+      const node = entry.value
+      if (!node) continue
+      if (node.kind === 'primitive') {
+        const raw = typeof node.value === 'string' ? node.value : String(node.summary ?? node.value)
+        const truncated = raw.length > 20 ? raw.slice(0, 20) + '…' : raw
+        valueMap.set(label, typeof node.value === 'string' ? `"${truncated}"` : truncated)
+      } else {
+        valueMap.set(label, node.summary ?? node.type ?? '?')
+      }
+    }
+
+    const buildDec = (line: number) => {
+      if (line < 1 || !model) return null
+      const tokens = (model.getLineContent(line).match(/\b[a-zA-Z_]\w*\b/g) ?? [])
+      const parts: string[] = []
+      for (const name of [...new Set(tokens)].filter(t => !PYTHON_KEYWORDS.has(t))) {
+        if (parts.length >= 4) break
+        if (valueMap.has(name)) parts.push(`${name}=${valueMap.get(name)}`)
+      }
+      if (parts.length === 0) return null
+      const lineEnd = model.getLineMaxColumn(line)
+      return {
+        range: { startLineNumber: line, startColumn: 1, endLineNumber: line, endColumn: lineEnd },
+        options: { after: { content: `  // ${parts.join(', ')}`, inlineClassName: 'monaco-trace-inline-value' } },
+      }
+    }
+
+    const newDecs = []
+    const cur = buildDec(currentLine)
+    if (cur) newDecs.push(cur)
+    const prevLine = prevTraceLineRef.current
+    if (prevLine >= 1 && prevLine !== currentLine) {
+      const prev = buildDec(prevLine)
+      if (prev) newDecs.push(prev)
+    }
+    decorations.set(newDecs)
+    prevTraceLineRef.current = currentLine
+  }, [currentLine, simState, appSettings.inlineTraceValues, globalsInspectorRoot, localsInspectorRoot])
+
   // Turtle scrubber playback: advance one step per interval, stop at end
   useEffect(() => {
     if (!turtleScrubPlaying) return
@@ -516,6 +632,7 @@ export default function App() {
     monacoRef.current = monaco
     editorDecorationsRef.current = editor.createDecorationsCollection()
     breakpointDecorationsRef.current = editor.createDecorationsCollection()
+    traceValueDecorationsRef.current = editor.createDecorationsCollection()
 
     editor.onMouseDown(e => {
       if (e.target.type === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN) {
@@ -529,7 +646,12 @@ export default function App() {
       }
     })
 
-    // Ctrl+Alt+> / Ctrl+Alt+< — editor font size
+    // Track cursor position for notes editing
+    editor.onDidChangeCursorPosition(e => {
+      setEditorCursorLine(e.position.lineNumber)
+    })
+
+    // Ctrl+Alt+Shift+> / < — editor font size (also updates the stored value)
     const KM = monaco.KeyMod
     const KC = monaco.KeyCode
     editor.addAction({
@@ -538,7 +660,9 @@ export default function App() {
       keybindings: [KM.CtrlCmd | KM.Alt | KM.Shift | KC.Period],
       run: (ed) => {
         const size = ed.getOption(monaco.editor.EditorOption.fontSize)
-        ed.updateOptions({ fontSize: Math.min(size + 1, 40) })
+        const next = Math.min(size + 1, 40)
+        ed.updateOptions({ fontSize: next })
+        setEditorFontSize(next)
       },
     })
     editor.addAction({
@@ -547,7 +671,23 @@ export default function App() {
       keybindings: [KM.CtrlCmd | KM.Alt | KM.Shift | KC.Comma],
       run: (ed) => {
         const size = ed.getOption(monaco.editor.EditorOption.fontSize)
-        ed.updateOptions({ fontSize: Math.max(size - 1, 8) })
+        const next = Math.max(size - 1, 8)
+        ed.updateOptions({ fontSize: next })
+        setEditorFontSize(next)
+      },
+    })
+
+    editor.addAction({
+      id: 'add-to-watches',
+      label: 'Add Selection to Watches',
+      contextMenuGroupId: 'navigation',
+      contextMenuOrder: 1.5,
+      run: (ed) => {
+        const selection = ed.getSelection()
+        if (!selection) return
+        const text = ed.getModel()?.getValueInRange(selection)?.trim()
+        if (!text) return
+        setWatches(w => w.includes(text) ? w : [...w, text])
       },
     })
 
@@ -678,32 +818,96 @@ export default function App() {
 
   // ── Note management ───────────────────────────────────────────────────────
 
-  const saveInsightNote = (targetKey = activeInsightKey, rawValue = noteDraftRef.current, closeEditor = true) => {
+  const saveInsightNote = (targetKey = effectiveNoteKey, rawValue = noteDraftRef.current, closeEditor = true) => {
     if (!targetKey) return
-    const definition = structureModel.definitionByKey[targetKey] || null
-    const defaultNote = getDefaultDefinitionNote(definition)
     const nextValue = sanitizeNoteText(rawValue)
-    setNoteOverrides(current => {
-      const updated = { ...current }
-      if (!nextValue && !defaultNote) delete updated[targetKey]
-      else if (nextValue === defaultNote) delete updated[targetKey]
-      else updated[targetKey] = nextValue
-      return updated
-    })
+    if (targetKey === GLOBAL_NOTE_KEY) {
+      setNoteOverrides(current => {
+        const updated = { ...current }
+        if (!nextValue) delete updated[GLOBAL_NOTE_KEY]
+        else updated[GLOBAL_NOTE_KEY] = nextValue
+        return updated
+      })
+    } else {
+      const definition = structureModel.definitionByKey[targetKey] || null
+      const defaultNote = getDefaultDefinitionNote(definition)
+      setNoteOverrides(current => {
+        const updated = { ...current }
+        if (!nextValue && !defaultNote) delete updated[targetKey]
+        else if (nextValue === defaultNote) delete updated[targetKey]
+        else updated[targetKey] = nextValue
+        return updated
+      })
+    }
     if (closeEditor) setIsInsightEditing(false)
   }
 
   const beginEditingInsightNote = () => {
-    if (!activeInsightKey) return
+    // Allow editing in trace mode (inside a def) or editing mode (always)
+    if (isRunning && !activeInsightKey) return
     setNoteDraft(activeInsightText)
     setIsInsightEditing(true)
   }
 
   const resetInsightNote = () => {
+    if (effectiveNoteKey === GLOBAL_NOTE_KEY) {
+      setNoteOverrides(current => { const updated = { ...current }; delete updated[GLOBAL_NOTE_KEY]; return updated })
+      setNoteDraft('')
+      setIsInsightEditing(false)
+      return
+    }
     if (!activeInsightKey) return
     setNoteOverrides(current => { const updated = { ...current }; delete updated[activeInsightKey]; return updated })
     setNoteDraft(getDefaultDefinitionNote(activeInsightDefinition))
     setIsInsightEditing(false)
+  }
+
+  const handleInsertDocstring = () => {
+    const noteText = isInsightEditing ? noteDraft : activeInsightText
+    const cleanNote = sanitizeNoteText(noteText)
+    if (!cleanNote) return
+
+    const lines = codeText.split('\n')
+
+    if (!activeInsightDefinition) {
+      // Global docstring at top of file
+      let insertIdx = 0
+      while (insertIdx < lines.length && /^\s*(#!|#\s*-\*-|#\s*coding)/.test(lines[insertIdx])) insertIdx++
+      while (insertIdx < lines.length && lines[insertIdx].trim() === '') insertIdx++
+      const safeLines = cleanNote.split('\n').map(l => l.replace(/"""/g, '\\"\\"\\"'))
+      const docLines = ['"""', ...safeLines, '"""']
+      const trimmed = lines[insertIdx]?.trim() || ''
+      if (trimmed.startsWith('"""') || trimmed.startsWith("'''")) {
+        const quote = trimmed.startsWith('"""') ? '"""' : "'''"
+        let endIdx = insertIdx
+        const rest = trimmed.slice(3)
+        if (!rest.includes(quote)) {
+          endIdx++
+          while (endIdx < lines.length && !lines[endIdx].includes(quote)) endIdx++
+        }
+        lines.splice(insertIdx, endIdx - insertIdx + 1, ...docLines)
+      } else {
+        lines.splice(insertIdx, 0, ...docLines, '')
+      }
+    } else {
+      const lineIndex = activeInsightDefinition.line - 1
+      const originalLine = lines[lineIndex] || ''
+      const leadingWs = originalLine.match(/^\s*/)?.[0] || ''
+      const docIndent = `${leadingWs}    `
+      const safeLines = cleanNote.split('\n').map(l => l.replace(/"""/g, '\\"\\"\\"'))
+      const docLines = [`${docIndent}"""`, ...safeLines.map(l => `${docIndent}${l}`), `${docIndent}"""`]
+      const insertIndex = replaceExistingDocstring(lines, lineIndex + 1)
+      lines.splice(insertIndex, 0, ...docLines)
+    }
+
+    const newCode = lines.join('\n')
+    setCodeText(newCode)
+    if (editorRef.current) {
+      applyingEditorValueRef.current = true
+      editorRef.current.setValue(newCode)
+      applyingEditorValueRef.current = false
+    }
+    setIsUnsaved(openFilePath !== null)
   }
 
   const downloadNotesExport = (mode: 'comments' | 'docstrings') => {
@@ -729,6 +933,39 @@ export default function App() {
     setShowExportDialog(false)
   }
 
+  // ── Output helpers ────────────────────────────────────────────────────────
+
+  const appendOutput = (text: string) => {
+    if (inputModeRef.current === 'inline-console') {
+      consoleTermRef.current?.write(text + '\n')
+    } else {
+      setOutputLog(prev => prev + text + '\n')
+    }
+  }
+
+  const clearConsole = () => {
+    setOutputLog('')
+    consoleTermRef.current?.clear()
+  }
+
+  const getWatchValue = (expr: string): string => {
+    if (!isRunning || !simState) return '—'
+    const localsNode = localsInspectorRoot?.node
+    const globalsNode = globalsInspectorRoot?.node
+    const allEntries = [
+      ...((localsNode?.kind === 'scope' || localsNode?.kind === 'mapping') ? (localsNode.entries ?? []) : []),
+      ...((globalsNode?.kind === 'scope' || globalsNode?.kind === 'mapping') ? (globalsNode.entries ?? []) : []),
+    ]
+    const entry = allEntries.find(e => String(e.label ?? '').replace(/^['"]|['"]$/g, '') === expr)
+    if (!entry) return '—'
+    const node = entry.value
+    if (!node) return '—'
+    if (node.kind === 'primitive') {
+      return typeof node.value === 'string' ? `"${node.value}"` : String(node.summary ?? node.value)
+    }
+    return node.summary ?? node.type ?? '?'
+  }
+
   // ── Panel & theme controls ────────────────────────────────────────────────
 
   const toggleTheme = () => setTheme(t => t === 'dark' ? 'light' : 'dark')
@@ -740,6 +977,38 @@ export default function App() {
       if (current[panelKey as keyof PanelVisibility] && visibleCount === 1) return current
       return { ...current, [panelKey]: !current[panelKey as keyof PanelVisibility] }
     })
+  }
+
+  const handleRestoreDefaults = () => {
+    setVisiblePanels({ code: true, visualizer: true, diagram: true, notes: true, output: true, filesystem: true })
+    setLeftWidth(55)
+    setFsSidebarWidth(224)
+    setLeftSidebarSplit(55)
+    setInspectorSplit(50)
+    setRightColSplit(42)
+    setIsPanelMenuOpen(false)
+  }
+
+  const handleSaveLayout = () => {
+    const name = window.prompt('Name for this layout:')
+    if (!name?.trim()) return
+    const layout: NamedLayout = { name: name.trim(), visiblePanels: { ...visiblePanels }, leftWidth, fsSidebarWidth, leftSidebarSplit, inspectorSplit, rightColSplit, bookPanelWidth }
+    setSavedLayouts(prev => [...prev.filter(l => l.name !== layout.name), layout])
+  }
+
+  const handleRestoreLayout = (layout: NamedLayout) => {
+    setVisiblePanels(layout.visiblePanels)
+    setLeftWidth(layout.leftWidth)
+    setFsSidebarWidth(layout.fsSidebarWidth)
+    setLeftSidebarSplit(layout.leftSidebarSplit)
+    setInspectorSplit(layout.inspectorSplit)
+    setRightColSplit(layout.rightColSplit)
+    setBookPanelWidth(layout.bookPanelWidth)
+    setIsPanelMenuOpen(false)
+  }
+
+  const handleDeleteLayout = (name: string) => {
+    setSavedLayouts(prev => prev.filter(l => l.name !== name))
   }
 
   const jumpToSourceLine = (lineNumber: number) => {
@@ -944,7 +1213,8 @@ export default function App() {
 
   const resetExecutionState = () => {
     setCurrentLine(-1); setCurrentFunc(''); setCurrentClass(''); setSimState(null)
-    setInputRequest(null); setInputValue(''); setOutputLog('')
+    setInputRequest(null); setInputValue('')
+    clearConsole()
   }
 
   const handleBookOpen = async (url: string) => {
@@ -1080,11 +1350,12 @@ export default function App() {
     }
     resetMainThreadPyodide()
     setMainThreadStatus('Pyodide reset. Ready.')
-    setOutputLog(prev => prev + '\n[INFO] Pyodide environment reset. Files are preserved.\n')
+    appendOutput('\n[INFO] Pyodide environment reset. Files are preserved.')
   }
 
-  const startTraceWorker = async (runMode = false) => {
+  const startTraceWorker = async () => {
     if (!hasSab || !hasCode) return
+    const choice = runModeChoice
     if (pendingRestore) pendingRestore()
     setPendingRestore(null)
     fixedInputsQueueRef.current = appSettings.useFixedInputs
@@ -1096,10 +1367,10 @@ export default function App() {
     const capturedCwd = currentWorkingDir
 
     const hasTurtleForMode = codeUsesTurtle(codeText)
-    const isSvgTurtleRun = runMode && hasTurtleForMode && appSettings.turtleMode === 'basthon-svg'
+    const isSvgTurtleRun = (choice === 'run') && hasTurtleForMode && appSettings.turtleMode === 'basthon-svg'
 
-    workerRunModeRef.current = runMode
-    if (runMode) {
+    workerRunModeRef.current = choice
+    if (choice === 'run') {
       if (isSvgTurtleRun) enterSvgTurtlePresentationMode()
       else enterConsolePresentationMode()
     }
@@ -1107,7 +1378,7 @@ export default function App() {
     resetExecutionState()
     resetTurtleHistory()
     setIsRunning(true); setActiveRuntime('trace-worker')
-    setCodeStatus(runMode ? 'Worker runtime starting...' : 'Trace-worker runtime starting...')
+    setCodeStatus(choice === 'run' ? 'Worker runtime starting...' : 'Trace-worker runtime starting...')
     setMainThreadStatus('Trace-worker runtime is active.')
 
     const sab = new SharedArrayBuffer(1024 * 4)
@@ -1120,8 +1391,19 @@ export default function App() {
       const data = e.data
       if (data.type === 'trace') {
         if (data.turtleSvg) { setTurtleSvg(data.turtleSvg); setDiagramView('turtle'); addToTurtleHistory(data.turtleSvg) }
-        if (workerRunModeRef.current) {
+        const mode = workerRunModeRef.current
+        if (mode === 'run') {
           sendTraceCommand(TRACE_CMD_CONTINUE)
+        } else if (mode === 'break') {
+          if (breakpointsRef.current.has(data.line)) {
+            workerRunModeRef.current = 'trace'
+            setCurrentLine(data.line); setCurrentFunc(data.func); setCurrentClass(data.cls || '')
+            if (data.state && data.state !== '{}') {
+              try { setSimState(JSON.parse(data.state)) } catch { /* ignore */ }
+            }
+          } else {
+            sendTraceCommand(TRACE_CMD_CONTINUE)
+          }
         } else {
           setCurrentLine(data.line); setCurrentFunc(data.func); setCurrentClass(data.cls || '')
           if (data.state && data.state !== '{}') {
@@ -1129,41 +1411,49 @@ export default function App() {
           }
         }
       } else if (data.type === 'input') {
-        setInputValue(''); setInputRequest({ id: Date.now(), prompt: data.prompt ?? '' })
+        setInputValue('')
+        if (appSettings.useFixedInputs && fixedInputsQueueRef.current.length > 0) {
+          const next = fixedInputsQueueRef.current.shift()!
+          appendOutput((data.prompt ?? '') + next)
+          setTimeout(() => handleInputSubmit(next), 0)
+        } else {
+          setInputRequest({ id: Date.now(), prompt: data.prompt ?? '' })
+        }
       } else if (data.type === 'print') {
-        setOutputLog(prev => prev + data.text + '\n')
+        appendOutput(data.text)
       } else if (data.type === 'error') {
         if (data.files?.length) {
           void syncFilesFromPyodide(capturedFsId, data.files).then(() => setVfsReloadTrigger(t => t + 1))
         }
-        setOutputLog(prev => prev + '\n[ERROR] ' + data.error + '\n')
+        appendOutput('\n[ERROR] ' + data.error)
         setInputRequest(null); setInputValue(''); setIsRunning(false); setActiveRuntime('')
         setCodeStatus('Worker runtime failed.')
-        if (workerRunModeRef.current) {
+        if (workerRunModeRef.current === 'run') {
           const inSvgMode = svgTurtleLayoutSnapshotRef.current !== null
           setPendingRestore(() => inSvgMode
             ? () => { restoreSvgTurtlePresentationMode(); closeScrubberAndClear() }
             : restoreConsolePresentationMode)
-          workerRunModeRef.current = false
         }
+        workerRunModeRef.current = 'trace'
         workerRef.current = null; sabRef.current = null
       } else if (data.type === 'done') {
         if (data.files?.length) {
           void syncFilesFromPyodide(capturedFsId, data.files).then(() => setVfsReloadTrigger(t => t + 1))
         }
         if (data.turtleSvg) { setTurtleSvg(data.turtleSvg); setDiagramView('turtle'); addToTurtleHistory(data.turtleSvg) }
-        const label = workerRunModeRef.current ? '[RUN FINISHED]' : '[TRACE RUN FINISHED]'
-        setOutputLog(prev => prev + `\n${label}\n`)
+        const wasRunMode = workerRunModeRef.current === 'run'
+        const label = wasRunMode ? '[RUN FINISHED]' : '[TRACE RUN FINISHED]'
+        appendOutput(`\n${label}`)
         setInputRequest(null); setInputValue(''); setIsRunning(false); setActiveRuntime('')
         setCurrentLine(-1)
-        setCodeStatus(workerRunModeRef.current ? 'Worker runtime finished.' : 'Trace-worker runtime finished.')
-        if (workerRunModeRef.current) {
+        setCodeStatus(wasRunMode ? 'Worker runtime finished.' : 'Trace-worker runtime finished.')
+        if (wasRunMode) {
           const inSvgMode = svgTurtleLayoutSnapshotRef.current !== null
           setPendingRestore(() => inSvgMode
             ? () => { restoreSvgTurtlePresentationMode(); closeScrubberAndClear() }
             : restoreConsolePresentationMode)
-          workerRunModeRef.current = false
         }
+        workerRunModeRef.current = 'trace'
         workerRef.current = null; sabRef.current = null
       } else if (data.type === 'turtle_update') {
         const svg = data.svg || ''
@@ -1219,8 +1509,8 @@ export default function App() {
       pyodide = await loadMainThreadPyodide()
       if (runId !== mainThreadRunIdRef.current) return
 
-      if (typeof pyodide.setStdout === 'function') pyodide.setStdout({ batched: (text: string) => setOutputLog(prev => prev + text + '\n') })
-      if (typeof pyodide.setStderr === 'function') pyodide.setStderr({ batched: (text: string) => setOutputLog(prev => prev + '[stderr] ' + text + '\n') })
+      if (typeof pyodide.setStdout === 'function') pyodide.setStdout({ batched: (text: string) => appendOutput(text) })
+      if (typeof pyodide.setStderr === 'function') pyodide.setStderr({ batched: (text: string) => appendOutput('[stderr] ' + text) })
       if (pyodide._api) pyodide._api._skip_unwind_fatal_error = true
 
       cleanFilesFromPyodide(pyodide, mainThreadMountedPathsRef.current)
@@ -1260,7 +1550,7 @@ export default function App() {
         js_input_prompt: (promptText: string) => window.prompt(promptText ?? '') ?? '',
         js_should_stop_main_thread: () => Boolean(mainThreadStopRequestedRef.current),
         js_set_main_thread_status: (message: string) => setMainThreadStatus(String(message ?? '')),
-        js_append_main_thread_log: (message: string) => setOutputLog(prev => prev + String(message ?? '') + '\n'),
+        js_append_main_thread_log: (message: string) => appendOutput(String(message ?? '')),
       }
       if (shouldRunTurtleCanvas) {
         execGlobalsObj.js_turtle_canvas_id = 'canvas'
@@ -1319,7 +1609,7 @@ exec(code_obj, globals())
         } catch { /* ignore */ }
       }
       const wasStopRequested = Boolean(mainThreadStopRequestedRef.current)
-      setOutputLog(prev => prev + (wasStopRequested ? '\n[MAIN-THREAD RUN STOPPED]\n' : '\n[MAIN-THREAD RUN FINISHED]\n'))
+      appendOutput(wasStopRequested ? '\n[MAIN-THREAD RUN STOPPED]' : '\n[MAIN-THREAD RUN FINISHED]')
       setCodeStatus(wasStopRequested ? 'Main-thread runtime stopped.' : 'Main-thread runtime finished.')
       setMainThreadStatus(wasStopRequested ? 'Main-thread run stopped.' : 'Main-thread run finished.')
       setIsRunning(false); setActiveRuntime('')
@@ -1332,7 +1622,7 @@ exec(code_obj, globals())
         } catch { /* ignore */ }
       }
       const message = error instanceof Error ? error.message : String(error)
-      setOutputLog(prev => prev + '\n[ERROR] ' + message + '\n')
+      appendOutput('\n[ERROR] ' + message)
       setCodeStatus('Main-thread runtime failed.')
       setMainThreadStatus('Main-thread run failed. See console output for details.')
       setIsRunning(false); setActiveRuntime('')
@@ -1383,17 +1673,17 @@ exec(code_obj, globals())
     if (workerRef.current) {
       workerRef.current.terminate(); workerRef.current = null; sabRef.current = null
       setCodeStatus('Worker runtime stopped.')
-      if (workerRunModeRef.current) {
+      if (workerRunModeRef.current === 'run') {
         const inSvgMode = svgTurtleLayoutSnapshotRef.current !== null
         setPendingRestore(() => inSvgMode
           ? () => { restoreSvgTurtlePresentationMode(); closeScrubberAndClear() }
           : restoreConsolePresentationMode)
-        workerRunModeRef.current = false
       }
+      workerRunModeRef.current = 'trace'
     } else if (activeRuntime === 'main-thread') {
       if (isPygameRunActive || isTurtleCanvasRunActive) {
         mainThreadStopRequestedRef.current = true
-        setOutputLog(prev => prev + '\n[INFO] Stop requested for main-thread run.\n')
+        appendOutput('\n[INFO] Stop requested for main-thread run.')
         setMainThreadStatus('Stopping main-thread run...')
         return
       }
@@ -1402,7 +1692,7 @@ exec(code_obj, globals())
       setIsRunning(false)
       setActiveRuntime('')
       setMainThreadStatus('Main-thread run stopped.')
-      setOutputLog(prev => prev + '\n[INFO] Main-thread run stopped.\n')
+      appendOutput('\n[INFO] Main-thread run stopped.')
       const restoreFn = isConsolePresentationMode ? restoreConsolePresentationMode
         : svgTurtleLayoutSnapshotRef.current ? () => { restoreSvgTurtlePresentationMode(); closeScrubberAndClear() }
         : null
@@ -1430,7 +1720,12 @@ exec(code_obj, globals())
           <PanelVisibilityMenu menuRef={panelMenuRef} isOpen={isPanelMenuOpen}
             onToggleOpen={() => { setIsRuntimeMenuOpen(false); setIsPanelMenuOpen(o => !o) }}
             panelOptions={PANEL_OPTIONS} visiblePanels={visiblePanels} onTogglePanel={togglePanelVisibility}
-            buttonHoverClass="hover:border-emerald-400" checkboxAccent="#34d399" disabled={isPygameRunActive || isConsolePresentationMode || isTurtleCanvasRunActive} />
+            buttonHoverClass="hover:border-emerald-400" checkboxAccent="#34d399" disabled={isPygameRunActive || isConsolePresentationMode || isTurtleCanvasRunActive}
+            onRestoreDefaults={handleRestoreDefaults}
+            savedLayouts={savedLayouts}
+            onSaveLayout={handleSaveLayout}
+            onRestoreLayout={handleRestoreLayout}
+            onDeleteLayout={handleDeleteLayout} />
           <RuntimeSettingsMenu menuRef={runtimeMenuRef} isOpen={isRuntimeMenuOpen}
             onToggleOpen={() => { setIsPanelMenuOpen(false); setIsRuntimeMenuOpen(o => !o) }}
             runtimePreference={runtimePreference} selectedRuntime={selectedRuntime}
@@ -1456,6 +1751,14 @@ exec(code_obj, globals())
                 </button>
                 <div className="my-1 border-t border-slate-700" />
                 <button type="button"
+                  onClick={() => { handlePyodideReset(); setIsQuickSettingsOpen(false) }}
+                  className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-slate-400 hover:bg-slate-700 hover:text-amber-300 transition-colors">
+                  <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h5M20 20v-5h-5M5.64 18.36A9 9 0 1020 12" />
+                  </svg>
+                  Reset Pyodide…
+                </button>
+                <button type="button"
                   onClick={() => { setIsSettingsOpen(true); setIsQuickSettingsOpen(false) }}
                   className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-slate-400 hover:bg-slate-700 hover:text-slate-200 transition-colors">
                   More settings…
@@ -1467,16 +1770,59 @@ exec(code_obj, globals())
 
           {!isRunning ? (
             selectedRuntime === 'trace-worker' ? (
-              <>
-                <button onClick={() => void startTraceWorker()} disabled={!hasCode || !hasSab}
-                  className="bg-emerald-600 hover:bg-emerald-500 text-white px-5 py-2 rounded font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
-                  Trace Run
+              /* ── Split run button ───────────────────────────────────────── */
+              <div ref={runDropdownRef} className="relative flex">
+                <button
+                  onClick={() => void startTraceWorker()}
+                  disabled={!hasCode || !hasSab}
+                  className={`rounded-l px-5 py-2 font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-white ${
+                    runModeChoice === 'trace' ? 'bg-emerald-600 hover:bg-emerald-500' :
+                    runModeChoice === 'run'   ? 'bg-sky-600 hover:bg-sky-500' :
+                                               'bg-violet-600 hover:bg-violet-500'
+                  }`}
+                >
+                  {runModeChoice === 'trace' ? 'Trace' : runModeChoice === 'run' ? 'Run' : 'Break Run'}
                 </button>
-                <button onClick={() => void startTraceWorker(true)} disabled={!hasCode || !hasSab}
-                  className="bg-sky-600 hover:bg-sky-500 text-white px-5 py-2 rounded font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
-                  Run
+                <button
+                  type="button"
+                  onClick={() => setIsRunDropdownOpen(o => !o)}
+                  disabled={!hasCode || !hasSab}
+                  title="Choose run mode"
+                  className={`rounded-r border-l border-white/20 px-2 py-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-white ${
+                    runModeChoice === 'trace' ? 'bg-emerald-600 hover:bg-emerald-500' :
+                    runModeChoice === 'run'   ? 'bg-sky-600 hover:bg-sky-500' :
+                                               'bg-violet-600 hover:bg-violet-500'
+                  }`}
+                >
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M19 9l-7 7-7-7" />
+                  </svg>
                 </button>
-              </>
+                {isRunDropdownOpen && (
+                  <div className="absolute right-0 top-full mt-1 z-50 w-52 rounded-lg border border-slate-600 bg-slate-800 shadow-xl py-1">
+                    {([
+                      { key: 'trace' as const, label: 'Trace', desc: 'Step through each line', color: 'text-emerald-300' },
+                      { key: 'run'   as const, label: 'Run',   desc: 'Run without stopping',  color: 'text-sky-300' },
+                      { key: 'break' as const, label: 'Break', desc: 'Run until first breakpoint', color: 'text-violet-300', disabled: breakpoints.size === 0 },
+                    ] as Array<{ key: 'trace' | 'run' | 'break'; label: string; desc: string; color: string; disabled?: boolean }>).map(({ key, label, desc, color, disabled }) => (
+                      <button
+                        key={key}
+                        type="button"
+                        disabled={disabled}
+                        onClick={() => { setRunModeChoice(key); setIsRunDropdownOpen(false) }}
+                        className={`w-full px-3 py-2.5 text-left transition-colors ${disabled ? 'opacity-40 cursor-not-allowed' : 'hover:bg-slate-700'}`}
+                      >
+                        <div className={`font-semibold text-sm flex items-center gap-1.5 ${runModeChoice === key ? color : 'text-slate-200'}`}>
+                          {runModeChoice === key && <span className="text-[10px]">✓</span>}
+                          {label}
+                          {disabled && <span className="ml-auto text-[9px] font-normal text-slate-500">no breakpoints</span>}
+                        </div>
+                        <div className="text-[11px] text-slate-500 mt-0.5">{desc}</div>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
             ) : (
               <>
                 <button onClick={() => void startMainThreadRun()} disabled={!hasCode}
@@ -1492,35 +1838,58 @@ exec(code_obj, globals())
                 </button>
               </>
             )
-          ) : activeRuntime === 'trace-worker' && !isConsolePresentationMode && !workerRunModeRef.current ? (
+          ) : activeRuntime === 'trace-worker' && currentLine > 0 && !isConsolePresentationMode ? (
+            /* ── Step controls ──────────────────────────────────────────── */
             <>
               <button onClick={() => sendTraceCommand(TRACE_CMD_STEP_INTO)} disabled={inputRequest !== null}
-                className="bg-emerald-700 hover:bg-emerald-600 text-white px-5 py-2 rounded font-semibold transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed">
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 5l7 7-7 7M5 5l7 7-7 7" />
+                title="Step Into (F11)"
+                className="bg-emerald-700 hover:bg-emerald-600 text-white px-4 py-2 rounded font-semibold transition-colors flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed">
+                {/* Step Into: arrow going down into a call */}
+                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="12" y1="3" x2="12" y2="15"/>
+                  <polyline points="8 11 12 15 16 11"/>
+                  <path d="M8 19h8"/>
                 </svg>
-                Step Into
+                Into
               </button>
               <button onClick={() => sendTraceCommand(TRACE_CMD_STEP_OVER)} disabled={inputRequest !== null}
-                className="bg-teal-700 hover:bg-teal-600 text-white px-5 py-2 rounded font-semibold transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed">
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
+                title="Step Over (F10)"
+                className="bg-teal-700 hover:bg-teal-600 text-white px-4 py-2 rounded font-semibold transition-colors flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed">
+                {/* Step Over: arrow jumping over a block */}
+                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M5 12 Q5 5 12 5 Q19 5 19 12"/>
+                  <polyline points="15 8 19 12 23 8"/>
+                  <line x1="5" y1="19" x2="19" y2="19"/>
                 </svg>
-                Step Over
+                Over
               </button>
               <button onClick={() => sendTraceCommand(TRACE_CMD_STEP_OUT_BLOCK)} disabled={inputRequest !== null}
-                className="bg-cyan-700 hover:bg-cyan-600 text-white px-5 py-2 rounded font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
-                Step Out Block
+                title="Step Out"
+                className="bg-cyan-700 hover:bg-cyan-600 text-white px-4 py-2 rounded font-semibold transition-colors flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed">
+                {/* Step Out: arrow going up and out */}
+                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="12" y1="21" x2="12" y2="9"/>
+                  <polyline points="8 13 12 9 16 13"/>
+                  <path d="M8 5h8"/>
+                </svg>
+                Out
               </button>
               <button onClick={() => sendTraceCommand(TRACE_CMD_CONTINUE)} disabled={inputRequest !== null}
-                className="bg-violet-600 hover:bg-violet-500 text-white px-5 py-2 rounded font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                title="Continue (F5)"
+                className="bg-violet-600 hover:bg-violet-500 text-white px-4 py-2 rounded font-semibold transition-colors flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed">
+                {/* Continue: play/resume triangle */}
+                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
+                  <polygon points="5,3 19,12 5,21"/>
+                </svg>
                 Continue
               </button>
-              <button onClick={forceStop} className="bg-red-600 hover:bg-red-500 text-white px-5 py-2 rounded font-semibold transition-colors">Stop</button>
+              <button onClick={forceStop} className="bg-red-600 hover:bg-red-500 text-white px-4 py-2 rounded font-semibold transition-colors">Stop</button>
             </>
-          ) : (activeRuntime === 'trace-worker' && (isConsolePresentationMode || workerRunModeRef.current)) ? (
+          ) : (activeRuntime === 'trace-worker' && (isConsolePresentationMode || currentLine <= 0)) ? (
             <div className="flex items-center overflow-hidden rounded border border-sky-500/70 bg-sky-900/30 text-sm font-semibold text-sky-100">
-              <div className="px-4 py-2">Worker running</div>
+              <div className="px-4 py-2">
+                {workerRunModeRef.current === 'break' ? 'Running to breakpoint…' : 'Worker running'}
+              </div>
               <button type="button" onClick={forceStop}
                 className="self-stretch border-l border-sky-500/70 bg-red-700 px-3 text-xs font-bold uppercase tracking-wider text-white transition-colors hover:bg-red-600">
                 Stop
@@ -1565,22 +1934,7 @@ exec(code_obj, globals())
         </div>
       )}
 
-      {/* Input bar — shown only in input-bar mode */}
-      {inputRequest !== null && appSettings.inputMode === 'input-bar' && !(appSettings.useFixedInputs && fixedInputsQueueRef.current.length > 0) && (
-        <div className="flex-shrink-0 bg-slate-800 border-b border-slate-600 border-l-4 border-l-amber-400 px-5 py-2.5 flex items-center gap-4 shadow-md z-10">
-          <span className="flex-shrink-0 text-xs font-bold uppercase tracking-widest text-amber-400">Input</span>
-          <span className="flex-shrink-0 text-slate-300 text-sm truncate max-w-xs" title={inputRequest.prompt || ''}>
-            {inputRequest.prompt || 'Python is waiting for input...'}
-          </span>
-          <input key={inputRequest.id} ref={inputRef} type="text" value={inputValue}
-            className="flex-1 min-w-0 bg-slate-900 border border-slate-600 rounded px-3 py-1.5 text-white text-sm focus:outline-none focus:ring-1 focus:ring-amber-400 focus:border-amber-400"
-            placeholder="Type your response..."
-            onChange={e => setInputValue(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') handleInputSubmit() }} />
-          <button type="button" onClick={() => handleInputSubmit()} className="flex-shrink-0 bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-1.5 rounded font-semibold text-sm transition-colors">Submit</button>
-          <button type="button" onClick={forceStop} className="flex-shrink-0 bg-slate-700 hover:bg-slate-600 text-red-400 hover:text-red-300 border border-slate-600 px-4 py-1.5 rounded font-semibold text-sm transition-colors">Cancel / Stop</button>
-        </div>
-      )}
+
 
       {/* Popup dialog — always in DOM, shown via showModal() when needed */}
       <dialog ref={popupDialogRef}
@@ -1615,10 +1969,10 @@ exec(code_obj, globals())
       </dialog>
 
       {/* Post-run return bar */}
-      {pendingRestore && (
+      {(pendingRestore || (isConsolePresentationMode && !isRunning)) && (
         <div
           className="flex-shrink-0 flex items-center justify-between border-b border-emerald-600/50 bg-emerald-900/30 px-5 py-2.5 cursor-pointer hover:bg-emerald-900/50 transition-colors"
-          onClick={() => { pendingRestore(); setPendingRestore(null) }}
+          onClick={() => { if (pendingRestore) { pendingRestore(); setPendingRestore(null) } else { restoreConsolePresentationMode() } }}
           role="button"
         >
           <span className="text-sm text-emerald-100">Execution ended — click here to return to the editor.</span>
@@ -1686,25 +2040,84 @@ exec(code_obj, globals())
                       )}
                     </div>
                   </div>
-                  {/* Globals */}
-                  <div className="flex-shrink-0 overflow-hidden min-h-0"
-                    style={{ height: `${inspectorSplit}%` }}>
-                    <InspectorPane title="Global Variables" root={globalsInspectorRoot}
-                      path={globalsInspectorPath} setPath={setGlobalsInspectorPath}
-                      emptyMessage="Run code to see globals."
-                      unavailableMessage={isMainThreadRuntime ? 'Live inspection unavailable in main-thread mode.' : ''} />
-                  </div>
-                  {/* Resize handle: globals ↔ locals */}
-                  <div className="resize-handle-row flex-shrink-0"
-                    onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'row-inspector', startX: e.clientX, startY: e.clientY, startVal: inspectorSplit }; document.body.style.cursor = 'row-resize'; document.body.style.userSelect = 'none' }}>
-                    <div className="resize-bar" style={{ height: '3px', width: '48px' }} />
-                  </div>
-                  {/* Locals */}
-                  <div className="flex-1 overflow-hidden min-h-0">
-                    <InspectorPane title="Local Variables" root={localsInspectorRoot}
-                      path={localsInspectorPath} setPath={setLocalsInspectorPath}
-                      emptyMessage="Waiting for code to enter a function..."
-                      unavailableMessage={isMainThreadRuntime ? 'Live inspection unavailable in main-thread mode.' : ''} />
+                  <div className="flex-1 flex flex-col overflow-hidden min-h-0">
+                    {/* Globals */}
+                    <div className="overflow-hidden min-h-0 flex flex-col"
+                      style={{ flex: inspectorCollapsed.globals ? '0 0 auto' : (!currentFunc || inspectorCollapsed.locals) ? '1 1 0' : `0 0 ${inspectorSplit}%` }}>
+                      <InspectorPane title="Global Variables" root={globalsInspectorRoot}
+                        path={globalsInspectorPath} setPath={setGlobalsInspectorPath}
+                        emptyMessage="Run code to see globals."
+                        unavailableMessage={isMainThreadRuntime ? 'Live inspection unavailable in main-thread mode.' : ''}
+                        isCollapsed={inspectorCollapsed.globals}
+                        onToggleCollapsed={() => setInspectorCollapsed(c => ({ ...c, globals: !c.globals }))} />
+                    </div>
+                    {/* Locals */}
+                    {currentFunc && (
+                      <>
+                        {!inspectorCollapsed.globals && !inspectorCollapsed.locals && (
+                          <div className="resize-handle-row flex-shrink-0"
+                            onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'row-inspector', startX: e.clientX, startY: e.clientY, startVal: inspectorSplit }; document.body.style.cursor = 'row-resize'; document.body.style.userSelect = 'none' }}>
+                            <div className="resize-bar" style={{ height: '3px', width: '48px' }} />
+                          </div>
+                        )}
+                        <div className="overflow-hidden min-h-0 flex flex-col"
+                          style={{ flex: inspectorCollapsed.locals ? '0 0 auto' : '1 1 0' }}>
+                          <InspectorPane title="Local Variables" root={localsInspectorRoot}
+                            path={localsInspectorPath} setPath={setLocalsInspectorPath}
+                            emptyMessage="Waiting for code to enter a function..."
+                            unavailableMessage={isMainThreadRuntime ? 'Live inspection unavailable in main-thread mode.' : ''}
+                            isCollapsed={inspectorCollapsed.locals}
+                            onToggleCollapsed={() => setInspectorCollapsed(c => ({ ...c, locals: !c.locals }))} />
+                        </div>
+                      </>
+                    )}
+                    {/* Watches */}
+                    <div className="border-t border-slate-700 overflow-hidden flex flex-col"
+                      style={{ flex: inspectorCollapsed.watches ? '0 0 auto' : '0 0 140px', minHeight: 0 }}>
+                      <div className="flex-shrink-0 px-3 py-2 flex items-center justify-between">
+                        <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Watches</div>
+                        <div className="flex items-center gap-1">
+                          <button type="button"
+                            onClick={() => { const expr = window.prompt('Watch expression:'); if (expr?.trim()) setWatches(w => [...w, expr.trim()]) }}
+                            title="Add watch" className="text-[11px] text-slate-500 hover:text-emerald-300 transition-colors px-1 rounded">[+]</button>
+                          {watches.length > 0 && (
+                            <button type="button" onClick={() => setWatches([])} title="Clear all watches"
+                              className="text-[10px] text-slate-500 hover:text-red-400 transition-colors px-1 rounded">clear</button>
+                          )}
+                          <button type="button"
+                            onClick={() => setInspectorCollapsed(c => ({ ...c, watches: !c.watches }))}
+                            title={inspectorCollapsed.watches ? 'Expand' : 'Collapse'}
+                            className="text-slate-500 hover:text-slate-300 transition-colors">
+                            <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              {inspectorCollapsed.watches
+                                ? <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M19 9l-7 7-7-7" />
+                                : <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5 15l7-7 7 7" />}
+                            </svg>
+                          </button>
+                        </div>
+                      </div>
+                      {!inspectorCollapsed.watches && (
+                        <div className="flex-1 overflow-y-auto">
+                          {watches.length === 0
+                            ? <div className="px-3 py-2 text-xs text-slate-500 italic">No watches. Click [+] to add.</div>
+                            : <div className="p-2 flex flex-col gap-1">
+                                {watches.map((expr, idx) => (
+                                  <div key={idx} className="flex items-center gap-2 rounded border border-slate-700 bg-slate-900/40 px-2 py-1.5">
+                                    <span className="flex-1 font-mono text-xs text-slate-200 truncate">{expr}</span>
+                                    <span className="text-xs text-emerald-300 truncate max-w-[60px]" title={getWatchValue(expr)}>{getWatchValue(expr)}</span>
+                                    <button type="button" onClick={() => setWatches(w => w.filter((_, j) => j !== idx))}
+                                      className="text-slate-500 hover:text-red-400 transition-colors flex-shrink-0" title="Remove watch">
+                                      <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                                      </svg>
+                                    </button>
+                                  </div>
+                                ))}
+                              </div>
+                          }
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
               )}
@@ -1728,7 +2141,7 @@ exec(code_obj, globals())
             style={{ width: hasRightCol ? `calc(${leftWidth}% - 6px)` : '100%' }}>
             {/* Code editor area */}
             <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
-              <input ref={fileInputRef} type="file" className="hidden" onChange={handleCodeFileChange} />
+              <input ref={fileInputRef} type="file" className="hidden" aria-hidden="true" onChange={handleCodeFileChange} />
               <div className="bg-slate-900 py-2 px-4 border-b border-slate-700 text-slate-400 text-xs flex-shrink-0">
                 <div className="flex justify-between items-start gap-3">
                   <div className="min-w-0">
@@ -1739,6 +2152,21 @@ exec(code_obj, globals())
                     <div className="mt-1 normal-case tracking-normal text-[11px] text-slate-500">{codeStatus}</div>
                   </div>
                   <div className="flex items-center gap-2 flex-shrink-0">
+                    {/* Editor font size dropdown */}
+                    <select
+                      value={editorFontSize}
+                      onChange={e => {
+                        const sz = parseInt(e.target.value, 10)
+                        setEditorFontSize(sz)
+                        editorRef.current?.updateOptions({ fontSize: sz })
+                      }}
+                      title="Editor font size"
+                      className="bg-slate-800 border border-slate-600 rounded text-[11px] text-slate-300 px-1.5 py-0.5 focus:outline-none hover:border-slate-400 cursor-pointer"
+                    >
+                      {[8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,28,32,36,40].map(sz => (
+                        <option key={sz} value={sz}>{sz}px</option>
+                      ))}
+                    </select>
                     <IconButton title="New file in virtual filesystem" onClick={handleNewFileButton} disabled={isRunning}>
                       <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 13h6m-3-3v6m-9 1V7a2 2 0 012-2h6l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
@@ -1796,7 +2224,7 @@ exec(code_obj, globals())
                         smoothScrolling: true,
                         tabSize: 4,
                         insertSpaces: true,
-                        fontSize: 14,
+                        fontSize: editorFontSize,
                         padding: { top: 14, bottom: 18 },
                         renderLineHighlight: 'none',
                         wordWrap: 'off',
@@ -1826,36 +2254,62 @@ exec(code_obj, globals())
             {visiblePanels.output && (
               <div className="flex flex-col overflow-hidden min-h-0 flex-shrink-0"
                 style={{ height: hasConsoleAndStructure ? `${rightColSplit}%` : '100%' }}>
-                <div className="bg-slate-900 py-2 px-4 border-b border-slate-700 flex-shrink-0">
+                <div className="bg-slate-900 py-2 px-3 border-b border-slate-700 flex-shrink-0 flex items-center justify-between gap-2">
                   <div className="font-bold uppercase tracking-wider text-xs text-teal-400">Console Output</div>
-                </div>
-                <div className="flex flex-col flex-1 overflow-hidden bg-slate-900/40 min-h-0">
-                  <div ref={outputRef} className="flex-1 overflow-y-auto font-mono text-xs leading-relaxed text-slate-300 whitespace-pre-wrap break-words p-3">
-                    {outputLog || <span className="text-slate-500 italic">Console output will appear here.</span>}
+                  <div className="flex items-center gap-1.5">
+                    <label className="text-[10px] text-slate-500 uppercase tracking-wider">Size</label>
+                    <select
+                      value={consoleFontSize}
+                      onChange={e => setConsoleFontSize(Number(e.target.value))}
+                      title="Console font size"
+                      className="bg-slate-800 border border-slate-600 rounded text-[11px] text-slate-300 px-1 py-0.5 cursor-pointer focus:outline-none focus:ring-1 focus:ring-teal-500"
+                    >
+                      {[9, 10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24].map(s => (
+                        <option key={s} value={s}>{s}px</option>
+                      ))}
+                    </select>
                   </div>
-                  {/* Inline console input */}
-                  {inputRequest !== null && appSettings.inputMode === 'inline-console' && !(appSettings.useFixedInputs && fixedInputsQueueRef.current.length > 0) && (
-                    <div className="flex-shrink-0 border-t border-amber-500/40 bg-slate-900/60 px-3 py-2 flex items-center gap-2">
-                      <span className="flex-shrink-0 font-mono text-xs text-amber-300 truncate max-w-[200px]">
-                        {inputRequest.prompt || '>>>'}
-                      </span>
-                      <input
-                        key={inputRequest.id}
-                        ref={inlineInputRef}
-                        type="text"
-                        value={inputValue}
-                        className="flex-1 min-w-0 bg-transparent border-none outline-none font-mono text-xs text-white caret-amber-400"
-                        placeholder="type here and press Enter…"
-                        onChange={e => setInputValue(e.target.value)}
-                        onKeyDown={e => { if (e.key === 'Enter') handleInputSubmit() }}
-                      />
-                      <button type="button" onClick={forceStop}
-                        className="flex-shrink-0 text-[10px] font-semibold text-red-400 hover:text-red-300 border border-slate-600 rounded px-1.5 py-0.5 transition-colors">
-                        Stop
-                      </button>
-                    </div>
-                  )}
                 </div>
+                {appSettings.inputMode === 'inline-console' ? (
+                  <div className="flex-1 min-h-0 overflow-hidden">
+                    <ConsoleTerminal
+                      ref={consoleTermRef}
+                      inputRequest={inputRequest}
+                      onInput={handleInputSubmit}
+                      onStop={forceStop}
+                      fontSize={consoleFontSize}
+                      theme={theme}
+                    />
+                  </div>
+                ) : (
+                  <div className="flex flex-col flex-1 overflow-hidden bg-slate-900/40 min-h-0">
+                    <div ref={outputRef} className="flex-1 overflow-y-auto font-mono text-xs leading-relaxed text-slate-300 whitespace-pre-wrap break-words p-3">
+                      {outputLog || <span className="text-slate-500 italic">Console output will appear here.</span>}
+                    </div>
+                    {/* Inline input for input-bar mode */}
+                    {inputRequest !== null && appSettings.inputMode === 'input-bar' && !(appSettings.useFixedInputs && fixedInputsQueueRef.current.length > 0) && (
+                      <div className="flex-shrink-0 border-t border-amber-500/40 bg-slate-900/60 px-3 py-2 flex items-center gap-2">
+                        <span className="flex-shrink-0 font-mono text-xs text-amber-300 truncate max-w-[200px]">
+                          {inputRequest.prompt || '>>>'}
+                        </span>
+                        <input
+                          key={inputRequest.id}
+                          ref={inlineInputRef}
+                          type="text"
+                          value={inputValue}
+                          className="flex-1 min-w-0 bg-transparent border-none outline-none font-mono text-xs text-white caret-amber-400"
+                          placeholder="type here and press Enter…"
+                          onChange={e => setInputValue(e.target.value)}
+                          onKeyDown={e => { if (e.key === 'Enter') handleInputSubmit() }}
+                        />
+                        <button type="button" onClick={forceStop}
+                          className="flex-shrink-0 text-[10px] font-semibold text-red-400 hover:text-red-300 border border-slate-600 rounded px-1.5 py-0.5 transition-colors">
+                          Stop
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 
@@ -1926,24 +2380,31 @@ exec(code_obj, globals())
                           <div>
                             <h3 className="text-sm font-bold text-white mb-0.5">{activeInsightHeading}</h3>
                             <div className="text-[11px] uppercase tracking-wider text-slate-500">
-                              {activeInsightKey ? (hasCustomInsightNote ? 'Custom Note' : 'Default Note') : 'Documentation Notes'}
+                              {hasCustomInsightNote ? 'Custom Note' : effectiveNoteKey === GLOBAL_NOTE_KEY ? 'Module Notes' : 'Default Note'}
                             </div>
                           </div>
                           <div className="flex items-center gap-1.5 flex-shrink-0">
                             {!isInsightEditing ? (
-                              <IconButton title="Edit note" onClick={beginEditingInsightNote} disabled={!activeInsightKey}>
+                              <IconButton title="Edit note" onClick={beginEditingInsightNote}>
                                 <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.232 5.232l3.536 3.536M9 13l6.232-6.232a2.5 2.5 0 113.536 3.536L12.536 16.536A4 4 0 019.707 17.707L7 18l.293-2.707A4 4 0 018.464 12.536L14.696 6.304" />
                                 </svg>
                               </IconButton>
                             ) : (
-                              <IconButton title="Save note" onClick={() => saveInsightNote(activeInsightKey, noteDraft, true)} disabled={!activeInsightKey}>
+                              <IconButton title="Save note" onClick={() => saveInsightNote(effectiveNoteKey, noteDraft, true)}>
                                 <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
                                 </svg>
                               </IconButton>
                             )}
-                            <IconButton title="Reset note to original" onClick={resetInsightNote} disabled={!activeInsightKey}>
+                            {!isRunning && (
+                              <IconButton title="Insert/update docstring in code" onClick={handleInsertDocstring} disabled={!activeInsightText && !noteDraft}>
+                                <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
+                                </svg>
+                              </IconButton>
+                            )}
+                            <IconButton title="Reset note to original" onClick={resetInsightNote}>
                               <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h5M20 20v-5h-5M5.64 18.36A9 9 0 1020 12" />
                               </svg>
@@ -1959,18 +2420,18 @@ exec(code_obj, globals())
                           {isInsightEditing ? (
                             <textarea value={noteDraft} onChange={e => setNoteDraft(e.target.value)}
                               className="insight-note-editor min-h-0 flex-1"
-                              placeholder="Write your revision note for this definition..." />
+                              placeholder="Write your note here..." />
                           ) : (
                             <p className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap text-slate-300 leading-relaxed text-sm">
-                              {activeInsightText || 'No note is available for this definition yet.'}
+                              {activeInsightText || <span className="text-slate-500 italic">No note yet. Click the pencil icon to add one.</span>}
                             </p>
                           )}
                           <div className="mt-3 text-[11px] text-slate-500">
                             {isInsightEditing
-                              ? 'Saves automatically if execution moves to another definition or the program stops.'
-                              : activeInsightKey
+                              ? 'Click save or move to another definition to commit.'
+                              : isRunning
                                 ? hasCustomInsightNote ? 'Your saved note is shown here.' : 'The built-in note is shown until you save your own version.'
-                                : 'Start tracing to attach documentation notes to live execution points.'}
+                                : 'Move the cursor inside a function or class to edit its note, or edit the module-level note here.'}
                           </div>
                         </div>
                         {showExportDialog && (
