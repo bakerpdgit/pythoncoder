@@ -49,7 +49,7 @@ import {
 import type {
   Theme, RuntimeKey, PanelVisibility, InputRequest, SabRef, SimState, InspectorPath,
   StructureModel, DiagramModel, HierarchyModel, OutlineModel, DiagramView, VFSEntry,
-  AppSettings, BookNavState, BookChallenge, NamedLayout,
+  AppSettings, BookNavState, BookChallenge, NamedLayout, InspectorNode,
 } from './types'
 
 async function readDirectoryToMap(handle: FileSystemDirectoryHandle, prefix = ''): Promise<Map<string, ArrayBuffer>> {
@@ -189,6 +189,8 @@ export default function App() {
   const [rightColSplit, setRightColSplit] = useState(42)      // % of right col for Console (top)
   const [bookPanelWidth, setBookPanelWidth] = useState(360)   // px width of book panel
   const [watches, setWatches] = useState<string[]>(() => getStoredWatches())
+  const watchesRef = useRef<string[]>(getStoredWatches())
+  const [watchValues, setWatchValues] = useState<Record<string, InspectorNode>>({})
   const [inspectorCollapsed, setInspectorCollapsed] = useState({ globals: false, locals: false, watches: false })
   const [savedLayouts, setSavedLayouts] = useState<NamedLayout[]>(() => getStoredNamedLayouts())
 
@@ -374,7 +376,7 @@ export default function App() {
   useEffect(() => { inputModeRef.current = appSettings.inputMode }, [appSettings.inputMode])
   useEffect(() => { persistEditorFontSize(editorFontSize) }, [editorFontSize])
   useEffect(() => { persistConsoleFontSize(consoleFontSize) }, [consoleFontSize])
-  useEffect(() => { persistWatches(watches) }, [watches])
+  useEffect(() => { persistWatches(watches); watchesRef.current = watches }, [watches])
   useEffect(() => { persistNamedLayouts(savedLayouts) }, [savedLayouts])
 
   useEffect(() => {
@@ -949,18 +951,11 @@ export default function App() {
   }
 
   const getWatchValue = (expr: string): string => {
-    if (!isRunning || !simState) return '—'
-    const localsNode = localsInspectorRoot?.node
-    const globalsNode = globalsInspectorRoot?.node
-    const allEntries = [
-      ...((localsNode?.kind === 'scope' || localsNode?.kind === 'mapping') ? (localsNode.entries ?? []) : []),
-      ...((globalsNode?.kind === 'scope' || globalsNode?.kind === 'mapping') ? (globalsNode.entries ?? []) : []),
-    ]
-    const entry = allEntries.find(e => String(e.label ?? '').replace(/^['"]|['"]$/g, '') === expr)
-    if (!entry) return '—'
-    const node = entry.value
+    if (!isRunning) return '—'
+    const node = watchValues[expr]
     if (!node) return '—'
     if (node.kind === 'primitive') {
+      if (node.type === 'error') return node.summary ?? String(node.value)
       return typeof node.value === 'string' ? `"${node.value}"` : String(node.summary ?? node.value)
     }
     return node.summary ?? node.type ?? '?'
@@ -1213,6 +1208,7 @@ export default function App() {
 
   const resetExecutionState = () => {
     setCurrentLine(-1); setCurrentFunc(''); setCurrentClass(''); setSimState(null)
+    setWatchValues({})
     setInputRequest(null); setInputValue('')
     clearConsole()
   }
@@ -1383,6 +1379,7 @@ export default function App() {
 
     const sab = new SharedArrayBuffer(1024 * 4)
     sabRef.current = { sab, int32: new Int32Array(sab), uint8: new Uint8Array(sab) }
+    sabRef.current.int32[750] = -1  // sentinel: -1 = watches not yet written by main thread
 
     const worker = new TracerWorker()
     workerRef.current = worker
@@ -1401,6 +1398,7 @@ export default function App() {
             if (data.state && data.state !== '{}') {
               try { setSimState(JSON.parse(data.state)) } catch { /* ignore */ }
             }
+            if (data.watchValues) setWatchValues(data.watchValues as Record<string, InspectorNode>)
           } else {
             sendTraceCommand(TRACE_CMD_CONTINUE)
           }
@@ -1409,6 +1407,7 @@ export default function App() {
           if (data.state && data.state !== '{}') {
             try { setSimState(JSON.parse(data.state)) } catch { /* ignore */ }
           }
+          if (data.watchValues) setWatchValues(data.watchValues as Record<string, InspectorNode>)
         }
       } else if (data.type === 'input') {
         setInputValue('')
@@ -1463,7 +1462,7 @@ export default function App() {
     }
 
     const svgTurtleBootstrap = hasTurtleForMode && appSettings.turtleMode === 'basthon-svg' ? SVG_TURTLE_WORKER_SETUP : ''
-    worker.postMessage({ type: 'init', sab: sabRef.current.sab, code: codeText, files: vfsFiles, cwd: capturedCwd, svgTurtleBootstrap })
+    worker.postMessage({ type: 'init', sab: sabRef.current.sab, code: codeText, files: vfsFiles, cwd: capturedCwd, svgTurtleBootstrap, watches: watchesRef.current })
   }
 
   const startMainThreadRun = async () => {
@@ -1642,7 +1641,7 @@ exec(code_obj, globals())
 
   const sendTraceCommand = (cmd: number) => {
     if (!sabRef.current) return
-    const { int32 } = sabRef.current
+    const { int32, uint8 } = sabRef.current
     if (Atomics.load(int32, 0) === 1) {
       if (turtleScrubLockedRef.current) {
         turtleScrubLockedRef.current = false
@@ -1652,6 +1651,12 @@ exec(code_obj, globals())
       const bpArr = [...breakpointsRef.current]
       int32[500] = bpArr.length
       bpArr.forEach((ln, i) => { if (i < 99) int32[501 + i] = ln })
+      // Write current watch expressions to SAB (int32[750]=length, uint8[3004..]=JSON)
+      const watchJson = JSON.stringify(watchesRef.current)
+      const watchBytes = new TextEncoder().encode(watchJson)
+      const safeLen = Math.min(watchBytes.length, 1092)
+      uint8.set(watchBytes.subarray(0, safeLen), 3004)
+      Atomics.store(int32, 750, safeLen)
       Atomics.store(int32, 1, cmd); Atomics.store(int32, 0, 0); Atomics.notify(int32, 0, 1)
     }
   }

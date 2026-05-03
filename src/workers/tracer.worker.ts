@@ -10,11 +10,39 @@ import json
 import builtins
 _builtin_names = frozenset(dir(builtins))
 
+watch_expressions = []
+
+def evaluate_watches(frame):
+    if not watch_expressions:
+        return "{}"
+    old_trace = sys.gettrace()
+    sys.settrace(None)
+    try:
+        frame.f_trace = None
+    except Exception:
+        pass
+    results = {}
+    try:
+        for expr in watch_expressions:
+            try:
+                val = eval(expr, frame.f_globals, frame.f_locals)
+                results[expr] = serialize_value(val)
+            except Exception as e:
+                results[expr] = {"kind": "primitive", "type": "error", "value": repr(e), "summary": f"<{type(e).__name__}>"}
+    finally:
+        sys.settrace(old_trace)
+        try:
+            frame.f_trace = old_trace
+        except Exception:
+            pass
+    return json.dumps(results)
+
 def my_input(prompt=""):
     try:
         caller = sys._getframe(1)
         fn, cls, st = snapshot_state(caller)
-        js_send_state(caller.f_lineno, fn, cls, st)
+        wv = evaluate_watches(caller)
+        js_send_state(caller.f_lineno, fn, cls, st, wv)
     except Exception:
         pass
     return js_input_callback(prompt)
@@ -298,9 +326,10 @@ def trace_calls(frame, event, arg):
         return trace_calls
 
     func_name, class_name, sim_state = snapshot_state(frame)
+    watch_vals = evaluate_watches(frame)
     current_depth = get_depth(frame)
 
-    cmd = js_trace_callback(line_no, func_name, class_name, sim_state)
+    cmd = js_trace_callback(line_no, func_name, class_name, sim_state, watch_vals)
     if cmd == 2:
         pending_action = {"type": "step_over", "depth": current_depth, "frame_id": id(frame), "line": line_no}
     elif cmd == 3:
@@ -358,12 +387,14 @@ self.onmessage = async function (e: MessageEvent) {
 
   const useSvgTurtle = Boolean(e.data.svgTurtleBootstrap)
 
-  pyodide.globals.set('js_trace_callback', (line: number, func: string, cls: string, stateStr: string) => {
+  pyodide.globals.set('js_trace_callback', (line: number, func: string, cls: string, stateStr: string, watchValsStr: string) => {
     let turtleSvg = ''
     if (useSvgTurtle) {
       try { turtleSvg = String(pyodide.globals.get('__turtle_svg__') ?? '') } catch { /* ignore */ }
     }
-    self.postMessage({ type: 'trace', line, func, cls, state: stateStr, turtleSvg })
+    let watchValues: Record<string, unknown> = {}
+    try { if (watchValsStr && watchValsStr !== '{}') watchValues = JSON.parse(watchValsStr) } catch { /* ignore */ }
+    self.postMessage({ type: 'trace', line, func, cls, state: stateStr, turtleSvg, watchValues })
     Atomics.store(int32View, 0, 1)
     Atomics.wait(int32View, 0, 1)
     const cmd = Atomics.load(int32View, 1)
@@ -371,6 +402,16 @@ self.onmessage = async function (e: MessageEvent) {
     const bps: number[] = []
     for (let i = 0; i < bpCount && i < 99; i++) bps.push(Atomics.load(int32View, 501 + i))
     pyodide.globals.set('current_breakpoints', pyodide.toPy(bps))
+    // Read updated watch expressions from SAB (int32[750]=length at bytes 3000-3003, json at bytes 3004+)
+    try {
+      const watchLen = Atomics.load(int32View, 750)
+      if (watchLen >= 0) {
+        const watchBytes = uint8View.subarray(3004, 3004 + Math.min(watchLen, 1092))
+        const exprs: string[] = watchLen === 0 ? [] : JSON.parse(new TextDecoder().decode(watchBytes))
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        pyodide.globals.set('watch_expressions', (pyodide as any).toPy(exprs))
+      }
+    } catch { /* ignore */ }
     return cmd
   })
 
@@ -385,8 +426,10 @@ self.onmessage = async function (e: MessageEvent) {
     return decoder.decode(copiedBytes)
   })
 
-  pyodide.globals.set('js_send_state', (line: number, func: string, cls: string, stateStr: string) => {
-    self.postMessage({ type: 'trace', line, func, cls, state: stateStr })
+  pyodide.globals.set('js_send_state', (line: number, func: string, cls: string, stateStr: string, watchValsStr: string) => {
+    let watchValues: Record<string, unknown> = {}
+    try { if (watchValsStr && watchValsStr !== '{}') watchValues = JSON.parse(watchValsStr) } catch { /* ignore */ }
+    self.postMessage({ type: 'trace', line, func, cls, state: stateStr, watchValues })
   })
 
   // Mount virtual filesystem files
@@ -440,6 +483,8 @@ self.onmessage = async function (e: MessageEvent) {
     }
     pyodide.globals.set('user_code_str', userCode)
     await pyodide.runPythonAsync(SETUP_CODE)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    pyodide.globals.set('watch_expressions', (pyodide as any).toPy((e.data.watches ?? []) as string[]))
     await pyodide.runPythonAsync(`
 code_obj = compile(user_code_str, "simulation.py", "exec")
 exec(code_obj, globals())

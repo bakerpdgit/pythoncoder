@@ -194,7 +194,7 @@ export interface OutlineModel {
 // ── Worker message types ───────────────────────────────────────────────────
 
 export type WorkerMessage =
-  | { type: 'trace'; line: number; func: string; cls: string; state: string; turtleSvg?: string }
+  | { type: 'trace'; line: number; func: string; cls: string; state: string; turtleSvg?: string; watchValues?: Record<string, InspectorNode> }
   | { type: 'print'; text: string }
   | { type: 'error'; error: string; files?: Array<{ path: string; content: ArrayBuffer; mimeType: string }> }
   | { type: 'done'; files?: Array<{ path: string; content: ArrayBuffer; mimeType: string }> }
