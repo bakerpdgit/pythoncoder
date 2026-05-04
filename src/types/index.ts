@@ -214,14 +214,64 @@ export interface BookAdditionalFile {
   visible: boolean
 }
 
+export interface BookTestOutputReq {
+  pattern?: string
+  typ?: string        // '+' | '-' | 'c+' | 'c-' | 'f+' | 'f-' | 's+' | 's-' | 't'
+  ignore?: string     // flags: 'w'=whitespace 'c'=case 'p'=punctuation
+  count?: number | string
+  statement?: string
+  filename?: string
+}
+
+export interface BookTestCase {
+  in?: string | Array<string | number>
+  out?: string | BookTestOutputReq[]
+  reveal?: boolean
+}
+
 export interface BookChallenge {
   id: string
   name: string
   guide?: string
   py?: string
   isExample?: string | boolean
-  tests?: Array<{ in: string; out: string }>
+  tests?: BookTestCase[]
   additionalFiles?: BookAdditionalFile[]
+}
+
+// ── Test runner result types ───────────────────────────────────────────────
+
+export interface TesterRunOutput {
+  output: string
+  error: string | null
+  statementResults: Record<string, string>
+  fileContents: Record<string, string | null>
+}
+
+export interface TestReqResult {
+  passed: boolean
+  typ: string
+  pattern: string
+  ignore: string
+  count: number
+  statement?: string
+  filename?: string
+}
+
+export interface TestCaseResult {
+  caseIndex: number
+  passed: boolean
+  reveal: boolean
+  inputs: Array<string | number>
+  out: string | BookTestOutputReq[]
+  output?: string
+  error?: string
+  reqResults: TestReqResult[]
+}
+
+export interface OverallTestResult {
+  allPassed: boolean
+  results: TestCaseResult[]
 }
 
 export type BookChild = BookRef | BookChallenge

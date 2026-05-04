@@ -133,6 +133,24 @@ export const persistNamedLayouts = (layouts: NamedLayout[]): void => {
   try { localStorage.setItem(NAMED_LAYOUTS_KEY, JSON.stringify(layouts)) } catch { /* ignore */ }
 }
 
+const BOOK_COMPLETIONS_KEY = 'pythoncoder-book-completions'
+
+export const getStoredCompletions = (): Record<string, boolean> => {
+  try {
+    const raw = localStorage.getItem(BOOK_COMPLETIONS_KEY)
+    const parsed = raw ? JSON.parse(raw) : {}
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch { return {} }
+}
+
+export const persistCompletion = (bookRootUrl: string, challengeId: string): void => {
+  try {
+    const completions = getStoredCompletions()
+    completions[`${bookRootUrl}::${challengeId}`] = true
+    localStorage.setItem(BOOK_COMPLETIONS_KEY, JSON.stringify(completions))
+  } catch { /* ignore */ }
+}
+
 export const persistSettings = (settings: AppSettings): void => {
   try {
     localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings))

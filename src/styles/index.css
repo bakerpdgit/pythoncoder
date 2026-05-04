@@ -223,3 +223,29 @@ input[type="radio"].accent-emerald {
   letter-spacing: 0.01em;
 }
 html[data-theme="light"] .monaco-trace-inline-value { color: #94a3b8; }
+
+/* Book panel inline code — theme-aware */
+.book-inline-code { background: #0f172a; color: #fbbf24; }
+html[data-theme="light"] .book-inline-code { background: #e0e7ef; color: #9a3412; }
+
+/* Test results table scroll container */
+.test-results-scroll { max-height: 220px; overflow-y: auto; }
+
+/* Test error row — theme-aware */
+.test-error-row { border-top: 1px solid rgba(127, 29, 29, 0.3); background: rgba(69, 10, 10, 0.3); }
+.test-error-text { color: #f87171; }
+html[data-theme="light"] .test-error-row { background: rgba(254, 202, 202, 0.6) !important; border-top-color: rgba(252, 165, 165, 0.5) !important; }
+html[data-theme="light"] .test-error-text { color: #b91c1c !important; }
+
+/* Light mode: failed test row and challenge list hover */
+html[data-theme="light"] .bg-red-950\/20 { background-color: rgba(254, 226, 226, 0.5) !important; }
+html[data-theme="light"] .hover\:bg-slate-700:hover { background-color: #dde4ed !important; }
+html[data-theme="light"] .hover\:text-slate-100:hover { color: #0f172a !important; }
+
+/* Book panel font sizes */
+.book-font-11 { font-size: 11px; }
+.book-font-12 { font-size: 12px; }
+.book-font-13 { font-size: 13px; }
+.book-font-14 { font-size: 14px; }
+.book-font-16 { font-size: 16px; }
+.book-font-18 { font-size: 18px; }

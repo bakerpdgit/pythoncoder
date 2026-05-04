@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useMemo, useDeferredValue, startTransition } from 'react'
 import TracerWorker from './workers/tracer.worker.ts?worker'
+import TesterWorker from './workers/tester.worker.ts?worker'
 import Editor, { type Monaco, loader } from '@monaco-editor/react'
 
 // In dev, use the locally-installed monaco-editor instead of CDN to avoid the
@@ -13,7 +14,7 @@ import {
   buildPythonStructureModel, analyzePythonClasses, analyzePythonFunctions,
   analyzePythonOutline, cleanCodeText, codeUsesPygame, codeUsesTurtle, getExpandableOutlineIds,
 } from './utils/codeAnalysis'
-import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides, getStoredSettings, persistSettings, getStoredBookNavState, persistBookNavState, getStoredFixedInputs, persistFixedInputs, getStoredEditorFontSize, persistEditorFontSize, getStoredConsoleFontSize, persistConsoleFontSize, getStoredWatches, persistWatches, getStoredNamedLayouts, persistNamedLayouts } from './utils/storage'
+import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides, getStoredSettings, persistSettings, getStoredBookNavState, persistBookNavState, getStoredFixedInputs, persistFixedInputs, getStoredEditorFontSize, persistEditorFontSize, getStoredConsoleFontSize, persistConsoleFontSize, getStoredWatches, persistWatches, getStoredNamedLayouts, persistNamedLayouts, getStoredCompletions, persistCompletion } from './utils/storage'
 import { triggerDownload, getBaseFileStem } from './utils/download'
 import { buildCommentExport, buildDocstringExport, replaceExistingDocstring, getDefinitionNote, getDefaultDefinitionNote, sanitizeNoteText } from './utils/export'
 import { loadMainThreadPyodide, resetMainThreadPyodide, PYGAME_MAIN_THREAD_BOOTSTRAP, TURTLE_CANVAS_BOOTSTRAP, TURTLE_SVG_BOOTSTRAP, SVG_TURTLE_WORKER_SETUP } from './utils/mainThread'
@@ -50,7 +51,9 @@ import type {
   Theme, RuntimeKey, PanelVisibility, InputRequest, SabRef, SimState, InspectorPath,
   StructureModel, DiagramModel, HierarchyModel, OutlineModel, DiagramView, VFSEntry,
   AppSettings, BookNavState, BookChallenge, NamedLayout, InspectorNode,
+  OverallTestResult, TesterRunOutput,
 } from './types'
+import { evaluateAll } from './utils/testMatcher'
 
 async function readDirectoryToMap(handle: FileSystemDirectoryHandle, prefix = ''): Promise<Map<string, ArrayBuffer>> {
   const map = new Map<string, ArrayBuffer>()
@@ -159,6 +162,11 @@ export default function App() {
   const [currentWorkingDir, setCurrentWorkingDir] = useState<string>('/')
   const [openFilePath, setOpenFilePath] = useState<string | null>(null)
   const [bookNavState, setBookNavState] = useState<BookNavState | null>(null)
+  const [activeBookChallenge, setActiveBookChallenge] = useState<BookChallenge | null>(null)
+  const [completedChallenges, setCompletedChallenges] = useState<Record<string, boolean>>(() => getStoredCompletions())
+  const [testResult, setTestResult] = useState<OverallTestResult | null>(null)
+  const [isTestRunning, setIsTestRunning] = useState(false)
+  const [testRunnerStatus, setTestRunnerStatus] = useState('')
   const [challengeHiddenPaths, setChallengeHiddenPaths] = useState<string[]>([])
   const [vfsReloadTrigger, setVfsReloadTrigger] = useState(0)
   const [isUnsaved, setIsUnsaved] = useState(false)
@@ -196,6 +204,8 @@ export default function App() {
   const [savedLayouts, setSavedLayouts] = useState<NamedLayout[]>(() => getStoredNamedLayouts())
 
   const workerRef = useRef<Worker | null>(null)
+  const testerWorkerRef = useRef<Worker | null>(null)
+  const activeBookChallengeRef = useRef<BookChallenge | null>(null)
   const sabRef = useRef<SabRef | null>(null)
   const consoleTermRef = useRef<ConsoleTerminalHandle | null>(null)
   const inputModeRef = useRef(appSettings.inputMode)
@@ -300,9 +310,34 @@ export default function App() {
   const hasConsoleAndStructure = visiblePanels.output && visiblePanels.diagram
   const hasBookPanel = !!bookNavState
 
+  // ── Derived: is the active challenge a testable task? ─────────────────────
+
+  const isTaskChallenge = !!activeBookChallenge &&
+    !(activeBookChallenge.isExample === 'True' || activeBookChallenge.isExample === true) &&
+    (activeBookChallenge.tests?.length ?? 0) > 0
+
   // ── Effects ──────────────────────────────────────────────────────────────
 
+  // Clear test results whenever the user navigates to a different challenge
   useEffect(() => {
+    setTestResult(null)
+    setIsTestRunning(false)
+    if (testerWorkerRef.current) {
+      testerWorkerRef.current.terminate()
+      testerWorkerRef.current = null
+    }
+  }, [bookNavState?.activeChallengeId, bookNavState?.currentBookUrl])
+
+  useEffect(() => {
+    const suppressMonacoCancel = (e: PromiseRejectionEvent) => {
+      const r = e.reason
+      if (r === 'Canceled' ||
+          (r != null && (r.name === 'Canceled' || r.message === 'Canceled' || String(r) === 'Canceled'))) {
+        e.preventDefault()
+      }
+    }
+    window.addEventListener('unhandledrejection', suppressMonacoCancel)
+
     setIsCrossOriginIsolated(window.crossOriginIsolated === true)
     setHasSab(typeof SharedArrayBuffer !== 'undefined' && window.crossOriginIsolated === true)
     void (async () => {
@@ -321,29 +356,7 @@ export default function App() {
         } catch { /* fall through to default */ }
       }
 
-      // Restore book challenge filesystem if one was active
-      const savedNav = getStoredBookNavState()
-      if (savedNav?.activeChallengeId) {
-        const { listFilesystems: lfs, listChildren: lc } = await import('./utils/virtualFS')
-        const fsList = await lfs()
-        const idPrefix = BOOK_FS_PREFIX + savedNav.activeChallengeId
-        const challengeFs = fsList.find(f => f.name === idPrefix || f.name.startsWith(idPrefix + ':'))
-        if (challengeFs) {
-          setActiveFilesystemId(challengeFs.id)
-          setChallengeHiddenPaths(getHiddenPathsForFs(challengeFs.id))
-          setBookNavState(savedNav)
-          const children = await lc(challengeFs.id, '/')
-          const pyFile = children.find(e => e.type === 'file' && e.name.endsWith('.py'))
-          if (pyFile?.content) {
-            const text = new TextDecoder().decode(pyFile.content)
-            loadCodeText(text, pyFile.name, pyFile.path)
-          }
-          setVfsReloadTrigger(t => t + 1)
-          return
-        }
-      }
-
-      // No challenge FS found — clear any stale book nav state and load default
+      // Clear any stale book nav state and load default
       persistBookNavState(null)
 
       const entry = await getEntryByPath('default', '/main.py')
@@ -352,6 +365,7 @@ export default function App() {
         loadCodeText(text, 'main.py', '/main.py')
       }
     })()
+    return () => window.removeEventListener('unhandledrejection', suppressMonacoCancel)
   }, [])
 
   useEffect(() => {
@@ -1248,6 +1262,9 @@ export default function App() {
     try {
       await saveCurrentToVFS()
       clearEditorForSwitch()
+      setActiveBookChallenge(challenge)
+      activeBookChallengeRef.current = challenge
+      setTestResult(null)
       const { fsId, pyFilename, hiddenPaths } = await getOrCreateChallengeFs(bookUrl, challenge, forceReset)
       setActiveFilesystemId(fsId)
       setChallengeHiddenPaths(hiddenPaths)
@@ -1270,9 +1287,74 @@ export default function App() {
     setBookNavState(null)
     persistBookNavState(null)
     setChallengeHiddenPaths([])
+    setActiveBookChallenge(null)
+    activeBookChallengeRef.current = null
+    setTestResult(null)
     clearEditorForSwitch()
     setActiveFilesystemId('default')
     setCurrentWorkingDir('/')
+  }
+
+  const handleSubmit = async () => {
+    if (!activeBookChallenge?.tests?.length || isRunning || isTestRunning) return
+    await saveCurrentToVFS()
+    const vfsFiles = await getAllFiles(activeFilesystemId)
+    const capturedCode = codeText
+    const capturedTests = activeBookChallenge.tests
+
+    if (testerWorkerRef.current) {
+      testerWorkerRef.current.terminate()
+      testerWorkerRef.current = null
+    }
+
+    setTestResult(null)
+    setIsTestRunning(true)
+    setTestRunnerStatus('Loading Python runtime…')
+
+    const runOutputs: TesterRunOutput[] = []
+    const worker = new TesterWorker()
+    testerWorkerRef.current = worker
+
+    worker.onmessage = (e: MessageEvent) => {
+      const data = e.data
+      if (data.type === 'status') {
+        setTestRunnerStatus(data.message as string)
+      } else if (data.type === 'done') {
+        const rawResults = data.results as TesterRunOutput[]
+        for (let i = 0; i < capturedTests.length; i++) {
+          runOutputs[i] = rawResults[i] ?? { output: '', error: 'No result', statementResults: {}, fileContents: {} }
+        }
+        const result = evaluateAll(capturedTests, runOutputs, capturedCode)
+        setTestResult(result)
+        if (result.allPassed && bookNavState && activeBookChallengeRef.current) {
+          persistCompletion(bookNavState.rootUrl, activeBookChallengeRef.current.id)
+          setCompletedChallenges(getStoredCompletions())
+        }
+        setIsTestRunning(false)
+        testerWorkerRef.current = null
+        worker.terminate()
+      } else if (data.type === 'error') {
+        const errorMsg = `Test runner error: ${data.error as string}`
+        setTestResult({
+          allPassed: false,
+          results: capturedTests.map((tc, i) => ({
+            caseIndex: i,
+            passed: false,
+            reveal: tc.reveal !== false,
+            inputs: Array.isArray(tc.in) ? tc.in : tc.in !== undefined && tc.in !== '' ? [String(tc.in)] : [],
+            out: tc.out ?? '',
+            output: undefined,
+            error: errorMsg,
+            reqResults: [],
+          })),
+        })
+        setIsTestRunning(false)
+        testerWorkerRef.current = null
+        worker.terminate()
+      }
+    }
+
+    worker.postMessage({ type: 'run_tests', code: capturedCode, files: vfsFiles, tests: capturedTests })
   }
 
   const importLocalFiles = async (fileMap: Map<string, ArrayBuffer>, sourceName: string) => {
@@ -1448,6 +1530,14 @@ export default function App() {
         const label = wasRunMode ? '[RUN FINISHED]' : '[TRACE RUN FINISHED]'
         appendOutput(`\n${label}`)
         setInputRequest(null); setInputValue(''); setIsRunning(false); setActiveRuntime('')
+        if (bookNavState && activeBookChallengeRef.current) {
+          const ch = activeBookChallengeRef.current
+          const isExample = ch.isExample === 'True' || ch.isExample === true
+          if (isExample) {
+            persistCompletion(bookNavState.rootUrl, ch.id)
+            setCompletedChallenges(getStoredCompletions())
+          }
+        }
         setCurrentLine(-1)
         setCodeStatus(wasRunMode ? 'Worker runtime finished.' : 'Trace-worker runtime finished.')
         if (wasRunMode) {
@@ -1616,6 +1706,14 @@ exec(code_obj, globals())
       setCodeStatus(wasStopRequested ? 'Main-thread runtime stopped.' : 'Main-thread runtime finished.')
       setMainThreadStatus(wasStopRequested ? 'Main-thread run stopped.' : 'Main-thread run finished.')
       setIsRunning(false); setActiveRuntime('')
+      if (!wasStopRequested && bookNavState && activeBookChallengeRef.current) {
+        const ch = activeBookChallengeRef.current
+        const isExample = ch.isExample === 'True' || ch.isExample === true
+        if (isExample) {
+          persistCompletion(bookNavState.rootUrl, ch.id)
+          setCompletedChallenges(getStoredCompletions())
+        }
+      }
     } catch (error) {
       if (runId !== mainThreadRunIdRef.current) return
       if (pyodide) {
@@ -1912,6 +2010,29 @@ exec(code_obj, globals())
                 Stop
               </button>
             </div>
+          )}
+
+          {/* Submit button — only for testable task challenges */}
+          {isTaskChallenge && !isRunning && (
+            <button
+              type="button"
+              onClick={() => void handleSubmit()}
+              disabled={isTestRunning || !hasCode}
+              title="Run all test cases"
+              className="bg-amber-600 hover:bg-amber-500 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded font-semibold transition-colors flex items-center gap-1.5 text-sm"
+            >
+              {isTestRunning ? (
+                <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                </svg>
+              ) : (
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              )}
+              {isTestRunning ? 'Testing…' : 'Submit'}
+            </button>
           )}
         </div>
       </div>
@@ -2539,6 +2660,11 @@ exec(code_obj, globals())
               onNavStateChange={handleBookNavStateChange}
               onEnterChallenge={(bookUrl, challenge, forceReset) => void handleEnterChallenge(bookUrl, challenge, forceReset)}
               onClose={handleCloseBook}
+              testResult={testResult}
+              isTestRunning={isTestRunning}
+              testStatus={testRunnerStatus}
+              onClearTestResult={() => setTestResult(null)}
+              completedChallenges={completedChallenges}
             />
           </div>
         )}
