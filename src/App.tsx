@@ -197,6 +197,7 @@ export default function App() {
   const [watchesSplit, setWatchesSplit] = useState(25)        // % of inspector height for watches (bottom)
   const [rightColSplit, setRightColSplit] = useState(42)      // % of right col for Console (top)
   const [bookPanelWidth, setBookPanelWidth] = useState(360)   // px width of book panel
+  const [bookPanelCollapsed, setBookPanelCollapsed] = useState(false)
   const [watches, setWatches] = useState<string[]>(() => getStoredWatches())
   const watchesRef = useRef<string[]>(getStoredWatches())
   const [watchValues, setWatchValues] = useState<Record<string, InspectorNode>>({})
@@ -329,15 +330,6 @@ export default function App() {
   }, [bookNavState?.activeChallengeId, bookNavState?.currentBookUrl])
 
   useEffect(() => {
-    const suppressMonacoCancel = (e: PromiseRejectionEvent) => {
-      const r = e.reason
-      if (r === 'Canceled' ||
-          (r != null && (r.name === 'Canceled' || r.message === 'Canceled' || String(r) === 'Canceled'))) {
-        e.preventDefault()
-      }
-    }
-    window.addEventListener('unhandledrejection', suppressMonacoCancel)
-
     setIsCrossOriginIsolated(window.crossOriginIsolated === true)
     setHasSab(typeof SharedArrayBuffer !== 'undefined' && window.crossOriginIsolated === true)
     void (async () => {
@@ -365,7 +357,6 @@ export default function App() {
         loadCodeText(text, 'main.py', '/main.py')
       }
     })()
-    return () => window.removeEventListener('unhandledrejection', suppressMonacoCancel)
   }, [])
 
   useEffect(() => {
@@ -380,7 +371,7 @@ export default function App() {
     if (!editorRef.current || !visiblePanels.code) return
     const frameId = requestAnimationFrame(() => editorRef.current?.layout())
     return () => cancelAnimationFrame(frameId)
-  }, [leftWidth, fsSidebarWidth, leftSidebarSplit, inspectorSplit, rightColSplit, bookPanelWidth, visiblePanels.code, visiblePanels.visualizer, visiblePanels.diagram, visiblePanels.output, visiblePanels.filesystem])
+  }, [leftWidth, fsSidebarWidth, leftSidebarSplit, inspectorSplit, rightColSplit, bookPanelWidth, bookPanelCollapsed, visiblePanels.code, visiblePanels.visualizer, visiblePanels.diagram, visiblePanels.output, visiblePanels.filesystem])
 
   useEffect(() => {
     if (!visiblePanels.diagram) setShowExportDialog(false)
@@ -2644,7 +2635,7 @@ exec(code_obj, globals())
         {/* end center section */}
 
         {/* Resize handle: center ↔ book panel */}
-        {hasBookPanel && (visiblePanels.code || hasRightCol) && (
+        {hasBookPanel && !bookPanelCollapsed && (visiblePanels.code || hasRightCol) && (
           <div className="resize-handle-col"
             onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'col-bookpanel', startX: e.clientX, startY: e.clientY, startVal: bookPanelWidth }; document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none' }}>
             <div className="resize-bar" style={{ width: '3px', height: '48px' }} />
@@ -2654,7 +2645,7 @@ exec(code_obj, globals())
         {/* BOOK PANEL — full height, right edge */}
         {hasBookPanel && (
           <div className="flex-shrink-0 bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden"
-            style={{ width: bookPanelWidth }}>
+            style={{ width: bookPanelCollapsed ? 32 : bookPanelWidth }}>
             <BookPanel
               navState={bookNavState}
               onNavStateChange={handleBookNavStateChange}
@@ -2665,6 +2656,8 @@ exec(code_obj, globals())
               testStatus={testRunnerStatus}
               onClearTestResult={() => setTestResult(null)}
               completedChallenges={completedChallenges}
+              isCollapsed={bookPanelCollapsed}
+              onToggleCollapse={() => setBookPanelCollapsed(o => !o)}
             />
           </div>
         )}

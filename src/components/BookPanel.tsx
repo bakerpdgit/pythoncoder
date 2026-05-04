@@ -1,11 +1,12 @@
-import { useState, useEffect, useCallback } from 'react'
-import type { BookChallenge, BookManifest, BookNavState, BreadcrumbEntry, OverallTestResult } from '../types'
+import { useState, useEffect, useCallback, useRef } from 'react'
+import type { BookChallenge, BookManifest, BookNavState, BookTestOutputReq, BreadcrumbEntry, OverallTestResult } from '../types'
 import {
   isBookRef, fetchBookManifest, fetchGuideContent, resolveBookUrl,
   findChallenge, getAdjacentChallenge, getChallengeFsName,
 } from '../utils/bookLoader'
-import { listFilesystems } from '../utils/virtualFS'
+import { listFilesystems, getEntryByPath, getAllFiles } from '../utils/virtualFS'
 import { TestResultsBar } from './TestResultsBar'
+import TesterWorker from '../workers/tester.worker.ts?worker'
 
 interface Props {
   navState: BookNavState
@@ -17,6 +18,8 @@ interface Props {
   testStatus: string
   onClearTestResult: () => void
   completedChallenges: Record<string, boolean>
+  isCollapsed: boolean
+  onToggleCollapse: () => void
 }
 
 // ── Markdown renderer ───────────────────────────────────────────────────────
@@ -25,11 +28,16 @@ function escHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
-function renderMarkdown(md: string): string {
+function renderMarkdown(md: string, previewSvg: string | null, previewLoading: boolean): string {
   const codeBlocks: string[] = []
   const inlineCodes: string[] = []
 
-  let text = md.replace(/```(?:[^\n]*)?\n([\s\S]*?)```/g, (_, code: string) => {
+  // Extract turtle preview tokens before HTML escaping. Supports markdown
+  // image syntax `![alt](turtlepreview)` and the legacy `{{turtle_preview}}`.
+  let text = md.replace(/!\[[^\]]*\]\(turtlepreview\)/g, '\x00TP\x00')
+                .replace(/\{\{turtle_preview\}\}/g, '\x00TP\x00')
+
+  text = text.replace(/```(?:[^\n]*)?\n([\s\S]*?)```/g, (_, code: string) => {
     codeBlocks.push(code.trimEnd())
     return `\x00B${codeBlocks.length - 1}\x00`
   })
@@ -42,9 +50,9 @@ function renderMarkdown(md: string): string {
   text = escHtml(text)
 
   text = text
-    .replace(/^### (.+)$/gm, '<h3 class="text-base font-bold text-slate-200 mt-4 mb-1">$1</h3>')
-    .replace(/^## (.+)$/gm, '<h2 class="text-base font-bold text-sky-300 mt-4 mb-1">$1</h2>')
-    .replace(/^# (.+)$/gm, '<h1 class="text-lg font-bold text-emerald-300 mt-3 mb-2">$1</h1>')
+    .replace(/^### (.+)$/gm, '<h3 style="font-size:1.1em" class="font-bold text-slate-200 mt-4 mb-1">$1</h3>')
+    .replace(/^## (.+)$/gm, '<h2 style="font-size:1.25em" class="font-bold text-sky-300 mt-4 mb-1">$1</h2>')
+    .replace(/^# (.+)$/gm, '<h1 style="font-size:1.5em" class="font-bold text-emerald-300 mt-3 mb-2">$1</h1>')
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
     .replace(/\*([^*\n]+)\*/g, '<em>$1</em>')
 
@@ -53,7 +61,7 @@ function renderMarkdown(md: string): string {
   for (const seg of segments) {
     const s = seg.trim()
     if (!s) continue
-    if (s.startsWith('<h') || s.startsWith('\x00B')) {
+    if (s.startsWith('<h') || s.startsWith('\x00B') || s.startsWith('\x00TP')) {
       parts.push(s.replace(/\n/g, ' '))
     } else {
       parts.push(`<p class="mb-3 leading-relaxed">${s.replace(/\n/g, '<br>')}</p>`)
@@ -69,6 +77,16 @@ function renderMarkdown(md: string): string {
   text = text.replace(/\x00I(\d+)\x00/g, (_, i: string) => {
     const code = inlineCodes[parseInt(i)]
     return `<code class="book-inline-code font-mono text-xs px-1 rounded">${escHtml(code)}</code>`
+  })
+
+  text = text.replace(/\x00TP\x00/g, () => {
+    if (previewSvg) {
+      return `<div class="my-2 flex justify-center"><div class="turtle-preview-wrapper">${previewSvg}</div></div>`
+    }
+    if (previewLoading) {
+      return '<div class="border border-slate-700 rounded p-3 my-2 text-center text-slate-500 italic text-xs">Generating turtle preview…</div>'
+    }
+    return '<div class="border border-slate-700 rounded p-3 my-2 text-center text-slate-500 italic text-xs">Turtle preview unavailable</div>'
   })
 
   return text
@@ -95,7 +113,7 @@ function CompletedTick() {
   )
 }
 
-export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClose, testResult, isTestRunning, testStatus, onClearTestResult, completedChallenges }: Props) {
+export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClose, testResult, isTestRunning, testStatus, onClearTestResult, completedChallenges, isCollapsed, onToggleCollapse }: Props) {
   const [manifest, setManifest] = useState<BookManifest | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -104,6 +122,9 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
   const [showDotMenu, setShowDotMenu] = useState(false)
   const [challengeHasFs, setChallengeHasFs] = useState(false)
   const [bookFontSize, setBookFontSize] = useState<number>(getStoredBookFontSize)
+  const [previewSvg, setPreviewSvg] = useState<string | null>(null)
+  const [previewLoading, setPreviewLoading] = useState(false)
+  const previewWorkerRef = useRef<Worker | null>(null)
 
   useEffect(() => {
     try { localStorage.setItem('aqa_book_font_size', String(bookFontSize)) } catch { /* ignore */ }
@@ -139,6 +160,8 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
     if (!navState.activeChallengeId || !manifest) {
       setGuideMarkdown('')
       setChallengeHasFs(false)
+      setPreviewSvg(null)
+      setPreviewLoading(false)
       return
     }
     const challenge = findChallenge(manifest, navState.activeChallengeId)
@@ -153,6 +176,95 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
     const fsName = getChallengeFsName(navState.activeChallengeId)
     void listFilesystems().then(list => setChallengeHasFs(list.some(f => f.name === fsName)))
   }, [navState.activeChallengeId, navState.currentBookUrl, manifest])
+
+  // Generate turtle preview SVG when a challenge with `![preview](turtlepreview)` loads
+  useEffect(() => {
+    if (previewWorkerRef.current) {
+      previewWorkerRef.current.terminate()
+      previewWorkerRef.current = null
+    }
+    setPreviewSvg(null)
+
+    if (!navState.activeChallengeId || !manifest || !guideMarkdown) {
+      setPreviewLoading(false)
+      return
+    }
+    const hasPreviewToken = /!\[[^\]]*\]\(turtlepreview\)|\{\{turtle_preview\}\}/.test(guideMarkdown)
+    if (!hasPreviewToken) { setPreviewLoading(false); return }
+
+    const challenge = findChallenge(manifest, navState.activeChallengeId)
+    if (!challenge?.tests?.length) { setPreviewLoading(false); return }
+
+    // Find first test case with a 't' requirement that names a filename
+    let solutionFilename: string | undefined
+    let firstInputs: Array<string | number> = []
+    for (const tc of challenge.tests) {
+      const reqs = Array.isArray(tc.out) ? (tc.out as BookTestOutputReq[]) : []
+      const tReq = reqs.find(r => r.typ === 't' && r.filename)
+      if (tReq?.filename) {
+        solutionFilename = tReq.filename
+        firstInputs = Array.isArray(tc.in)
+          ? tc.in
+          : tc.in !== undefined && tc.in !== ''
+            ? [tc.in as string]
+            : []
+        break
+      }
+    }
+    if (!solutionFilename) { setPreviewLoading(false); return }
+
+    let cancelled = false
+    setPreviewLoading(true)
+
+    void (async () => {
+      try {
+        const fsName = getChallengeFsName(navState.activeChallengeId!)
+        const fsList = await listFilesystems()
+        const fs = fsList.find(f => f.name === fsName || f.name.startsWith(fsName + ':'))
+        if (!fs) { if (!cancelled) setPreviewLoading(false); return }
+
+        const entry = await getEntryByPath(fs.id, '/' + solutionFilename!.replace(/^\//, ''))
+        if (!entry?.content) { if (!cancelled) setPreviewLoading(false); return }
+        const solutionCode = new TextDecoder().decode(entry.content)
+
+        const allFiles = await getAllFiles(fs.id)
+        if (cancelled) return
+
+        const worker = new TesterWorker()
+        previewWorkerRef.current = worker
+        worker.onmessage = (e: MessageEvent) => {
+          if (cancelled) return
+          if (e.data.type === 'preview_done') {
+            setPreviewSvg(String(e.data.svg ?? ''))
+            setPreviewLoading(false)
+            worker.terminate()
+            if (previewWorkerRef.current === worker) previewWorkerRef.current = null
+          } else if (e.data.type === 'preview_error') {
+            setPreviewSvg(null)
+            setPreviewLoading(false)
+            worker.terminate()
+            if (previewWorkerRef.current === worker) previewWorkerRef.current = null
+          }
+        }
+        worker.postMessage({
+          type: 'preview_turtle',
+          solutionCode,
+          inputs: firstInputs,
+          files: allFiles.map(f => ({ path: f.path, content: f.content })),
+        })
+      } catch {
+        if (!cancelled) setPreviewLoading(false)
+      }
+    })()
+
+    return () => {
+      cancelled = true
+      if (previewWorkerRef.current) {
+        previewWorkerRef.current.terminate()
+        previewWorkerRef.current = null
+      }
+    }
+  }, [navState.activeChallengeId, manifest, guideMarkdown])
 
   const navigateInto = useCallback(async (bookLink: string, name: string) => {
     const newUrl = resolveBookUrl(navState.currentBookUrl, bookLink)
@@ -230,10 +342,32 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
   const nextChallenge = manifest && navState.activeChallengeId
     ? getAdjacentChallenge(manifest, navState.activeChallengeId, 1) : null
 
+  if (isCollapsed) {
+    return (
+      <div className="flex flex-col h-full overflow-hidden">
+        <div className="bg-slate-900 py-1.5 px-1 border-b border-slate-700 flex-shrink-0 flex items-center justify-center">
+          <button type="button" title="Expand book panel" onClick={onToggleCollapse}
+            className="text-slate-400 hover:text-slate-200 p-0.5">
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
+            </svg>
+          </button>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="flex flex-col h-full overflow-hidden text-xs select-none">
       {/* Header */}
       <div className="bg-slate-900 py-1.5 px-2 border-b border-slate-700 flex-shrink-0 flex items-center gap-1">
+        {/* Collapse button */}
+        <button type="button" title="Collapse book panel" onClick={onToggleCollapse}
+          className="text-slate-400 hover:text-slate-200 p-0.5 flex-shrink-0">
+          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 5l7 7-7 7M5 5l7 7-7 7" />
+          </svg>
+        </button>
         {/* Back arrow */}
         <button type="button"
           onClick={navigateUp}
@@ -291,8 +425,19 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
                 </svg>
               </button>
               {showDotMenu && (
-                <div className="absolute right-0 top-full mt-1 z-50 bg-slate-800 border border-slate-600 rounded shadow-xl py-1 min-w-[120px]"
+                <div className="absolute right-0 top-full mt-1 z-50 bg-slate-800 border border-slate-600 rounded shadow-xl py-1 min-w-[140px]"
                   onMouseLeave={() => setShowDotMenu(false)}>
+                  <button type="button" onClick={() => adjustFontSize(1)}
+                    disabled={bookFontSize === BOOK_FONT_SIZES[BOOK_FONT_SIZES.length - 1]}
+                    className="w-full text-left px-3 py-1.5 hover:bg-slate-700 text-slate-300 disabled:text-slate-600 disabled:cursor-not-allowed transition-colors">
+                    Increase font size
+                  </button>
+                  <button type="button" onClick={() => adjustFontSize(-1)}
+                    disabled={bookFontSize === BOOK_FONT_SIZES[0]}
+                    className="w-full text-left px-3 py-1.5 hover:bg-slate-700 text-slate-300 disabled:text-slate-600 disabled:cursor-not-allowed transition-colors">
+                    Decrease font size
+                  </button>
+                  <div className="border-t border-slate-700 my-1" />
                   <button type="button" onClick={handleReset} disabled={!challengeHasFs}
                     className="w-full text-left px-3 py-1.5 hover:bg-slate-700 text-slate-300 disabled:text-slate-600 disabled:cursor-not-allowed transition-colors">
                     Reset challenge
@@ -302,16 +447,6 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
             </div>
           </>
         )}
-
-        {/* Font size controls */}
-        <button type="button" onClick={() => adjustFontSize(-1)}
-          disabled={bookFontSize === BOOK_FONT_SIZES[0]}
-          title="Decrease font size"
-          className="text-slate-500 hover:text-slate-200 disabled:opacity-30 disabled:cursor-not-allowed p-0.5 flex-shrink-0 text-[9px] font-bold leading-none">A−</button>
-        <button type="button" onClick={() => adjustFontSize(1)}
-          disabled={bookFontSize === BOOK_FONT_SIZES[BOOK_FONT_SIZES.length - 1]}
-          title="Increase font size"
-          className="text-slate-500 hover:text-slate-200 disabled:opacity-30 disabled:cursor-not-allowed p-0.5 flex-shrink-0 text-[11px] font-bold leading-none">A+</button>
 
         {/* Close book */}
         <button type="button" onClick={onClose} title="Close book"
@@ -358,7 +493,7 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
               ) : (
                 <div
                   className={`text-slate-300 leading-relaxed book-font-${bookFontSize}`}
-                  dangerouslySetInnerHTML={{ __html: renderMarkdown(guideMarkdown) }}
+                  dangerouslySetInnerHTML={{ __html: renderMarkdown(guideMarkdown, previewSvg, previewLoading) }}
                 />
               )}
             </div>
@@ -367,10 +502,10 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
           {/* Book/challenge list */}
           {!loading && !error && !navState.activeChallengeId && manifest && (
             <div className="py-1">
-              {manifest.children.map(child => {
+              {manifest.children.map((child, i) => {
                 if (isBookRef(child)) {
                   return (
-                    <button type="button" key={child.id}
+                    <button type="button" key={`${i}-${child.id}`}
                       onClick={() => void navigateInto(child.bookLink, child.name)}
                       className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-slate-700 transition-colors text-slate-300 hover:text-slate-100">
                       <svg className="w-4 h-4 text-sky-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -386,7 +521,7 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
                 const isExample = child.isExample === 'True' || child.isExample === true
                 const done = isCompleted(child.id)
                 return (
-                  <button type="button" key={child.id}
+                  <button type="button" key={`${i}-${child.id}`}
                     onClick={() => enterChallenge(child)}
                     className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-slate-700 transition-colors text-slate-300 hover:text-slate-100">
                     <svg className={`w-4 h-4 flex-shrink-0 ${isExample ? 'text-slate-400' : 'text-emerald-400'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">

@@ -65,12 +65,18 @@ function buildBasicRegex(out: string): RegExp {
 
 // ── Requirement evaluator ──────────────────────────────────────────────────
 
+function normalizeSvg(svg: string): string {
+  return svg.replace(/\s+/g, ' ').trim()
+}
+
 function evalRequirement(
   req: BookTestOutputReq,
   output: string,
   sourceCode: string,
   statementResults: Record<string, string>,
   fileContents: Record<string, string | null>,
+  turtleSvg: string,
+  solutionTurtleSvgs: Record<string, string>,
 ): TestReqResult {
   const typ = req.typ ?? '+'
   const pattern = req.pattern ?? ''
@@ -127,9 +133,19 @@ function evalRequirement(
       break
     }
 
-    case 't':
-      rr.passed = true  // Turtle comparison not supported; skip
+    case 't': {
+      if (!turtleSvg || turtleSvg.trim().length === 0) { rr.passed = false; break }
+      if (req.filename) {
+        const expected = solutionTurtleSvgs[req.filename] ?? ''
+        if (!expected) { rr.passed = false; break }
+        rr.passed = normalizeSvg(turtleSvg) === normalizeSvg(expected)
+      } else if (pattern) {
+        rr.passed = safeMatch(turtleSvg, pattern, ignore, count)
+      } else {
+        rr.passed = true
+      }
       break
+    }
 
     default:
       rr.passed = false
@@ -153,7 +169,7 @@ export function evaluateTestCase(
       ? [String(testCase.in)]
       : []
   const out = testCase.out ?? ''
-  const { output, error, statementResults, fileContents } = runOut
+  const { output, error, statementResults, fileContents, turtleSvg = '', solutionTurtleSvgs = {} } = runOut
 
   const reqResults: TestReqResult[] = []
 
@@ -164,7 +180,7 @@ export function evaluateTestCase(
     reqResults.push({ passed: re.test(textToTest), typ: '+', pattern: out, ignore: '', count: -1 })
   } else if (Array.isArray(out)) {
     for (const req of out as BookTestOutputReq[]) {
-      reqResults.push(evalRequirement(req, output, sourceCode, statementResults, fileContents))
+      reqResults.push(evalRequirement(req, output, sourceCode, statementResults, fileContents, turtleSvg, solutionTurtleSvgs))
     }
   }
 

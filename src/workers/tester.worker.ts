@@ -1,5 +1,7 @@
 /// <reference lib="webworker" />
 
+import { SVG_TURTLE_WORKER_SETUP } from '../utils/mainThread'
+
 const PYODIDE_URL = 'https://cdn.jsdelivr.net/pyodide/v0.29.3/full/pyodide.js'
 
 const RUNNER_SETUP = `
@@ -92,7 +94,43 @@ function mountFiles(files: Array<{ path: string; content: ArrayBuffer }>): void 
   }
 }
 
+function readFileFromFs(filename: string): string {
+  for (const p of [filename, '/' + filename.replace(/^\//, '')]) {
+    try {
+      return pyodide.FS.readFile(p, { encoding: 'utf8' }) as string
+    } catch { /* try next */ }
+  }
+  return ''
+}
+
+function runCodeAndCaptureSvg(srcCode: string, inputs: Array<string | number>): string {
+  pyodide.runPython(SVG_TURTLE_WORKER_SETUP)
+  pyodide.globals.set('_tc_code', srcCode)
+  pyodide.globals.set('_tc_inputs', pyodide.toPy(inputs))
+  pyodide.runPython('_run_test_case(_tc_code, _tc_inputs)')
+  const v = pyodide.globals.get('__turtle_svg__')
+  return v ? String(v) : ''
+}
+
 self.onmessage = async (e: MessageEvent) => {
+  if (e.data.type === 'preview_turtle') {
+    const { solutionCode, inputs, files } = e.data as {
+      solutionCode: string
+      inputs: Array<string | number>
+      files: Array<{ path: string; content: ArrayBuffer }>
+    }
+    try {
+      await initPyodide(solutionCode)
+      if (files?.length) mountFiles(files)
+      try { pyodide.runPython('import os; os.chdir("/")') } catch { /* ignore */ }
+      const svg = runCodeAndCaptureSvg(solutionCode, inputs)
+      self.postMessage({ type: 'preview_done', svg })
+    } catch (err) {
+      self.postMessage({ type: 'preview_error', error: String(err) })
+    }
+    return
+  }
+
   if (e.data.type !== 'run_tests') return
 
   const { code, files, tests } = e.data as {
@@ -108,12 +146,21 @@ self.onmessage = async (e: MessageEvent) => {
     self.postMessage({ type: 'status', message: 'Loading Python runtime…' })
     await initPyodide(code)
 
+    const hasTurtleTests = tests.some(t =>
+      Array.isArray(t.out) && t.out.some((r: { typ?: string }) => r.typ === 't')
+    )
+    if (hasTurtleTests) {
+      pyodide.runPython(SVG_TURTLE_WORKER_SETUP)
+    }
+
     const results: Array<{
       caseIndex: number
       output: string
       error: string | null
       statementResults: Record<string, string>
       fileContents: Record<string, string | null>
+      turtleSvg: string
+      solutionTurtleSvgs: Record<string, string>
     }> = []
 
     for (let i = 0; i < tests.length; i++) {
@@ -123,6 +170,11 @@ self.onmessage = async (e: MessageEvent) => {
       // Re-mount original files for isolation between tests
       if (files?.length) mountFiles(files)
       try { pyodide.runPython('import os; os.chdir("/")') } catch { /* ignore */ }
+
+      // Reset turtle state before each test
+      if (hasTurtleTests) {
+        pyodide.runPython(SVG_TURTLE_WORKER_SETUP)
+      }
 
       const inputs: Array<string | number> = Array.isArray(test.in)
         ? test.in
@@ -138,10 +190,16 @@ self.onmessage = async (e: MessageEvent) => {
       const errorVal = pyodide.globals.get('_test_error')
       const error: string | null = errorVal ? String(errorVal) : null
 
+      const turtleSvgVal = hasTurtleTests ? pyodide.globals.get('__turtle_svg__') : null
+      const turtleSvg: string = turtleSvgVal ? String(turtleSvgVal) : ''
+
       const statementResults: Record<string, string> = {}
       const fileContents: Record<string, string | null> = {}
+      const solutionTurtleSvgs: Record<string, string> = {}
 
       const reqs = Array.isArray(test.out) ? test.out : []
+      // First pass: capture user-namespace data (statements, files written by user)
+      // before any solution code runs and overwrites the namespace.
       for (const req of reqs) {
         if ((req.typ === 's+' || req.typ === 's-') && req.statement) {
           if (!(req.statement in statementResults)) {
@@ -159,8 +217,15 @@ self.onmessage = async (e: MessageEvent) => {
           }
         }
       }
+      // Second pass: run solution files for any 't' reqs.
+      for (const req of reqs) {
+        if (req.typ === 't' && req.filename && !(req.filename in solutionTurtleSvgs)) {
+          const solCode = readFileFromFs(req.filename)
+          solutionTurtleSvgs[req.filename] = solCode ? runCodeAndCaptureSvg(solCode, inputs) : ''
+        }
+      }
 
-      results.push({ caseIndex: i, output, error, statementResults, fileContents })
+      results.push({ caseIndex: i, output, error, statementResults, fileContents, turtleSvg, solutionTurtleSvgs })
     }
 
     self.postMessage({ type: 'done', results })

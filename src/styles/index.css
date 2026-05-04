@@ -249,3 +249,20 @@ html[data-theme="light"] .hover\:text-slate-100:hover { color: #0f172a !importan
 .book-font-14 { font-size: 14px; }
 .book-font-16 { font-size: 16px; }
 .book-font-18 { font-size: 18px; }
+
+/* Turtle preview embedded in book guide markdown */
+.turtle-preview-wrapper {
+  max-width: 100%;
+  border: 1px solid #475569;
+  border-radius: 0.5rem;
+  background: #ffffff;
+  padding: 4px;
+  display: inline-block;
+}
+.turtle-preview-wrapper svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  max-height: 320px;
+}
+html[data-theme="light"] .turtle-preview-wrapper { border-color: #cbd5e1; }

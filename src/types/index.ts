@@ -246,6 +246,8 @@ export interface TesterRunOutput {
   error: string | null
   statementResults: Record<string, string>
   fileContents: Record<string, string | null>
+  turtleSvg?: string
+  solutionTurtleSvgs?: Record<string, string>
 }
 
 export interface TestReqResult {
