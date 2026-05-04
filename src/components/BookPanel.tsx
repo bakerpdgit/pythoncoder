@@ -105,6 +105,21 @@ function getStoredBookFontSize(): number {
   return DEFAULT_BOOK_FONT_SIZE
 }
 
+// Strip the SVG's fixed width/height attributes and add a matching viewBox so
+// CSS can scale it responsively to the available panel width.
+function makeResponsiveSvg(svg: string): string {
+  const w = svg.match(/<svg[^>]*?\swidth="(\d+(?:\.\d+)?)"/)?.[1]
+  const h = svg.match(/<svg[^>]*?\sheight="(\d+(?:\.\d+)?)"/)?.[1]
+  if (!w || !h) return svg
+  let result = svg
+  if (!/<svg[^>]*\sviewBox=/.test(result)) {
+    result = result.replace(/<svg([^>]*)>/, `<svg$1 viewBox="0 0 ${w} ${h}">`)
+  }
+  return result
+    .replace(/(<svg[^>]*?)\swidth="\d+(?:\.\d+)?"/, '$1')
+    .replace(/(<svg[^>]*?)\sheight="\d+(?:\.\d+)?"/, '$1')
+}
+
 function CompletedTick() {
   return (
     <svg className="w-3 h-3 text-emerald-400 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
@@ -235,7 +250,8 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
         worker.onmessage = (e: MessageEvent) => {
           if (cancelled) return
           if (e.data.type === 'preview_done') {
-            setPreviewSvg(String(e.data.svg ?? ''))
+            const raw = String(e.data.svg ?? '')
+            setPreviewSvg(raw ? makeResponsiveSvg(raw) : '')
             setPreviewLoading(false)
             worker.terminate()
             if (previewWorkerRef.current === worker) previewWorkerRef.current = null
