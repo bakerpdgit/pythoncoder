@@ -4,6 +4,7 @@ import type { InspectorNode, InspectorScopeData, InspectorPath } from '../types'
 const INSPECTOR_RUNTIME_NAMES = new Set([
   'MAX_ITEMS', 'MAX_STRING', 'code_obj', 'control_blocks', 'current_breakpoints',
   'frame_depths', 'pending_action', 'source_lines', 'tree', 'user_code_str', 'node',
+  'watch_expressions', 'evaluate_watches',
 ])
 
 const isRuntimeInspectorEntry = (entry: { label: unknown }): boolean => {

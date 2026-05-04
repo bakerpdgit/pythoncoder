@@ -186,6 +186,7 @@ export default function App() {
   const [fsSidebarWidth, setFsSidebarWidth] = useState(224)  // px width of left sidebar
   const [leftSidebarSplit, setLeftSidebarSplit] = useState(55) // % of left sidebar for FS (top)
   const [inspectorSplit, setInspectorSplit] = useState(50)    // % of inspector for globals (top)
+  const [watchesSplit, setWatchesSplit] = useState(25)        // % of inspector height for watches (bottom)
   const [rightColSplit, setRightColSplit] = useState(42)      // % of right col for Console (top)
   const [bookPanelWidth, setBookPanelWidth] = useState(360)   // px width of book panel
   const [watches, setWatches] = useState<string[]>(() => getStoredWatches())
@@ -450,6 +451,9 @@ export default function App() {
       } else if (drag.type === 'row-inspector' && inspectorRef.current) {
         const rect = inspectorRef.current.getBoundingClientRect()
         setInspectorSplit(Math.max(20, Math.min(80, ((e.clientY - rect.top) / rect.height) * 100)))
+      } else if (drag.type === 'row-watches' && inspectorRef.current) {
+        const rect = inspectorRef.current.getBoundingClientRect()
+        setWatchesSplit(Math.max(10, Math.min(60, (1 - (e.clientY - rect.top) / rect.height) * 100)))
       } else if (drag.type === 'row-rightcol' && rightColRef.current) {
         const rect = rightColRef.current.getBoundingClientRect()
         setRightColSplit(Math.max(20, Math.min(80, ((e.clientY - rect.top) / rect.height) * 100)))
@@ -2076,18 +2080,31 @@ exec(code_obj, globals())
                         </div>
                       </>
                     )}
+                    {/* Watches resize handle */}
+                    {!inspectorCollapsed.watches && (
+                      <div className="resize-handle-row flex-shrink-0"
+                        onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'row-watches', startX: e.clientX, startY: e.clientY, startVal: watchesSplit }; document.body.style.cursor = 'row-resize'; document.body.style.userSelect = 'none' }}>
+                        <div className="resize-bar" style={{ height: '3px', width: '48px' }} />
+                      </div>
+                    )}
                     {/* Watches */}
                     <div className="border-t border-slate-700 overflow-hidden flex flex-col"
-                      style={{ flex: inspectorCollapsed.watches ? '0 0 auto' : '0 0 140px', minHeight: 0 }}>
+                      style={{ flex: inspectorCollapsed.watches ? '0 0 auto' : `0 0 ${watchesSplit}%`, minHeight: 0 }}>
                       <div className="flex-shrink-0 px-3 py-2 flex items-center justify-between">
                         <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Watches</div>
                         <div className="flex items-center gap-1">
-                          <button type="button"
-                            onClick={() => { const expr = window.prompt('Watch expression:'); if (expr?.trim()) setWatches(w => [...w, expr.trim()]) }}
-                            title="Add watch" className="text-[11px] text-slate-500 hover:text-emerald-300 transition-colors px-1 rounded">[+]</button>
+                          <IconButton title="Add watch expression"
+                            onClick={() => { const expr = window.prompt('Watch expression:'); if (expr?.trim()) setWatches(w => [...w, expr.trim()]) }}>
+                            <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M12 4v16m8-8H4" />
+                            </svg>
+                          </IconButton>
                           {watches.length > 0 && (
-                            <button type="button" onClick={() => setWatches([])} title="Clear all watches"
-                              className="text-[10px] text-slate-500 hover:text-red-400 transition-colors px-1 rounded">clear</button>
+                            <IconButton title="Clear all watches" onClick={() => setWatches([])}>
+                              <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                              </svg>
+                            </IconButton>
                           )}
                           <button type="button"
                             onClick={() => setInspectorCollapsed(c => ({ ...c, watches: !c.watches }))}
@@ -2104,7 +2121,7 @@ exec(code_obj, globals())
                       {!inspectorCollapsed.watches && (
                         <div className="flex-1 overflow-y-auto">
                           {watches.length === 0
-                            ? <div className="px-3 py-2 text-xs text-slate-500 italic">No watches. Click [+] to add.</div>
+                            ? <div className="px-3 py-2 text-xs text-slate-500 italic">No watches. Click + to add.</div>
                             : <div className="p-2 flex flex-col gap-1">
                                 {watches.map((expr, idx) => (
                                   <div key={idx} className="flex items-center gap-2 rounded border border-slate-700 bg-slate-900/40 px-2 py-1.5">
