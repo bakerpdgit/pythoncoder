@@ -1,0 +1,46 @@
+<!doctype html>
+<html>
+  
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" type="text/css" href="style.css">
+    <script src="https://cdn.jsdelivr.net/pyodide/v0.29.3/full/pyodide.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jquery@4.0.0/dist/jquery.min.js"></script>
+    <script defer src="code.js"></script>
+    <title>Racing Game</title>    
+  </head>
+
+  <body>
+    
+    <p>Use right/left arrow keys to move.</p>
+
+    <table id="RacingTrack">
+        <!-- The table cells have an id with the row and column number -->
+        <tr>
+            <td id="R0C0" class="car"></td>
+            <td id="R0C1"></td>
+            <td id="R0C2"></td>
+            <td id="R0C3"></td>
+            <td id="R0C4"></td>
+            <td id="R0C5"></td>
+            <td id="R0C6"></td>
+            <td id="R0C7"></td>
+        </tr>
+        <!-- Add another table row here -->
+      
+    </table>
+
+    <p id="Message"><br></p>
+
+    <div class="simulation-console" id="simulationConsole">
+      <div class="console-header">
+        <span class="console-title">Console Output</span>
+        <button class="console-toggle" id="consoleToggle" type="button" aria-label="Collapse console" aria-expanded="true" aria-controls="consoleBody" title="Collapse console"></button>
+      </div>
+      <div class="console-body" id="consoleBody">
+        <textarea id="output" rows="20" disabled></textarea>
+      </div>
+    </div>
+  </body>
+
+</html>

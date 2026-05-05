@@ -6,6 +6,7 @@ import {
   getParentPath, loadFilesystemFromUrl,
 } from '../utils/virtualFS'
 import { isBookUrl, BOOK_FS_PREFIX, BOOK_SRC_PREFIX, getBookFsDisplayName } from '../utils/bookLoader'
+import { isHtmlFile } from '../utils/htmlPreview'
 import { ConfirmDialog } from './dialogs/ConfirmDialog'
 import { SaveFileDialog } from './dialogs/SaveFileDialog'
 import type { VFSEntry, VFSFilesystem } from '../types'
@@ -20,6 +21,7 @@ interface Props {
   onFilesystemForcedChange: (id: string) => void
   onCwdChange: (path: string) => void
   onOpenFile: (entry: VFSEntry) => void
+  onPreviewHtml: (entry: VFSEntry) => void
   onError: (msg: string) => void
   onBookOpen?: (url: string) => void
   onLocalFileImport?: (fileMap: Map<string, ArrayBuffer>, sourceName: string) => Promise<void>
@@ -38,7 +40,7 @@ interface ImagePreview {
 export function FileSystemPanel({
   activeFilesystemId, currentWorkingDir, openFilePath, hiddenPaths, isChallengeMode,
   onFilesystemChange, onFilesystemForcedChange, onCwdChange, onOpenFile, onError, onBookOpen,
-  onLocalFileImport, onFolderConnect, reloadTrigger,
+  onPreviewHtml, onLocalFileImport, onFolderConnect, reloadTrigger,
 }: Props) {
   const [filesystems, setFilesystems] = useState<VFSFilesystem[]>([])
   const [currentFsEntry, setCurrentFsEntry] = useState<VFSFilesystem | null>(null)
@@ -135,6 +137,9 @@ export function FileSystemPanel({
 
   const isProtected = (entry: VFSEntry) =>
     activeFilesystemId === 'default' && entry.path === '/main.py'
+
+  const canPreviewHtml = (entry: VFSEntry) =>
+    entry.type === 'file' && isHtmlFile(entry.name, entry.mimeType ?? guessMimeType(entry.name))
 
   const startRename = (entry: VFSEntry) => {
     if (isProtected(entry)) { onError('main.py cannot be renamed in the default filesystem.'); setContextMenu(null); return }
@@ -529,6 +534,9 @@ export function FileSystemPanel({
           onMouseDown={e => e.stopPropagation()}>
           {contextMenu.entry.type === 'file' && (
             <CtxItem label="Open" onClick={() => { void handleDoubleClick(contextMenu.entry); setContextMenu(null) }} />
+          )}
+          {canPreviewHtml(contextMenu.entry) && (
+            <CtxItem label="Preview HTML" onClick={() => { onPreviewHtml(contextMenu.entry); setContextMenu(null) }} />
           )}
           <CtxItem label="Rename" onClick={() => startRename(contextMenu.entry)} disabled={isProtected(contextMenu.entry)} />
           <CtxItem label="Download" onClick={() => void handleDownload(contextMenu.entry)} />

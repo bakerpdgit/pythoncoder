@@ -27,6 +27,23 @@ function setIsolationHeaders(res) {
   res.setHeader("Origin-Agent-Cluster", "?1");
 }
 
+// Vite content-hashes filenames in /assets, so they are immutable forever.
+// HTML and version.json must never be cached or users get stuck on old builds.
+function setCacheHeaders(res, filePath) {
+  const normalised = filePath.replace(/\\/g, "/").toLowerCase();
+  const rootNorm = root.replace(/\\/g, "/").toLowerCase();
+  const rel = normalised.startsWith(rootNorm) ? normalised.slice(rootNorm.length) : normalised;
+  if (rel.startsWith("/assets/")) {
+    res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+    return;
+  }
+  if (rel.endsWith(".html") || rel.endsWith("/version.json")) {
+    res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+  }
+}
+
 function sendJson(res, statusCode, body) {
   res.writeHead(statusCode, {
     "Content-Type": "application/json; charset=utf-8",
@@ -97,6 +114,7 @@ const server = createServer((req, res) => {
   const contentType =
     mimeTypes[extname(filePath).toLowerCase()] || "application/octet-stream";
 
+  setCacheHeaders(res, filePath);
   res.writeHead(200, { "Content-Type": contentType });
   createReadStream(filePath).pipe(res);
 });

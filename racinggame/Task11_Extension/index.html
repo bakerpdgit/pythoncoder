@@ -1,0 +1,43 @@
+<!doctype html>
+<html>
+  
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" type="text/css" href="style.css">
+    <script src="https://cdn.jsdelivr.net/pyodide/v0.29.3/full/pyodide.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jquery@4.0.0/dist/jquery.min.js"></script>
+    <script defer src="code.js"></script>
+    <title>Racing Game</title>    
+  </head>
+
+  <body>
+    
+    <p>Use right/left arrow keys to move.</p>
+
+    <table id="RacingTrack">
+      <!-- The table cells should have an id with the row and column number -->              
+    </table>
+
+    <p id="Message"><br></p>
+
+    <div class="simulation-console" id="simulationConsole">
+      <div class="console-header">
+        <span class="console-title">Console Output</span>
+        <button class="console-toggle" id="consoleToggle" type="button" aria-label="Collapse console" aria-expanded="true" aria-controls="consoleBody" title="Collapse console"></button>
+      </div>
+      <div class="console-body" id="consoleBody">
+        <textarea id="output" rows="20" disabled></textarea>
+      </div>
+    </div>
+
+    <audio id="audioFlag" width="0" height="0">
+      <source src="flag.mp3" type="audio/mpeg">
+    </audio>
+
+    <audio id="audioWin" width="0" height="0">
+      <source src="win.mp3" type="audio/mpeg">
+    </audio>   
+        
+  </body>
+
+</html>

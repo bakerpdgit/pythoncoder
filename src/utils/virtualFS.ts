@@ -250,12 +250,12 @@ export async function syncFilesFromPyodide(fsId: string, updatedFiles: VFSFile[]
 export function guessMimeType(filename: string): string {
   const ext = filename.toLowerCase().split('.').pop() ?? ''
   const map: Record<string, string> = {
-    py: 'text/x-python', txt: 'text/plain', js: 'text/javascript',
-    ts: 'text/typescript', html: 'text/html', css: 'text/css',
+    py: 'text/x-python', txt: 'text/plain', js: 'text/javascript', mjs: 'text/javascript',
+    ts: 'text/typescript', html: 'text/html', htm: 'text/html', css: 'text/css',
     json: 'application/json', csv: 'text/csv', md: 'text/markdown',
     png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
     gif: 'image/gif', svg: 'image/svg+xml', webp: 'image/webp',
-    pdf: 'application/pdf',
+    mp3: 'audio/mpeg', wav: 'audio/wav', pdf: 'application/pdf',
   }
   return map[ext] ?? 'application/octet-stream'
 }

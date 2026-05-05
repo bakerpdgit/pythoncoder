@@ -25,8 +25,10 @@ import {
   getEntryByPath, cleanFilesFromPyodide, ensureFilesystemFromUrl,
   createFilesystem, deleteFilesystem, listFilesystems, importFileMapToFs,
 } from './utils/virtualFS'
+import { buildVfsPreviewUrl, ensureVfsPreviewServiceWorker, isHtmlFile } from './utils/htmlPreview'
 import { FileSystemPanel } from './components/FileSystemPanel'
 import { BookPanel } from './components/BookPanel'
+import { HtmlPreviewDialog } from './components/HtmlPreviewDialog'
 import { SaveFileDialog } from './components/dialogs/SaveFileDialog'
 import { getExplanation, getDefinitionKey } from './data/explanations'
 import { ThemeToggleButton } from './components/ui/ThemeToggleButton'
@@ -54,6 +56,7 @@ import type {
   OverallTestResult, TesterRunOutput,
 } from './types'
 import { evaluateAll } from './utils/testMatcher'
+import { startVersionPolling } from './utils/versionCheck'
 
 async function readDirectoryToMap(handle: FileSystemDirectoryHandle, prefix = ''): Promise<Map<string, ArrayBuffer>> {
   const map = new Map<string, ArrayBuffer>()
@@ -172,6 +175,7 @@ export default function App() {
   const [isUnsaved, setIsUnsaved] = useState(false)
   const [pendingCodeLoad, setPendingCodeLoad] = useState<{ content: string; name: string; rawBuffer: ArrayBuffer; mimeType: string } | null>(null)
   const [showCodeSaveDialog, setShowCodeSaveDialog] = useState(false)
+  const [htmlPreview, setHtmlPreview] = useState<{ fsId: string; path: string; name: string; url: string } | null>(null)
   const [diagramFontSize, setDiagramFontSize] = useState(DIAGRAM_FONT_DEFAULT)
   const [isPanelMenuOpen, setIsPanelMenuOpen] = useState(false)
   const [isRuntimeMenuOpen, setIsRuntimeMenuOpen] = useState(false)
@@ -203,6 +207,7 @@ export default function App() {
   const [watchValues, setWatchValues] = useState<Record<string, InspectorNode>>({})
   const [inspectorCollapsed, setInspectorCollapsed] = useState({ globals: false, locals: false, watches: false })
   const [savedLayouts, setSavedLayouts] = useState<NamedLayout[]>(() => getStoredNamedLayouts())
+  const [updateAvailable, setUpdateAvailable] = useState(false)
 
   const workerRef = useRef<Worker | null>(null)
   const testerWorkerRef = useRef<Worker | null>(null)
@@ -384,6 +389,8 @@ export default function App() {
   useEffect(() => { persistConsoleFontSize(consoleFontSize) }, [consoleFontSize])
   useEffect(() => { persistWatches(watches); watchesRef.current = watches }, [watches])
   useEffect(() => { persistNamedLayouts(savedLayouts) }, [savedLayouts])
+
+  useEffect(() => startVersionPolling(() => setUpdateAvailable(true)), [])
 
   useEffect(() => {
     const text = getStoredFixedInputs(activeFilesystemId)
@@ -693,9 +700,10 @@ export default function App() {
       label: 'Add Selection to Watches',
       contextMenuGroupId: 'navigation',
       contextMenuOrder: 1.5,
+      precondition: 'editorHasSelection',
       run: (ed) => {
         const selection = ed.getSelection()
-        if (!selection) return
+        if (!selection || selection.isEmpty()) return
         const text = ed.getModel()?.getValueInRange(selection)?.trim()
         if (!text) return
         setWatches(w => w.includes(text) ? w : [...w, text])
@@ -778,27 +786,27 @@ export default function App() {
     if (!hasCode) return
     if (openFilePath) {
       const content = new TextEncoder().encode(codeText)
-      await writeFile(activeFilesystemId, openFilePath, content.buffer as ArrayBuffer, 'text/x-python')
+      await writeFile(activeFilesystemId, openFilePath, content.buffer as ArrayBuffer, guessMimeType(openFilePath))
       savedCodeRef.current = codeText
       setIsUnsaved(false)
       setCodeStatus(`Saved to ${openFilePath}.`)
       setVfsReloadTrigger(t => t + 1)
     } else {
       const name = codeFileName || DEFAULT_CODE_FILENAME
-      setPendingCodeLoad({ content: codeText, name, rawBuffer: new TextEncoder().encode(codeText).buffer as ArrayBuffer, mimeType: 'text/x-python' })
+      setPendingCodeLoad({ content: codeText, name, rawBuffer: new TextEncoder().encode(codeText).buffer as ArrayBuffer, mimeType: guessMimeType(name) })
       setShowCodeSaveDialog(true)
     }
   }
 
   const saveCurrentToVFS = async () => {
-    if (!openFilePath || !codeText.trim()) return
+    if (!openFilePath) return true
     const content = new TextEncoder().encode(codeText)
     try {
-      await writeFile(activeFilesystemId, openFilePath, content.buffer as ArrayBuffer, 'text/x-python')
+      await writeFile(activeFilesystemId, openFilePath, content.buffer as ArrayBuffer, guessMimeType(openFilePath))
       savedCodeRef.current = codeText
       setIsUnsaved(false)
       setVfsReloadTrigger(t => t + 1)
-    } catch { /* ignore */ }
+    } catch { return false }
     if (localFolderFsIdRef.current === activeFilesystemId && localFolderHandleRef.current) {
       try {
         const perm = await localFolderHandleRef.current.queryPermission({ mode: 'readwrite' })
@@ -807,6 +815,7 @@ export default function App() {
         }
       } catch { /* ignore */ }
     }
+    return true
   }
 
   const onOpenVFSFile = async (entry: VFSEntry) => {
@@ -824,6 +833,51 @@ export default function App() {
       const text = new TextDecoder().decode(entry.content)
       savedCodeRef.current = text
       loadCodeText(text, entry.name, entry.path)
+    }
+  }
+
+  const handlePreviewHtml = async (entry: VFSEntry) => {
+    if (entry.type !== 'file' || !isHtmlFile(entry.name, entry.mimeType ?? guessMimeType(entry.name))) {
+      setCodeStatus(`Cannot preview '${entry.name}' as HTML.`)
+      return
+    }
+    if (isUnsaved) {
+      const saved = await saveCurrentToVFS()
+      if (!saved) {
+        setCodeStatus('Could not save the current file before previewing HTML.')
+        return
+      }
+    }
+    try {
+      await ensureVfsPreviewServiceWorker()
+      setHtmlPreview({
+        fsId: entry.fsId,
+        path: entry.path,
+        name: entry.name,
+        url: buildVfsPreviewUrl(entry.fsId, entry.path),
+      })
+      setCodeStatus(`Previewing ${entry.path}.`)
+    } catch (error) {
+      setCodeStatus(`HTML preview unavailable: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  const refreshHtmlPreview = async () => {
+    if (!htmlPreview) return
+    if (isUnsaved) {
+      const saved = await saveCurrentToVFS()
+      if (!saved) {
+        setCodeStatus('Could not save the current file before refreshing the HTML preview.')
+        return
+      }
+    }
+    try {
+      await ensureVfsPreviewServiceWorker()
+      setHtmlPreview(current => current
+        ? { ...current, url: buildVfsPreviewUrl(current.fsId, current.path) }
+        : current)
+    } catch (error) {
+      setCodeStatus(`HTML preview unavailable: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
@@ -1164,6 +1218,7 @@ export default function App() {
     setCurrentLine(-1); setCurrentFunc(''); setCurrentClass(''); setSimState(null)
     setInputRequest(null); setInputValue(''); setOutputLog(''); setActiveRuntime('')
     mainThreadMountedPathsRef.current = []
+    setHtmlPreview(null)
   }
 
   const handleFilesystemChange = async (id: string) => {
@@ -2028,6 +2083,28 @@ exec(code_obj, globals())
         </div>
       </div>
 
+      {/* New version available banner */}
+      {updateAvailable && (
+        <div className="flex-shrink-0 flex items-center justify-between gap-3 border-b border-emerald-600/60 bg-emerald-900/40 px-5 py-2 text-sm text-emerald-100">
+          <div className="flex items-center gap-2 min-w-0">
+            <svg className="h-4 w-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <span className="truncate">A new version of Coder is available.</span>
+          </div>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            <button type="button" onClick={() => setUpdateAvailable(false)}
+              className="rounded border border-emerald-600/60 px-2.5 py-1 text-xs font-semibold text-emerald-200 hover:border-emerald-400 hover:text-emerald-100 transition-colors">
+              Later
+            </button>
+            <button type="button" onClick={() => window.location.reload()}
+              className="rounded bg-emerald-600 hover:bg-emerald-500 px-3 py-1 text-xs font-bold text-white transition-colors">
+              Reload now
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* SAB warning */}
       {!hasSab && selectedRuntime === 'trace-worker' && (
         <div className="m-4 rounded border border-red-500 bg-red-900/50 p-4 text-red-200">
@@ -2129,6 +2206,7 @@ exec(code_obj, globals())
                       onFilesystemForcedChange={handleFilesystemForcedChange}
                       onCwdChange={setCurrentWorkingDir}
                       onOpenFile={entry => void onOpenVFSFile(entry)}
+                      onPreviewHtml={entry => void handlePreviewHtml(entry)}
                       onError={msg => setCodeStatus(msg)}
                       onBookOpen={url => void handleBookOpen(url)}
                       onLocalFileImport={(m, n) => handleLocalFileImport(m, n)}
@@ -2664,6 +2742,16 @@ exec(code_obj, globals())
       </div>
 
       <SettingsDialog isOpen={isSettingsOpen} settings={appSettings} onClose={() => setIsSettingsOpen(false)} onSettingsChange={setAppSettings} />
+
+      {htmlPreview && (
+        <HtmlPreviewDialog
+          name={htmlPreview.name}
+          path={htmlPreview.path}
+          url={htmlPreview.url}
+          onRefresh={refreshHtmlPreview}
+          onClose={() => setHtmlPreview(null)}
+        />
+      )}
 
       {/* Code file save dialog */}
       {showCodeSaveDialog && pendingCodeLoad && (
