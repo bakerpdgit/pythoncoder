@@ -14,7 +14,7 @@ import {
   buildPythonStructureModel, analyzePythonClasses, analyzePythonFunctions,
   analyzePythonOutline, cleanCodeText, codeUsesPygame, codeUsesTurtle, getExpandableOutlineIds,
 } from './utils/codeAnalysis'
-import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides, getStoredSettings, persistSettings, getStoredBookNavState, persistBookNavState, getStoredFixedInputs, persistFixedInputs, getStoredEditorFontSize, persistEditorFontSize, getStoredConsoleFontSize, persistConsoleFontSize, getStoredWatches, persistWatches, getStoredNamedLayouts, persistNamedLayouts, getStoredCompletions, persistCompletion } from './utils/storage'
+import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides, getStoredSettings, persistSettings, getStoredBookNavState, persistBookNavState, getStoredFixedInputs, persistFixedInputs, getStoredEditorFontSize, persistEditorFontSize, getStoredConsoleFontSize, persistConsoleFontSize, getStoredWatches, persistWatches, getStoredNamedLayouts, persistNamedLayouts, getStoredCompletions, persistCompletion, getStoredLayoutPrefs, persistLayoutPrefs, defaultPanelsForView, MINIMAL_VISIBLE_PANELS } from './utils/storage'
 import { triggerDownload, getBaseFileStem } from './utils/download'
 import { buildCommentExport, buildDocstringExport, replaceExistingDocstring, getDefinitionNote, getDefaultDefinitionNote, sanitizeNoteText } from './utils/export'
 import { loadMainThreadPyodide, resetMainThreadPyodide, PYGAME_MAIN_THREAD_BOOTSTRAP, TURTLE_CANVAS_BOOTSTRAP, TURTLE_SVG_BOOTSTRAP, SVG_TURTLE_WORKER_SETUP } from './utils/mainThread'
@@ -53,7 +53,7 @@ import type {
   Theme, RuntimeKey, PanelVisibility, InputRequest, SabRef, SimState, InspectorPath,
   StructureModel, DiagramModel, HierarchyModel, OutlineModel, DiagramView, VFSEntry,
   AppSettings, BookNavState, BookChallenge, NamedLayout, InspectorNode,
-  OverallTestResult, TesterRunOutput,
+  OverallTestResult, TesterRunOutput, ViewMode,
 } from './types'
 import { evaluateAll } from './utils/testMatcher'
 import { startVersionPolling } from './utils/versionCheck'
@@ -159,7 +159,12 @@ export default function App() {
   const [runtimePreference, setRuntimePreference] = useState<RuntimeKey>('trace-worker')
   const [appSettings, setAppSettings] = useState<AppSettings>(() => getStoredSettings())
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
-  const [visiblePanels, setVisiblePanels] = useState<PanelVisibility>({ code: true, visualizer: true, diagram: true, notes: true, output: true, filesystem: true })
+  const initialLayoutPrefs = useMemo(() => getStoredLayoutPrefs(), [])
+  const [viewMode, setViewMode] = useState<ViewMode>(initialLayoutPrefs.viewMode)
+  const [visiblePanels, setVisiblePanels] = useState<PanelVisibility>(() => ({ ...initialLayoutPrefs.visiblePanels }))
+  const [leftSidebarCollapsed, setLeftSidebarCollapsed] = useState<boolean>(initialLayoutPrefs.leftSidebarCollapsed)
+  const [centerVerticalSplit, setCenterVerticalSplit] = useState<number>(70) // % code editor in minimal mode center
+  const [structureColWidth, setStructureColWidth] = useState<number>(360)    // px width of structure column in minimal mode
   // notes is now a tab inside Structure, not a separate panel — kept in type for compat
   const [activeFilesystemId, setActiveFilesystemId] = useState<string>('default')
   const [currentWorkingDir, setCurrentWorkingDir] = useState<string>('/')
@@ -389,6 +394,7 @@ export default function App() {
   useEffect(() => { persistConsoleFontSize(consoleFontSize) }, [consoleFontSize])
   useEffect(() => { persistWatches(watches); watchesRef.current = watches }, [watches])
   useEffect(() => { persistNamedLayouts(savedLayouts) }, [savedLayouts])
+  useEffect(() => { persistLayoutPrefs({ viewMode, visiblePanels, leftSidebarCollapsed }) }, [viewMode, visiblePanels, leftSidebarCollapsed])
 
   useEffect(() => startVersionPolling(() => setUpdateAvailable(true)), [])
 
@@ -469,6 +475,11 @@ export default function App() {
       } else if (drag.type === 'row-rightcol' && rightColRef.current) {
         const rect = rightColRef.current.getBoundingClientRect()
         setRightColSplit(Math.max(20, Math.min(80, ((e.clientY - rect.top) / rect.height) * 100)))
+      } else if (drag.type === 'row-center' && centerRef.current) {
+        const rect = centerRef.current.getBoundingClientRect()
+        setCenterVerticalSplit(Math.max(20, Math.min(85, ((e.clientY - rect.top) / rect.height) * 100)))
+      } else if (drag.type === 'col-structure') {
+        setStructureColWidth(Math.max(240, Math.min(720, drag.startVal + (drag.startX - e.clientX))))
       }
     }
     const onMouseUp = () => { resizeDragRef.current = null; document.body.style.cursor = ''; document.body.style.userSelect = '' }
@@ -1038,19 +1049,37 @@ export default function App() {
   }
 
   const handleRestoreDefaults = () => {
-    setVisiblePanels({ code: true, visualizer: true, diagram: true, notes: true, output: true, filesystem: true })
+    setViewMode('minimal')
+    setVisiblePanels({ ...MINIMAL_VISIBLE_PANELS })
+    setLeftSidebarCollapsed(true)
     setLeftWidth(55)
     setFsSidebarWidth(224)
     setLeftSidebarSplit(55)
     setInspectorSplit(50)
     setRightColSplit(42)
+    setCenterVerticalSplit(70)
+    setStructureColWidth(360)
+    setIsPanelMenuOpen(false)
+  }
+
+  const handleSelectViewMode = (mode: ViewMode) => {
+    setViewMode(mode)
+    setVisiblePanels(defaultPanelsForView(mode))
+    setLeftSidebarCollapsed(mode === 'minimal')
+    if (mode === 'minimal') {
+      setCenterVerticalSplit(70)
+      setStructureColWidth(360)
+    }
     setIsPanelMenuOpen(false)
   }
 
   const handleSaveLayout = () => {
     const name = window.prompt('Name for this layout:')
     if (!name?.trim()) return
-    const layout: NamedLayout = { name: name.trim(), visiblePanels: { ...visiblePanels }, leftWidth, fsSidebarWidth, leftSidebarSplit, inspectorSplit, rightColSplit, bookPanelWidth }
+    const layout: NamedLayout = {
+      name: name.trim(), visiblePanels: { ...visiblePanels }, leftWidth, fsSidebarWidth, leftSidebarSplit, inspectorSplit, rightColSplit, bookPanelWidth,
+      viewMode, leftSidebarCollapsed, centerVerticalSplit, structureColWidth,
+    }
     setSavedLayouts(prev => [...prev.filter(l => l.name !== layout.name), layout])
   }
 
@@ -1062,6 +1091,10 @@ export default function App() {
     setInspectorSplit(layout.inspectorSplit)
     setRightColSplit(layout.rightColSplit)
     setBookPanelWidth(layout.bookPanelWidth)
+    if (layout.viewMode) setViewMode(layout.viewMode)
+    if (typeof layout.leftSidebarCollapsed === 'boolean') setLeftSidebarCollapsed(layout.leftSidebarCollapsed)
+    if (typeof layout.centerVerticalSplit === 'number') setCenterVerticalSplit(layout.centerVerticalSplit)
+    if (typeof layout.structureColWidth === 'number') setStructureColWidth(layout.structureColWidth)
     setIsPanelMenuOpen(false)
   }
 
@@ -1858,6 +1891,177 @@ exec(code_obj, globals())
 
   // ── Render ───────────────────────────────────────────────────────────────
 
+  const structurePanelInner = (
+    <div className="flex-1 flex flex-col overflow-hidden min-h-0">
+      <div className="bg-slate-900 py-2 px-4 border-b border-slate-700 flex-shrink-0">
+        <div className="flex items-center justify-between gap-2">
+          <div className="font-bold uppercase tracking-wider text-xs text-emerald-400">
+            {isPygameRunActive ? 'Pygame Canvas' : isTurtleCanvasRunActive ? 'Turtle Canvas' : 'Structure'}
+          </div>
+          <div className="flex items-center gap-2">
+            {!isPygameRunActive && !isTurtleCanvasRunActive && (
+              <div className="flex rounded overflow-hidden border border-slate-700 text-[11px]">
+                {(['outline', 'hierarchy', 'uml', ...(turtleSvg ? ['turtle'] : []), 'notes', ...(appSettings.useFixedInputs ? ['inputs'] : [])] as DiagramView[]).map(view => (
+                  <button type="button" key={view} onClick={() => setDiagramView(view)}
+                    className={`px-2.5 py-1 ${diagramView === view ? 'bg-emerald-700 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}>
+                    {view === 'outline' ? 'Outline' : view === 'hierarchy' ? 'Hierarchy' : view === 'uml' ? 'Class' : view === 'turtle' ? 'Turtle' : view === 'notes' ? 'Notes' : 'Inputs'}
+                  </button>
+                ))}
+              </div>
+            )}
+            {!isPygameRunActive && !isTurtleCanvasRunActive && diagramView !== 'outline' && diagramView !== 'turtle' && diagramView !== 'notes' && diagramView !== 'inputs' && (
+              <DiagramFontControls fontSize={diagramFontSize} onDecrease={decreaseDiagramFontSize} onIncrease={increaseDiagramFontSize}
+                canDecrease={diagramFontSize > DIAGRAM_FONT_MIN} canIncrease={diagramFontSize < DIAGRAM_FONT_MAX} />
+            )}
+          </div>
+        </div>
+      </div>
+      {!isPygameRunActive && !isTurtleCanvasRunActive && diagramView === 'turtle' && turtleSvgHistory.length > 0 && (
+        <TurtleScrubber
+          history={turtleSvgHistory}
+          step={turtleScrubStep}
+          isPlaying={turtleScrubPlaying}
+          speed={turtleScrubSpeed}
+          onStepChange={s => { setTurtleScrubStep(s); turtleScrubLockedRef.current = s < turtleSvgHistory.length - 1 }}
+          onTogglePlay={() => { if (turtleScrubPlaying) { setTurtleScrubPlaying(false) } else { turtleScrubLockedRef.current = true; if (turtleScrubStep >= turtleSvgHistory.length - 1) setTurtleScrubStep(0); setTurtleScrubPlaying(true) } }}
+          onSpeedChange={s => setTurtleScrubSpeed(s)}
+          onClose={() => { setTurtleScrubPlaying(false); closeScrubberAndClear() }}
+        />
+      )}
+      <div className="flex-1 overflow-auto p-4 relative min-h-0">
+        <div className={`mx-auto flex h-full w-full max-w-6xl flex-col ${!(isPygameRunActive || isTurtleCanvasRunActive) ? 'hidden' : ''}`}>
+          <div className="flex-1 rounded-xl border border-slate-600 bg-slate-950/80 p-4">
+            <canvas id="canvas" ref={mainThreadCanvasRef}
+              className="mx-auto block max-h-full max-w-full rounded bg-slate-950"
+              style={{ imageRendering: 'pixelated', outline: 'none' }}
+              onPointerDown={() => mainThreadCanvasRef.current?.focus()} />
+          </div>
+        </div>
+        {!(isPygameRunActive || isTurtleCanvasRunActive) && (
+          diagramView === 'turtle' ? (
+            <div className="mx-auto h-full min-h-[280px] flex items-start justify-center">
+              <div dangerouslySetInnerHTML={{ __html: displayedTurtleSvg }} className="max-w-full" />
+            </div>
+          ) : diagramView === 'notes' ? (
+            <div className="h-full flex flex-col">
+              <div className="flex items-start justify-between gap-3 mb-3">
+                <div>
+                  <h3 className="text-sm font-bold text-white mb-0.5">{activeInsightHeading}</h3>
+                  <div className="text-[11px] uppercase tracking-wider text-slate-500">
+                    {hasCustomInsightNote ? 'Custom Note' : effectiveNoteKey === GLOBAL_NOTE_KEY ? 'Module Notes' : 'Default Note'}
+                  </div>
+                </div>
+                <div className="flex items-center gap-1.5 flex-shrink-0">
+                  {!isInsightEditing ? (
+                    <IconButton title="Edit note" onClick={beginEditingInsightNote}>
+                      <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.232 5.232l3.536 3.536M9 13l6.232-6.232a2.5 2.5 0 113.536 3.536L12.536 16.536A4 4 0 019.707 17.707L7 18l.293-2.707A4 4 0 018.464 12.536L14.696 6.304" />
+                      </svg>
+                    </IconButton>
+                  ) : (
+                    <IconButton title="Save note" onClick={() => saveInsightNote(effectiveNoteKey, noteDraft, true)}>
+                      <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
+                      </svg>
+                    </IconButton>
+                  )}
+                  {!isRunning && (
+                    <IconButton title="Insert/update docstring in code" onClick={handleInsertDocstring} disabled={!activeInsightText && !noteDraft}>
+                      <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
+                      </svg>
+                    </IconButton>
+                  )}
+                  <IconButton title="Reset note to original" onClick={resetInsightNote}>
+                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h5M20 20v-5h-5M5.64 18.36A9 9 0 1020 12" />
+                    </svg>
+                  </IconButton>
+                  <IconButton title="Export notes" onClick={() => setShowExportDialog(true)} disabled={!canExportNotes}>
+                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 16V4m0 12l4-4m-4 4l-4-4M5 20h14" />
+                    </svg>
+                  </IconButton>
+                </div>
+              </div>
+              <div className="flex min-h-0 flex-1 flex-col">
+                {isInsightEditing ? (
+                  <textarea value={noteDraft} onChange={e => setNoteDraft(e.target.value)}
+                    className="insight-note-editor min-h-0 flex-1"
+                    placeholder="Write your note here..." />
+                ) : (
+                  <p className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap text-slate-300 leading-relaxed text-sm">
+                    {activeInsightText || <span className="text-slate-500 italic">No note yet. Click the pencil icon to add one.</span>}
+                  </p>
+                )}
+                <div className="mt-3 text-[11px] text-slate-500">
+                  {isInsightEditing
+                    ? 'Click save or move to another definition to commit.'
+                    : isRunning
+                      ? hasCustomInsightNote ? 'Your saved note is shown here.' : 'The built-in note is shown until you save your own version.'
+                      : 'Move the cursor inside a function or class to edit its note, or edit the module-level note here.'}
+                </div>
+              </div>
+              {showExportDialog && (
+                <div className="export-modal-backdrop" onClick={() => setShowExportDialog(false)}>
+                  <div className="export-modal-card" onClick={e => e.stopPropagation()}>
+                    <div className="text-sm font-bold text-white">Export Notes</div>
+                    <p className="mt-2 text-sm text-slate-300 leading-relaxed">Choose a plain text revision outline or an annotated Python file with your notes inserted as docstrings.</p>
+                    <div className="mt-4 flex flex-col gap-3">
+                      <button type="button" onClick={() => downloadNotesExport('comments')}
+                        className="rounded border border-slate-600 bg-slate-900 px-4 py-3 text-left transition-colors hover:border-emerald-400">
+                        <div className="font-semibold text-slate-200">Comments Only</div>
+                        <div className="mt-1 text-xs text-slate-400">Exports class and function interfaces with the notes listed underneath in code order.</div>
+                      </button>
+                      <button type="button" onClick={() => downloadNotesExport('docstrings')}
+                        className="rounded border border-slate-600 bg-slate-900 px-4 py-3 text-left transition-colors hover:border-emerald-400">
+                        <div className="font-semibold text-slate-200">Docstrings</div>
+                        <div className="mt-1 text-xs text-slate-400">Exports the current Python code with each note inserted as a function docstring.</div>
+                      </button>
+                    </div>
+                    <div className="mt-4 flex justify-end">
+                      <button type="button" onClick={() => setShowExportDialog(false)}
+                        className="rounded border border-slate-600 px-3 py-1.5 text-sm font-semibold text-slate-300 transition-colors hover:border-slate-400">
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : diagramView === 'inputs' && appSettings.useFixedInputs ? (
+            <div className="h-full flex flex-col gap-2">
+              <p className="text-xs text-slate-400 leading-relaxed flex-shrink-0">
+                One input value per line. Fed automatically to <code className="rounded bg-slate-700 px-1 text-emerald-300">input()</code> calls in order. Unused lines are preserved for re-runs.
+              </p>
+              <textarea
+                value={fixedInputsText}
+                onChange={e => {
+                  setFixedInputsText(e.target.value)
+                  persistFixedInputs(activeFilesystemId, e.target.value)
+                }}
+                className="flex-1 min-h-0 bg-slate-900 border border-slate-700 rounded p-2 font-mono text-xs text-slate-200 resize-none focus:outline-none focus:ring-1 focus:ring-emerald-500 leading-relaxed"
+                placeholder="Enter inputs, one per line..."
+                spellCheck={false}
+              />
+            </div>
+          ) : (
+            <div className="mx-auto h-full min-h-[280px]">
+              {diagramView === 'uml' ? (
+                <UmlDiagram currentClass={currentClass} diagramModel={diagramModel} fontSize={diagramFontSize} />
+              ) : diagramView === 'outline' ? (
+                <OutlinePanel outlineModel={outlineModel} expandedIds={outlineExpandedIds}
+                  setExpandedIds={setOutlineExpandedIds} onJumpToLine={jumpToSourceLine} currentLine={currentLine} />
+              ) : (
+                <HierarchyChart currentFunc={currentFunc} hierarchyModel={hierarchyModel} fontSize={diagramFontSize} />
+              )}
+            </div>
+          )
+        )}
+      </div>
+    </div>
+  )
+
   return (
     <div className="h-screen w-screen flex flex-col overflow-hidden text-sm">
       {/* Header */}
@@ -1878,7 +2082,9 @@ exec(code_obj, globals())
             savedLayouts={savedLayouts}
             onSaveLayout={handleSaveLayout}
             onRestoreLayout={handleRestoreLayout}
-            onDeleteLayout={handleDeleteLayout} />
+            onDeleteLayout={handleDeleteLayout}
+            viewMode={viewMode}
+            onSelectViewMode={handleSelectViewMode} />
           <RuntimeSettingsMenu menuRef={runtimeMenuRef} isOpen={isRuntimeMenuOpen}
             onToggleOpen={() => { setIsPanelMenuOpen(false); setIsRuntimeMenuOpen(o => !o) }}
             runtimePreference={runtimePreference} selectedRuntime={selectedRuntime}
@@ -2182,11 +2388,46 @@ exec(code_obj, globals())
       <div ref={mainContainerRef} className="flex-1 flex overflow-hidden p-2 gap-1.5">
 
         {/* LEFT SIDEBAR: File System (top) + Variable Inspector (bottom) */}
-        {hasLeftSidebar && (
+        {hasLeftSidebar && leftSidebarCollapsed && (
+          <div className="flex-shrink-0 bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden"
+            style={{ width: 32 }}>
+            <button type="button" title="Expand sidebar"
+              onClick={() => setLeftSidebarCollapsed(false)}
+              className="flex flex-col items-center gap-2 py-2 text-slate-400 hover:text-slate-200 transition-colors">
+              <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 5l7 7-7 7M5 5l7 7-7 7" />
+              </svg>
+              {visiblePanels.filesystem && (
+                <svg className="h-4 w-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <title>File System</title>
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" />
+                </svg>
+              )}
+              {visiblePanels.visualizer && (
+                <svg className="h-4 w-4 text-sky-500/70" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <title>Variables</title>
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 6h16M4 12h10M4 18h7" />
+                </svg>
+              )}
+            </button>
+          </div>
+        )}
+        {hasLeftSidebar && !leftSidebarCollapsed && (
           <>
             <div ref={leftSidebarRef}
               className="flex-shrink-0 bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden"
               style={{ width: fsSidebarWidth }}>
+
+              {/* Sidebar collapse strip */}
+              <div className="bg-slate-900 px-2 py-1 border-b border-slate-700 flex items-center justify-end flex-shrink-0">
+                <button type="button" title="Collapse sidebar"
+                  onClick={() => setLeftSidebarCollapsed(true)}
+                  className="text-slate-400 hover:text-slate-200 p-0.5">
+                  <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
+                  </svg>
+                </button>
+              </div>
 
               {/* File System */}
               {visiblePanels.filesystem && (
@@ -2343,14 +2584,16 @@ exec(code_obj, globals())
           </>
         )}
 
-        {/* CENTER: Code Editor + Right Column */}
-        {(visiblePanels.code || hasRightCol) && (
-        <div ref={centerRef} className="flex-1 flex overflow-hidden gap-1.5 min-w-0">
+        {/* CENTER: Code Editor + Right Column (Developer) OR Code top / Console bottom (Minimal) */}
+        {(visiblePanels.code || visiblePanels.output || (visiblePanels.diagram && viewMode === 'developer')) && (
+        <div ref={centerRef} className={`flex-1 ${viewMode === 'minimal' ? 'flex flex-col' : 'flex'} overflow-hidden gap-1.5 min-w-0`}>
 
         {/* Code Editor */}
         {visiblePanels.code && (
           <div className="bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden flex-shrink-0"
-            style={{ width: hasRightCol ? `calc(${leftWidth}% - 6px)` : '100%' }}>
+            style={viewMode === 'minimal'
+              ? { height: visiblePanels.output ? `calc(${centerVerticalSplit}% - 3px)` : '100%', width: '100%' }
+              : { width: hasRightCol ? `calc(${leftWidth}% - 6px)` : '100%' }}>
             {/* Code editor area */}
             <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
               <input ref={fileInputRef} type="file" className="hidden" aria-hidden="true" onChange={handleCodeFileChange} />
@@ -2450,22 +2693,31 @@ exec(code_obj, globals())
           </div>
         )}
 
-        {/* Resize handle: code ↔ right column */}
-        {visiblePanels.code && hasRightCol && (
+        {/* Resize handle: code ↔ right column (developer) or code ↔ console row (minimal) */}
+        {viewMode === 'developer' && visiblePanels.code && hasRightCol && (
           <div className="resize-handle-col"
             onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'col-main', startX: e.clientX, startY: e.clientY, startVal: leftWidth }; document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none' }}>
             <div className="resize-bar" style={{ width: '3px', height: '48px' }} />
           </div>
         )}
+        {viewMode === 'minimal' && visiblePanels.code && visiblePanels.output && (
+          <div className="resize-handle-row"
+            onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'row-center', startX: e.clientX, startY: e.clientY, startVal: centerVerticalSplit }; document.body.style.cursor = 'row-resize'; document.body.style.userSelect = 'none' }}>
+            <div className="resize-bar" style={{ height: '3px', width: '48px' }} />
+          </div>
+        )}
 
-        {/* RIGHT COLUMN: Console Output (top) + Structure (bottom) */}
-        {hasRightCol && (
-          <div ref={rightColRef} className="flex-1 bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden min-w-0">
+        {/* RIGHT COLUMN (developer) — Console Output (top) + Structure (bottom).
+            In minimal mode, the right column is just the Console rendered directly inside the flex-col center. */}
+        {(viewMode === 'developer' ? hasRightCol : visiblePanels.output) && (
+          <div ref={rightColRef}
+            className={`${viewMode === 'minimal' && visiblePanels.code ? 'flex-shrink-0' : 'flex-1'} bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden min-w-0`}
+            style={viewMode === 'minimal' && visiblePanels.code ? { height: `calc(${100 - centerVerticalSplit}% - 3px)`, width: '100%' } : undefined}>
 
             {/* Console Output */}
             {visiblePanels.output && (
               <div className="flex flex-col overflow-hidden min-h-0 flex-shrink-0"
-                style={{ height: hasConsoleAndStructure ? `${rightColSplit}%` : '100%' }}>
+                style={{ height: viewMode === 'developer' && hasConsoleAndStructure ? `${rightColSplit}%` : '100%' }}>
                 <div className="bg-slate-900 py-2 px-3 border-b border-slate-700 flex-shrink-0 flex items-center justify-between gap-2">
                   <div className="font-bold uppercase tracking-wider text-xs text-teal-400">Console Output</div>
                   <div className="flex items-center gap-1.5">
@@ -2525,186 +2777,16 @@ exec(code_obj, globals())
               </div>
             )}
 
-            {/* Resize handle: console ↔ structure */}
-            {hasConsoleAndStructure && (
+            {/* Resize handle: console ↔ structure (developer mode only — structure is its own column in minimal) */}
+            {viewMode === 'developer' && hasConsoleAndStructure && (
               <div className="resize-handle-row flex-shrink-0"
                 onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'row-rightcol', startX: e.clientX, startY: e.clientY, startVal: rightColSplit }; document.body.style.cursor = 'row-resize'; document.body.style.userSelect = 'none' }}>
                 <div className="resize-bar" style={{ height: '3px', width: '48px' }} />
               </div>
             )}
 
-            {/* Structure panel */}
-            {visiblePanels.diagram && (
-              <div className="flex-1 flex flex-col overflow-hidden min-h-0">
-                <div className="bg-slate-900 py-2 px-4 border-b border-slate-700 flex-shrink-0">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="font-bold uppercase tracking-wider text-xs text-emerald-400">
-                      {isPygameRunActive ? 'Pygame Canvas' : isTurtleCanvasRunActive ? 'Turtle Canvas' : 'Structure'}
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {!isPygameRunActive && !isTurtleCanvasRunActive && (
-                        <div className="flex rounded overflow-hidden border border-slate-700 text-[11px]">
-                          {(['outline', 'hierarchy', 'uml', ...(turtleSvg ? ['turtle'] : []), 'notes', ...(appSettings.useFixedInputs ? ['inputs'] : [])] as DiagramView[]).map(view => (
-                            <button type="button" key={view} onClick={() => setDiagramView(view)}
-                              className={`px-2.5 py-1 ${diagramView === view ? 'bg-emerald-700 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}>
-                              {view === 'outline' ? 'Outline' : view === 'hierarchy' ? 'Hierarchy' : view === 'uml' ? 'Class' : view === 'turtle' ? 'Turtle' : view === 'notes' ? 'Notes' : 'Inputs'}
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                      {!isPygameRunActive && !isTurtleCanvasRunActive && diagramView !== 'outline' && diagramView !== 'turtle' && diagramView !== 'notes' && diagramView !== 'inputs' && (
-                        <DiagramFontControls fontSize={diagramFontSize} onDecrease={decreaseDiagramFontSize} onIncrease={increaseDiagramFontSize}
-                          canDecrease={diagramFontSize > DIAGRAM_FONT_MIN} canIncrease={diagramFontSize < DIAGRAM_FONT_MAX} />
-                      )}
-                    </div>
-                  </div>
-                </div>
-                {!isPygameRunActive && !isTurtleCanvasRunActive && diagramView === 'turtle' && turtleSvgHistory.length > 0 && (
-                  <TurtleScrubber
-                    history={turtleSvgHistory}
-                    step={turtleScrubStep}
-                    isPlaying={turtleScrubPlaying}
-                    speed={turtleScrubSpeed}
-                    onStepChange={s => { setTurtleScrubStep(s); turtleScrubLockedRef.current = s < turtleSvgHistory.length - 1 }}
-                    onTogglePlay={() => { if (turtleScrubPlaying) { setTurtleScrubPlaying(false) } else { turtleScrubLockedRef.current = true; if (turtleScrubStep >= turtleSvgHistory.length - 1) setTurtleScrubStep(0); setTurtleScrubPlaying(true) } }}
-                    onSpeedChange={s => setTurtleScrubSpeed(s)}
-                    onClose={() => { setTurtleScrubPlaying(false); closeScrubberAndClear() }}
-                  />
-                )}
-                <div className="flex-1 overflow-auto p-4 relative min-h-0">
-                  {/* Canvas — always in DOM so ref is valid on re-run */}
-                  <div className={`mx-auto flex h-full w-full max-w-6xl flex-col ${!(isPygameRunActive || isTurtleCanvasRunActive) ? 'hidden' : ''}`}>
-                    <div className="flex-1 rounded-xl border border-slate-600 bg-slate-950/80 p-4">
-                      <canvas id="canvas" ref={mainThreadCanvasRef}
-                        className="mx-auto block max-h-full max-w-full rounded bg-slate-950"
-                        style={{ imageRendering: 'pixelated', outline: 'none' }}
-                        onPointerDown={() => mainThreadCanvasRef.current?.focus()} />
-                    </div>
-                  </div>
-                  {!(isPygameRunActive || isTurtleCanvasRunActive) && (
-                    diagramView === 'turtle' ? (
-                      <div className="mx-auto h-full min-h-[280px] flex items-start justify-center">
-                        <div dangerouslySetInnerHTML={{ __html: displayedTurtleSvg }} className="max-w-full" />
-                      </div>
-                    ) : diagramView === 'notes' ? (
-                      <div className="h-full flex flex-col">
-                        <div className="flex items-start justify-between gap-3 mb-3">
-                          <div>
-                            <h3 className="text-sm font-bold text-white mb-0.5">{activeInsightHeading}</h3>
-                            <div className="text-[11px] uppercase tracking-wider text-slate-500">
-                              {hasCustomInsightNote ? 'Custom Note' : effectiveNoteKey === GLOBAL_NOTE_KEY ? 'Module Notes' : 'Default Note'}
-                            </div>
-                          </div>
-                          <div className="flex items-center gap-1.5 flex-shrink-0">
-                            {!isInsightEditing ? (
-                              <IconButton title="Edit note" onClick={beginEditingInsightNote}>
-                                <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.232 5.232l3.536 3.536M9 13l6.232-6.232a2.5 2.5 0 113.536 3.536L12.536 16.536A4 4 0 019.707 17.707L7 18l.293-2.707A4 4 0 018.464 12.536L14.696 6.304" />
-                                </svg>
-                              </IconButton>
-                            ) : (
-                              <IconButton title="Save note" onClick={() => saveInsightNote(effectiveNoteKey, noteDraft, true)}>
-                                <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
-                                </svg>
-                              </IconButton>
-                            )}
-                            {!isRunning && (
-                              <IconButton title="Insert/update docstring in code" onClick={handleInsertDocstring} disabled={!activeInsightText && !noteDraft}>
-                                <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
-                                </svg>
-                              </IconButton>
-                            )}
-                            <IconButton title="Reset note to original" onClick={resetInsightNote}>
-                              <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h5M20 20v-5h-5M5.64 18.36A9 9 0 1020 12" />
-                              </svg>
-                            </IconButton>
-                            <IconButton title="Export notes" onClick={() => setShowExportDialog(true)} disabled={!canExportNotes}>
-                              <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 16V4m0 12l4-4m-4 4l-4-4M5 20h14" />
-                              </svg>
-                            </IconButton>
-                          </div>
-                        </div>
-                        <div className="flex min-h-0 flex-1 flex-col">
-                          {isInsightEditing ? (
-                            <textarea value={noteDraft} onChange={e => setNoteDraft(e.target.value)}
-                              className="insight-note-editor min-h-0 flex-1"
-                              placeholder="Write your note here..." />
-                          ) : (
-                            <p className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap text-slate-300 leading-relaxed text-sm">
-                              {activeInsightText || <span className="text-slate-500 italic">No note yet. Click the pencil icon to add one.</span>}
-                            </p>
-                          )}
-                          <div className="mt-3 text-[11px] text-slate-500">
-                            {isInsightEditing
-                              ? 'Click save or move to another definition to commit.'
-                              : isRunning
-                                ? hasCustomInsightNote ? 'Your saved note is shown here.' : 'The built-in note is shown until you save your own version.'
-                                : 'Move the cursor inside a function or class to edit its note, or edit the module-level note here.'}
-                          </div>
-                        </div>
-                        {showExportDialog && (
-                          <div className="export-modal-backdrop" onClick={() => setShowExportDialog(false)}>
-                            <div className="export-modal-card" onClick={e => e.stopPropagation()}>
-                              <div className="text-sm font-bold text-white">Export Notes</div>
-                              <p className="mt-2 text-sm text-slate-300 leading-relaxed">Choose a plain text revision outline or an annotated Python file with your notes inserted as docstrings.</p>
-                              <div className="mt-4 flex flex-col gap-3">
-                                <button type="button" onClick={() => downloadNotesExport('comments')}
-                                  className="rounded border border-slate-600 bg-slate-900 px-4 py-3 text-left transition-colors hover:border-emerald-400">
-                                  <div className="font-semibold text-slate-200">Comments Only</div>
-                                  <div className="mt-1 text-xs text-slate-400">Exports class and function interfaces with the notes listed underneath in code order.</div>
-                                </button>
-                                <button type="button" onClick={() => downloadNotesExport('docstrings')}
-                                  className="rounded border border-slate-600 bg-slate-900 px-4 py-3 text-left transition-colors hover:border-emerald-400">
-                                  <div className="font-semibold text-slate-200">Docstrings</div>
-                                  <div className="mt-1 text-xs text-slate-400">Exports the current Python code with each note inserted as a function docstring.</div>
-                                </button>
-                              </div>
-                              <div className="mt-4 flex justify-end">
-                                <button type="button" onClick={() => setShowExportDialog(false)}
-                                  className="rounded border border-slate-600 px-3 py-1.5 text-sm font-semibold text-slate-300 transition-colors hover:border-slate-400">
-                                  Cancel
-                                </button>
-                              </div>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    ) : diagramView === 'inputs' && appSettings.useFixedInputs ? (
-                      <div className="h-full flex flex-col gap-2">
-                        <p className="text-xs text-slate-400 leading-relaxed flex-shrink-0">
-                          One input value per line. Fed automatically to <code className="rounded bg-slate-700 px-1 text-emerald-300">input()</code> calls in order. Unused lines are preserved for re-runs.
-                        </p>
-                        <textarea
-                          value={fixedInputsText}
-                          onChange={e => {
-                            setFixedInputsText(e.target.value)
-                            persistFixedInputs(activeFilesystemId, e.target.value)
-                          }}
-                          className="flex-1 min-h-0 bg-slate-900 border border-slate-700 rounded p-2 font-mono text-xs text-slate-200 resize-none focus:outline-none focus:ring-1 focus:ring-emerald-500 leading-relaxed"
-                          placeholder="Enter inputs, one per line..."
-                          spellCheck={false}
-                        />
-                      </div>
-                    ) : (
-                      <div className="mx-auto h-full min-h-[280px]">
-                        {diagramView === 'uml' ? (
-                          <UmlDiagram currentClass={currentClass} diagramModel={diagramModel} fontSize={diagramFontSize} />
-                        ) : diagramView === 'outline' ? (
-                          <OutlinePanel outlineModel={outlineModel} expandedIds={outlineExpandedIds}
-                            setExpandedIds={setOutlineExpandedIds} onJumpToLine={jumpToSourceLine} currentLine={currentLine} />
-                        ) : (
-                          <HierarchyChart currentFunc={currentFunc} hierarchyModel={hierarchyModel} fontSize={diagramFontSize} />
-                        )}
-                      </div>
-                    )
-                  )}
-                </div>
-              </div>
-            )}
+            {/* Structure panel (developer mode placement — minimal mode renders it as its own column below) */}
+            {viewMode === 'developer' && visiblePanels.diagram && structurePanelInner}
           </div>
         )}
 
@@ -2712,8 +2794,24 @@ exec(code_obj, globals())
         )}
         {/* end center section */}
 
+        {/* Structure column (minimal mode only) — full-height, own column to the right of center */}
+        {viewMode === 'minimal' && visiblePanels.diagram && (
+          <>
+            {(visiblePanels.code || visiblePanels.output) && (
+              <div className="resize-handle-col"
+                onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'col-structure', startX: e.clientX, startY: e.clientY, startVal: structureColWidth }; document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none' }}>
+                <div className="resize-bar" style={{ width: '3px', height: '48px' }} />
+              </div>
+            )}
+            <div className="flex-shrink-0 bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden"
+              style={{ width: structureColWidth }}>
+              {structurePanelInner}
+            </div>
+          </>
+        )}
+
         {/* Resize handle: center ↔ book panel */}
-        {hasBookPanel && !bookPanelCollapsed && (visiblePanels.code || hasRightCol) && (
+        {hasBookPanel && !bookPanelCollapsed && (visiblePanels.code || hasRightCol || (viewMode === 'minimal' && visiblePanels.diagram)) && (
           <div className="resize-handle-col"
             onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'col-bookpanel', startX: e.clientX, startY: e.clientY, startVal: bookPanelWidth }; document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none' }}>
             <div className="resize-bar" style={{ width: '3px', height: '48px' }} />

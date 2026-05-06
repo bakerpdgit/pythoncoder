@@ -1,5 +1,5 @@
 import { THEME_STORAGE_KEY, NOTES_STORAGE_KEY, SETTINGS_STORAGE_KEY } from '../constants'
-import type { Theme, AppSettings, BookNavState, InputMode, NamedLayout } from '../types'
+import type { Theme, AppSettings, BookNavState, InputMode, NamedLayout, LayoutPrefs, PanelVisibility, ViewMode } from '../types'
 
 const EDITOR_FONT_SIZE_KEY = 'coder_editor_font_size'
 const CONSOLE_FONT_SIZE_KEY = 'coder_console_font_size'
@@ -157,4 +157,55 @@ export const persistSettings = (settings: AppSettings): void => {
   } catch {
     // ignore storage errors
   }
+}
+
+const LAYOUT_PREFS_KEY = 'pythoncoder-layout-prefs'
+
+export const MINIMAL_VISIBLE_PANELS: PanelVisibility = {
+  code: true, output: true, diagram: false, filesystem: true, visualizer: true, notes: true,
+}
+
+export const DEVELOPER_VISIBLE_PANELS: PanelVisibility = {
+  code: true, output: true, diagram: true, filesystem: true, visualizer: true, notes: true,
+}
+
+export const defaultPanelsForView = (mode: ViewMode): PanelVisibility =>
+  mode === 'minimal' ? { ...MINIMAL_VISIBLE_PANELS } : { ...DEVELOPER_VISIBLE_PANELS }
+
+export const DEFAULT_LAYOUT_PREFS: LayoutPrefs = {
+  viewMode: 'minimal',
+  visiblePanels: { ...MINIMAL_VISIBLE_PANELS },
+  leftSidebarCollapsed: true,
+}
+
+const sanitisePanels = (raw: unknown): PanelVisibility | null => {
+  if (!raw || typeof raw !== 'object') return null
+  const r = raw as Record<string, unknown>
+  if (typeof r.code !== 'boolean' || typeof r.output !== 'boolean') return null
+  return {
+    code: !!r.code,
+    output: !!r.output,
+    diagram: !!r.diagram,
+    filesystem: !!r.filesystem,
+    visualizer: !!r.visualizer,
+    notes: r.notes === false ? false : true,
+  }
+}
+
+export const getStoredLayoutPrefs = (): LayoutPrefs => {
+  try {
+    const raw = localStorage.getItem(LAYOUT_PREFS_KEY)
+    if (!raw) return { ...DEFAULT_LAYOUT_PREFS, visiblePanels: { ...DEFAULT_LAYOUT_PREFS.visiblePanels } }
+    const parsed = JSON.parse(raw)
+    const viewMode: ViewMode = parsed?.viewMode === 'developer' ? 'developer' : 'minimal'
+    const panels = sanitisePanels(parsed?.visiblePanels) ?? defaultPanelsForView(viewMode)
+    const leftSidebarCollapsed = parsed?.leftSidebarCollapsed === true || (parsed?.leftSidebarCollapsed === undefined && viewMode === 'minimal')
+    return { viewMode, visiblePanels: panels, leftSidebarCollapsed }
+  } catch {
+    return { ...DEFAULT_LAYOUT_PREFS, visiblePanels: { ...DEFAULT_LAYOUT_PREFS.visiblePanels } }
+  }
+}
+
+export const persistLayoutPrefs = (prefs: LayoutPrefs): void => {
+  try { localStorage.setItem(LAYOUT_PREFS_KEY, JSON.stringify(prefs)) } catch { /* ignore */ }
 }

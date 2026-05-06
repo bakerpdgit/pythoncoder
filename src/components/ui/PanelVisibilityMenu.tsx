@@ -1,5 +1,5 @@
 import type { RefObject } from 'react'
-import type { PanelVisibility, NamedLayout } from '../../types'
+import type { PanelVisibility, NamedLayout, ViewMode } from '../../types'
 
 interface PanelOption {
   key: string
@@ -22,12 +22,15 @@ interface Props {
   onSaveLayout?: () => void
   onRestoreLayout?: (layout: NamedLayout) => void
   onDeleteLayout?: (name: string) => void
+  viewMode?: ViewMode
+  onSelectViewMode?: (mode: ViewMode) => void
 }
 
 export const PanelVisibilityMenu = ({
   menuRef, isOpen, onToggleOpen, panelOptions, visiblePanels, onTogglePanel,
   buttonHoverClass = 'hover:border-emerald-400', checkboxAccent = '#34d399', disabled = false,
   onRestoreDefaults, savedLayouts = [], onSaveLayout, onRestoreLayout, onDeleteLayout,
+  viewMode, onSelectViewMode,
 }: Props) => {
   const visibleCount = panelOptions.filter(({ key }) => visiblePanels[key as keyof PanelVisibility]).length
 
@@ -50,6 +53,29 @@ export const PanelVisibilityMenu = ({
 
       {isOpen && (
         <div className="absolute right-0 z-30 mt-2 w-64 rounded-lg border border-slate-600 bg-slate-800 p-2 shadow-2xl">
+          {onSelectViewMode && viewMode && (
+            <>
+              <div className="px-2 pb-2 text-[11px] uppercase tracking-wider text-slate-500">View</div>
+              <div className="space-y-0.5">
+                {([
+                  { key: 'minimal' as const, label: 'Minimal', desc: 'Code + console, hide-able sidebar.' },
+                  { key: 'developer' as const, label: 'Developer', desc: 'All panels, classic layout.' },
+                ]).map(({ key, label, desc }) => (
+                  <button key={key} type="button" onClick={() => onSelectViewMode(key)}
+                    className={`w-full flex items-start gap-2 rounded-md px-2 py-2 text-left transition-colors hover:bg-slate-900/70 ${viewMode === key ? 'bg-slate-900/40' : ''}`}>
+                    <span className={`mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center text-emerald-400 text-xs`}>
+                      {viewMode === key ? '✓' : ''}
+                    </span>
+                    <span className="min-w-0">
+                      <span className="block text-sm font-medium text-slate-200">{label}</span>
+                      <span className="block text-[11px] text-slate-500">{desc}</span>
+                    </span>
+                  </button>
+                ))}
+              </div>
+              <div className="my-1.5 border-t border-slate-700" />
+            </>
+          )}
           <div className="px-2 pb-2 text-[11px] uppercase tracking-wider text-slate-500">Panel Visibility</div>
           <div className="space-y-1">
             {panelOptions.map(({ key, label, description }) => {

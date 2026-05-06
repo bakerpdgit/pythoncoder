@@ -3,12 +3,19 @@ export type RuntimeKey = 'trace-worker' | 'main-thread'
 export type DiagramView = 'hierarchy' | 'outline' | 'uml' | 'turtle' | 'notes' | 'inputs'
 export type TurtleMode = 'pyo-js-turtle' | 'basthon-svg'
 export type InputMode = 'inline-console' | 'input-bar' | 'popup-dialog'
+export type ViewMode = 'minimal' | 'developer'
 
 export interface AppSettings {
   turtleMode: TurtleMode
   inputMode: InputMode
   useFixedInputs: boolean
   inlineTraceValues: boolean
+}
+
+export interface LayoutPrefs {
+  viewMode: ViewMode
+  visiblePanels: PanelVisibility
+  leftSidebarCollapsed: boolean
 }
 
 export interface NamedLayout {
@@ -20,6 +27,10 @@ export interface NamedLayout {
   inspectorSplit: number
   rightColSplit: number
   bookPanelWidth: number
+  viewMode?: ViewMode
+  leftSidebarCollapsed?: boolean
+  centerVerticalSplit?: number
+  structureColWidth?: number
 }
 
 export interface PanelVisibility {
