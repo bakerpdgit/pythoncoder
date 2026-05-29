@@ -354,6 +354,8 @@ export default function App() {
           setActiveFilesystemId(fsId)
           setCurrentWorkingDir('/')
           setVfsReloadTrigger(t => t + 1)
+          revealFilesystemPanel()
+          await autoOpenMainPy(fsId)
           return
         } catch { /* fall through to default */ }
       }
@@ -1436,6 +1438,19 @@ export default function App() {
     worker.postMessage({ type: 'run_tests', code: capturedCode, files: vfsFiles, tests: capturedTests })
   }
 
+  const revealFilesystemPanel = () => {
+    setLeftSidebarCollapsed(false)
+    setVisiblePanels(prev => prev.filesystem ? prev : { ...prev, filesystem: true })
+  }
+
+  const autoOpenMainPy = async (fsId: string) => {
+    const entry = await getEntryByPath(fsId, '/main.py')
+    if (entry?.content) {
+      const text = new TextDecoder().decode(entry.content)
+      loadCodeText(text, 'main.py', '/main.py')
+    }
+  }
+
   const importLocalFiles = async (fileMap: Map<string, ArrayBuffer>, sourceName: string) => {
     const bookJsonBuf = fileMap.get('book.json')
     if (bookJsonBuf) {
@@ -1474,6 +1489,8 @@ export default function App() {
       clearEditorForSwitch()
       setActiveFilesystemId(fsId)
       setCurrentWorkingDir('/')
+      revealFilesystemPanel()
+      await autoOpenMainPy(fsId)
     }
   }
 
