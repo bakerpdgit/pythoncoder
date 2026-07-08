@@ -134,6 +134,18 @@ html[data-theme="light"] .hover\:text-white:hover { color: #0f172a !important; }
 html[data-theme="light"] .hover\:border-slate-400:hover { border-color: #94a3b8 !important; }
 html[data-theme="light"] .hover\:bg-slate-600:hover { background-color: #e2e8f0 !important; }
 
+/* Warning banner inside confirm dialogs — readable in both themes. */
+.confirm-warning {
+  background: rgba(251, 191, 36, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  color: #fcd34d;
+}
+html[data-theme="light"] .confirm-warning {
+  background: rgba(251, 191, 36, 0.2);
+  border-color: rgba(180, 83, 9, 0.5);
+  color: #92400e;
+}
+
 .icon-button {
   display: inline-flex;
   align-items: center;

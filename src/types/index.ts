@@ -63,6 +63,13 @@ export interface VFSEntry {
   modifiedAt: number
 }
 
+// A filesystem mutation to mirror onto a connected local OS folder.
+export type LocalFolderSyncOp =
+  | { kind: 'write'; path: string; content: ArrayBuffer }
+  | { kind: 'mkdir'; path: string }
+  | { kind: 'delete'; path: string }
+  | { kind: 'rename'; path: string; newName: string }
+
 export interface VFSFile {
   path: string
   content: ArrayBuffer

@@ -6,6 +6,7 @@ import {
 } from '../utils/bookLoader'
 import { listFilesystems, getEntryByPath, getAllFiles } from '../utils/virtualFS'
 import { TestResultsBar } from './TestResultsBar'
+import { useDialogs } from './dialogs/DialogProvider'
 import TesterWorker from '../workers/tester.worker.ts?worker'
 
 interface Props {
@@ -129,6 +130,7 @@ function CompletedTick() {
 }
 
 export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClose, testResult, isTestRunning, testStatus, onClearTestResult, completedChallenges, isCollapsed, onToggleCollapse }: Props) {
+  const dialogs = useDialogs()
   const [manifest, setManifest] = useState<BookManifest | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -330,15 +332,19 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
     if (adj) enterChallenge(adj)
   }, [manifest, navState.activeChallengeId, enterChallenge])
 
-  const handleReset = useCallback(() => {
+  const handleReset = useCallback(async () => {
     setShowDotMenu(false)
     if (!navState.activeChallengeId || !manifest) return
     const challenge = findChallenge(manifest, navState.activeChallengeId)
     if (!challenge) return
-    if (!window.confirm('Reset this challenge? Your edits will be lost.')) return
+    if (!(await dialogs.confirm({
+      title: 'Reset challenge',
+      message: 'Reset this challenge? Your edits will be lost.',
+      confirmLabel: 'Reset', danger: true,
+    }))) return
     onEnterChallenge(navState.currentBookUrl, challenge, true)
     setChallengeHasFs(false)
-  }, [navState, manifest, onEnterChallenge])
+  }, [navState, manifest, onEnterChallenge, dialogs])
 
   const isCompleted = useCallback((challengeId: string) =>
     completedChallenges[`${navState.rootUrl}::${challengeId}`] === true,
@@ -454,7 +460,7 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
                     Decrease font size
                   </button>
                   <div className="border-t border-slate-700 my-1" />
-                  <button type="button" onClick={handleReset} disabled={!challengeHasFs}
+                  <button type="button" onClick={() => void handleReset()} disabled={!challengeHasFs}
                     className="w-full text-left px-3 py-1.5 hover:bg-slate-700 text-slate-300 disabled:text-slate-600 disabled:cursor-not-allowed transition-colors">
                     Reset challenge
                   </button>

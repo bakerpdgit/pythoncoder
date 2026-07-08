@@ -2,6 +2,8 @@
 interface FileSystemHandle {
   queryPermission(descriptor?: { mode?: 'read' | 'readwrite' }): Promise<PermissionState>
   requestPermission(descriptor?: { mode?: 'read' | 'readwrite' }): Promise<PermissionState>
+  // Chromium-only in-place rename/move. Optional: not implemented everywhere.
+  move?(newName: string): Promise<void>
 }
 
 interface FileSystemDirectoryHandle {

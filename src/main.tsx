@@ -1,6 +1,7 @@
 import { createRoot } from 'react-dom/client'
 import './styles/index.css'
 import App from './App'
+import { DialogProvider } from './components/dialogs/DialogProvider'
 
 // Monaco cancels pending language-service operations whenever the editor model
 // changes (e.g. on filesystem switch). Those cancellations surface as unhandled
@@ -22,4 +23,8 @@ window.addEventListener('error', (event) => {
   }
 }, { capture: true })
 
-createRoot(document.getElementById('root')!).render(<App />)
+createRoot(document.getElementById('root')!).render(
+  <DialogProvider>
+    <App />
+  </DialogProvider>
+)

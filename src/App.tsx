@@ -52,11 +52,13 @@ import {
 import type {
   Theme, RuntimeKey, PanelVisibility, InputRequest, SabRef, SimState, InspectorPath,
   StructureModel, DiagramModel, HierarchyModel, OutlineModel, DiagramView, VFSEntry,
+  LocalFolderSyncOp,
   AppSettings, BookNavState, BookChallenge, NamedLayout, InspectorNode,
   OverallTestResult, TesterRunOutput, ViewMode,
 } from './types'
 import { evaluateAll } from './utils/testMatcher'
 import { startVersionPolling } from './utils/versionCheck'
+import { useDialogs } from './components/dialogs/DialogProvider'
 
 async function readDirectoryToMap(handle: FileSystemDirectoryHandle, prefix = ''): Promise<Map<string, ArrayBuffer>> {
   const map = new Map<string, ArrayBuffer>()
@@ -82,6 +84,63 @@ async function writeFileToFolderHandle(root: FileSystemDirectoryHandle, vfsPath:
   const w = await fh.createWritable()
   await w.write(content)
   await w.close()
+}
+
+// Resolve the parent directory handle for a VFS path, returning the final segment name.
+async function resolveParentDir(root: FileSystemDirectoryHandle, vfsPath: string, create: boolean): Promise<{ dir: FileSystemDirectoryHandle; name: string }> {
+  const parts = vfsPath.replace(/^\//, '').split('/')
+  const name = parts.pop()!
+  let dir = root
+  for (const part of parts) dir = await dir.getDirectoryHandle(part, { create })
+  return { dir, name }
+}
+
+async function mkdirInFolderHandle(root: FileSystemDirectoryHandle, vfsPath: string): Promise<void> {
+  const parts = vfsPath.replace(/^\//, '').split('/').filter(Boolean)
+  let dir = root
+  for (const part of parts) dir = await dir.getDirectoryHandle(part, { create: true })
+}
+
+async function deleteFromFolderHandle(root: FileSystemDirectoryHandle, vfsPath: string): Promise<void> {
+  const { dir, name } = await resolveParentDir(root, vfsPath, false)
+  await dir.removeEntry(name, { recursive: true })
+}
+
+async function copyDirContents(src: FileSystemDirectoryHandle, dst: FileSystemDirectoryHandle): Promise<void> {
+  for await (const [name, entry] of src) {
+    if (entry.kind === 'directory') {
+      const sub = await dst.getDirectoryHandle(name, { create: true })
+      await copyDirContents(entry as FileSystemDirectoryHandle, sub)
+    } else {
+      const buf = await (await (entry as FileSystemFileHandle).getFile()).arrayBuffer()
+      const fh = await dst.getFileHandle(name, { create: true })
+      const w = await fh.createWritable()
+      await w.write(buf)
+      await w.close()
+    }
+  }
+}
+
+async function renameInFolderHandle(root: FileSystemDirectoryHandle, oldPath: string, newName: string): Promise<void> {
+  const { dir, name } = await resolveParentDir(root, oldPath, false)
+  let handle: FileSystemHandle
+  try { handle = await dir.getFileHandle(name) }
+  catch { handle = await dir.getDirectoryHandle(name) }
+  // Prefer the native in-place rename where available (Chromium).
+  if (typeof handle.move === 'function') { await handle.move(newName); return }
+  // Fallback: copy to the new name, then remove the original.
+  if (handle.kind === 'file') {
+    const buf = await (await (handle as FileSystemFileHandle).getFile()).arrayBuffer()
+    const fh = await dir.getFileHandle(newName, { create: true })
+    const w = await fh.createWritable()
+    await w.write(buf)
+    await w.close()
+    await dir.removeEntry(name)
+  } else {
+    const newDir = await dir.getDirectoryHandle(newName, { create: true })
+    await copyDirContents(handle as FileSystemDirectoryHandle, newDir)
+    await dir.removeEntry(name, { recursive: true })
+  }
 }
 
 const MONACO_DARK_THEME: MonacoEditor.IStandaloneThemeData = {
@@ -122,6 +181,7 @@ const PYTHON_KEYWORDS = new Set([
 ])
 
 export default function App() {
+  const dialogs = useDialogs()
   const [codeText, setCodeText] = useState('')
   const [theme, setTheme] = useState<Theme>(() => getStoredTheme())
   const [noteOverrides, setNoteOverrides] = useState<Record<string, string>>(() => getStoredNoteOverrides())
@@ -186,6 +246,8 @@ export default function App() {
   const [isRuntimeMenuOpen, setIsRuntimeMenuOpen] = useState(false)
   const [isQuickSettingsOpen, setIsQuickSettingsOpen] = useState(false)
   const [fixedInputsText, setFixedInputsText] = useState<string>('')
+  // Active tab of the console panel. Only shows as tabs when fixed inputs are on.
+  const [consoleTab, setConsoleTab] = useState<'console' | 'inputs'>('console')
   const [popupInputValue, setPopupInputValue] = useState('')
   const [diagramView, setDiagramView] = useState<DiagramView>('outline')
   const [outlineExpandedIds, setOutlineExpandedIds] = useState<Set<string>>(() => new Set())
@@ -231,6 +293,8 @@ export default function App() {
   const runDropdownRef = useRef<HTMLDivElement>(null)
   const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null)
   const monacoRef = useRef<Monaco | null>(null)
+  // Always points to the latest save handler so the Monaco Ctrl+S command isn't stale.
+  const saveCodeRef = useRef<() => void>(() => {})
   const editorDecorationsRef = useRef<MonacoEditor.IEditorDecorationsCollection | null>(null)
   const breakpointDecorationsRef = useRef<MonacoEditor.IEditorDecorationsCollection | null>(null)
   const traceValueDecorationsRef = useRef<MonacoEditor.IEditorDecorationsCollection | null>(null)
@@ -261,7 +325,11 @@ export default function App() {
   const savedCodeRef = useRef('')
   const resizeDragRef = useRef<{ type: string; startX: number; startY: number; startVal: number } | null>(null)
   const localFolderHandleRef = useRef<FileSystemDirectoryHandle | null>(null)
-  const localFolderFsIdRef = useRef<string | null>(null)
+  // The VFS id currently backed by a live local folder (state so the panel can react).
+  const [localFolderFsId, setLocalFolderFsId] = useState<string | null>(null)
+  // Whether the first-delete "this also deletes on disk" warning has been dismissed
+  // for the current folder connection (reset each time a folder is connected).
+  const [diskDeleteWarnDismissed, setDiskDeleteWarnDismissed] = useState(false)
   const mainContainerRef = useRef<HTMLDivElement | null>(null)
   const centerRef = useRef<HTMLDivElement | null>(null)
   const leftSidebarRef = useRef<HTMLDivElement | null>(null)
@@ -431,10 +499,7 @@ export default function App() {
     setFixedInputsText(text)
   }, [activeFilesystemId])
 
-  useEffect(() => {
-    if (appSettings.useFixedInputs) setDiagramView('inputs')
-    else if (diagramView === 'inputs') setDiagramView('outline')
-  }, [appSettings.useFixedInputs]) // eslint-disable-line react-hooks/exhaustive-deps
+  // (Fixed inputs now live in the console panel's Inputs tab — see toggleFixedInputs.)
   useEffect(() => { noteDraftRef.current = noteDraft }, [noteDraft])
   useEffect(() => { isInsightEditingRef.current = isInsightEditing }, [isInsightEditing])
 
@@ -710,6 +775,14 @@ export default function App() {
     // Ctrl+Alt+Shift+> / < — editor font size (also updates the stored value)
     const KM = monaco.KeyMod
     const KC = monaco.KeyCode
+
+    // Ctrl/Cmd+S — save to the virtual filesystem instead of the browser's save dialog.
+    editor.addAction({
+      id: 'save-to-vfs',
+      label: 'Save File',
+      keybindings: [KM.CtrlCmd | KC.KeyS],
+      run: () => { saveCodeRef.current() },
+    })
     editor.addAction({
       id: 'increase-font-size',
       label: 'Increase Font Size',
@@ -820,6 +893,27 @@ export default function App() {
     setShowCodeSaveDialog(true)
   }
 
+  // Mirror a filesystem mutation to the connected local OS folder, if the active
+  // filesystem is the one backed by a live folder handle. No-op otherwise.
+  const syncToLocalFolder = async (op: LocalFolderSyncOp): Promise<void> => {
+    if (localFolderFsId !== activeFilesystemId) return
+    const handle = localFolderHandleRef.current
+    if (!handle) return
+    try {
+      let perm = await handle.queryPermission({ mode: 'readwrite' })
+      if (perm !== 'granted') perm = await handle.requestPermission({ mode: 'readwrite' })
+      if (perm !== 'granted') { setCodeStatus('Local folder is not writable (permission not granted).'); return }
+      switch (op.kind) {
+        case 'write': await writeFileToFolderHandle(handle, op.path, op.content); break
+        case 'mkdir': await mkdirInFolderHandle(handle, op.path); break
+        case 'delete': await deleteFromFolderHandle(handle, op.path); break
+        case 'rename': await renameInFolderHandle(handle, op.path, op.newName); break
+      }
+    } catch (e) {
+      setCodeStatus(`Local folder sync failed: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
   const handleSaveCode = async () => {
     if (!hasCode) return
     if (openFilePath) {
@@ -829,11 +923,31 @@ export default function App() {
       setIsUnsaved(false)
       setCodeStatus(`Saved to ${openFilePath}.`)
       setVfsReloadTrigger(t => t + 1)
+      await syncToLocalFolder({ kind: 'write', path: openFilePath, content: content.buffer as ArrayBuffer })
     } else {
       const name = codeFileName || DEFAULT_CODE_FILENAME
       setPendingCodeLoad({ content: codeText, name, rawBuffer: new TextEncoder().encode(codeText).buffer as ArrayBuffer, mimeType: guessMimeType(name) })
       setShowCodeSaveDialog(true)
     }
+  }
+  saveCodeRef.current = () => { void handleSaveCode() }
+
+  const handleCloseFile = async () => {
+    if (!openFilePath) return
+    if (isUnsaved) {
+      const choice = await dialogs.choose({
+        title: 'Close file',
+        message: `Save changes to "${codeFileName}" before closing?`,
+        buttons: [
+          { label: 'Save', value: 'save', tone: 'primary' },
+          { label: "Don't save", value: 'discard', tone: 'neutral' },
+          { label: 'Cancel', value: 'cancel', tone: 'neutral' },
+        ],
+      })
+      if (choice === 'cancel' || choice === null) return
+      if (choice === 'save') await saveCurrentToVFS()
+    }
+    clearEditorForSwitch()
   }
 
   const saveCurrentToVFS = async () => {
@@ -845,15 +959,67 @@ export default function App() {
       setIsUnsaved(false)
       setVfsReloadTrigger(t => t + 1)
     } catch { return false }
-    if (localFolderFsIdRef.current === activeFilesystemId && localFolderHandleRef.current) {
-      try {
-        const perm = await localFolderHandleRef.current.queryPermission({ mode: 'readwrite' })
-        if (perm === 'granted') {
-          await writeFileToFolderHandle(localFolderHandleRef.current, openFilePath, content.buffer as ArrayBuffer)
-        }
-      } catch { /* ignore */ }
-    }
+    await syncToLocalFolder({ kind: 'write', path: openFilePath, content: content.buffer as ArrayBuffer })
     return true
+  }
+
+  const handleReloadFolder = async () => {
+    const handle = localFolderHandleRef.current
+    if (!handle || localFolderFsId !== activeFilesystemId) return
+    if (isUnsaved && !(await dialogs.confirm({
+      title: 'Reload from folder',
+      message: 'You have unsaved editor changes that will be overwritten by the folder contents. Reload anyway?',
+      confirmLabel: 'Reload', danger: true,
+    }))) return
+    try {
+      let perm = await handle.queryPermission({ mode: 'readwrite' })
+      if (perm !== 'granted') perm = await handle.requestPermission({ mode: 'readwrite' })
+      if (perm !== 'granted') { setCodeStatus('Folder permission denied.'); return }
+      const fileMap = await readDirectoryToMap(handle)
+      await importFileMapToFs(activeFilesystemId, fileMap, true)
+      setVfsReloadTrigger(t => t + 1)
+      if (openFilePath) {
+        const entry = await getEntryByPath(activeFilesystemId, openFilePath)
+        if (entry?.content) {
+          const text = new TextDecoder().decode(entry.content)
+          savedCodeRef.current = text
+          loadCodeText(text, codeFileName, openFilePath)
+        }
+      }
+      setCodeStatus('Reloaded from local folder.')
+    } catch (e) {
+      setCodeStatus(`Reload from folder failed: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
+  // Drop the live link but keep the filesystem as an independent virtual one.
+  const handleDisconnectFolder = () => {
+    localFolderHandleRef.current = null
+    setLocalFolderFsId(null)
+    setDiskDeleteWarnDismissed(false)
+    setCodeStatus('Disconnected from local folder. This is now an independent virtual filesystem.')
+  }
+
+  // Remove the connected folder's filesystem entirely and return to the default.
+  const handleCloseFolder = async () => {
+    const fsId = localFolderFsId
+    if (!(await dialogs.confirm({
+      title: 'Close connected folder',
+      message: 'Close the connected folder?',
+      detail: 'Your files remain on disk; this just removes the in-app filesystem and returns to the default.',
+      confirmLabel: 'Close', danger: true,
+    }))) return
+    localFolderHandleRef.current = null
+    setLocalFolderFsId(null)
+    setDiskDeleteWarnDismissed(false)
+    if (fsId && fsId !== 'default') {
+      try { await deleteFilesystem(fsId) } catch { /* ignore */ }
+    }
+    clearEditorForSwitch()
+    setActiveFilesystemId('default')
+    setCurrentWorkingDir('/')
+    setVfsReloadTrigger(t => t + 1)
+    setCodeStatus('Closed connected folder.')
   }
 
   const onOpenVFSFile = async (entry: VFSEntry) => {
@@ -864,8 +1030,17 @@ export default function App() {
       return
     }
     if (openFilePath && codeText !== savedCodeRef.current) {
-      const confirmed = window.confirm(`Save changes to "${codeFileName}" before opening "${entry.name}"?`)
-      if (confirmed) await saveCurrentToVFS()
+      const choice = await dialogs.choose({
+        title: 'Open file',
+        message: `Save changes to "${codeFileName}" before opening "${entry.name}"?`,
+        buttons: [
+          { label: 'Save', value: 'save', tone: 'primary' },
+          { label: "Don't save", value: 'discard', tone: 'neutral' },
+          { label: 'Cancel', value: 'cancel', tone: 'neutral' },
+        ],
+      })
+      if (choice === 'cancel' || choice === null) return
+      if (choice === 'save') await saveCurrentToVFS()
     }
     if (entry.content) {
       const text = new TextDecoder().decode(entry.content)
@@ -1075,6 +1250,18 @@ export default function App() {
     })
   }
 
+  const toggleFixedInputs = () => {
+    const next = !appSettings.useFixedInputs
+    setAppSettings(s => ({ ...s, useFixedInputs: next }))
+    if (next) {
+      // Reveal the console panel (which now hosts the Inputs tab) and focus that tab.
+      setVisiblePanels(p => (p.output ? p : { ...p, output: true }))
+      setConsoleTab('inputs')
+    } else {
+      setConsoleTab('console')
+    }
+  }
+
   const handleRestoreDefaults = () => {
     setViewMode('minimal')
     setVisiblePanels({ ...MINIMAL_VISIBLE_PANELS })
@@ -1100,8 +1287,8 @@ export default function App() {
     setIsPanelMenuOpen(false)
   }
 
-  const handleSaveLayout = () => {
-    const name = window.prompt('Name for this layout:')
+  const handleSaveLayout = async () => {
+    const name = await dialogs.prompt({ title: 'Save layout', message: 'Name for this layout:', placeholder: 'Layout name' })
     if (!name?.trim()) return
     const layout: NamedLayout = {
       name: name.trim(), visiblePanels: { ...visiblePanels }, leftWidth, fsSidebarWidth, leftSidebarSplit, inspectorSplit, rightColSplit, bookPanelWidth,
@@ -1284,8 +1471,17 @@ export default function App() {
   const handleFilesystemChange = async (id: string) => {
     if (id === activeFilesystemId) return
     if (isUnsaved && openFilePath) {
-      const shouldSave = window.confirm(`Save changes to "${codeFileName}" before switching filesystems?`)
-      if (shouldSave) await saveCurrentToVFS()
+      const choice = await dialogs.choose({
+        title: 'Switch filesystem',
+        message: `Save changes to "${codeFileName}" before switching filesystems?`,
+        buttons: [
+          { label: 'Save', value: 'save', tone: 'primary' },
+          { label: "Don't save", value: 'discard', tone: 'neutral' },
+          { label: 'Cancel', value: 'cancel', tone: 'neutral' },
+        ],
+      })
+      if (choice === 'cancel' || choice === null) return
+      if (choice === 'save') await saveCurrentToVFS()
     }
     clearEditorForSwitch()
     setActiveFilesystemId(id)
@@ -1518,10 +1714,18 @@ export default function App() {
       const existing = fsList.find(f => f.name === sourceName)
       let fsId: string
       if (existing) {
-        const doReset = window.confirm(
-          `Filesystem "${sourceName}" already exists.\n\nOK = reset (replace all files)\nCancel = merge (keep existing, add new only)`
-        )
-        if (doReset) {
+        const choice = await dialogs.choose({
+          title: 'Filesystem already exists',
+          message: `A filesystem named "${sourceName}" already exists.`,
+          detail: 'Reset replaces all its files. Merge keeps existing files and adds new ones.',
+          buttons: [
+            { label: 'Reset', value: 'reset', tone: 'danger' },
+            { label: 'Merge', value: 'merge', tone: 'primary' },
+            { label: 'Cancel', value: 'cancel', tone: 'neutral' },
+          ],
+        })
+        if (choice === 'cancel' || choice === null) return
+        if (choice === 'reset') {
           await deleteFilesystem(existing.id)
           const { id } = await createFilesystem(sourceName)
           await importFileMapToFs(id, fileMap, true)
@@ -1536,7 +1740,7 @@ export default function App() {
         fsId = id
       }
       localFolderHandleRef.current = null
-      localFolderFsIdRef.current = null
+      setLocalFolderFsId(null)
       setVfsReloadTrigger(t => t + 1)
       clearEditorForSwitch()
       setActiveFilesystemId(fsId)
@@ -1565,7 +1769,9 @@ export default function App() {
         const fs = fsList.find(f => f.name === handle.name)
         if (fs) {
           localFolderHandleRef.current = handle
-          localFolderFsIdRef.current = fs.id
+          setLocalFolderFsId(fs.id)
+          setDiskDeleteWarnDismissed(false)
+          setCodeStatus(`Connected to local folder "${handle.name}" — changes now save back to disk.`)
         }
       }
     } catch (e) { setCodeStatus(`Folder connect failed: ${e instanceof Error ? e.message : String(e)}`) }
@@ -1591,6 +1797,8 @@ export default function App() {
     fixedInputsQueueRef.current = appSettings.useFixedInputs
       ? fixedInputsText.split('\n').filter(l => l.length > 0)
       : []
+    // On every run, re-consume fixed inputs from the top and show the console (not the Inputs tab).
+    setConsoleTab('console')
     await saveCurrentToVFS()
     const vfsFiles = await getAllFiles(activeFilesystemId)
     const capturedFsId = activeFilesystemId
@@ -1788,6 +1996,8 @@ export default function App() {
       const execGlobalsObj: Record<string, unknown> = {
         __name__: '__main__',
         __coder_user_code__: codeText,
+        // Must stay synchronous: Python's input() blocks on the returned string, which a
+        // React modal (resolved via a Promise on a later tick) cannot provide on the main thread.
         js_input_prompt: (promptText: string) => window.prompt(promptText ?? '') ?? '',
         js_should_stop_main_thread: () => Boolean(mainThreadStopRequestedRef.current),
         js_set_main_thread_status: (message: string) => setMainThreadStatus(String(message ?? '')),
@@ -1970,10 +2180,10 @@ exec(code_obj, globals())
           <div className="flex items-center gap-2">
             {!isPygameRunActive && !isTurtleCanvasRunActive && (
               <div className="flex rounded overflow-hidden border border-slate-700 text-[11px]">
-                {(['outline', 'hierarchy', 'uml', ...(turtleSvg ? ['turtle'] : []), 'notes', ...(appSettings.useFixedInputs ? ['inputs'] : [])] as DiagramView[]).map(view => (
+                {(['outline', 'hierarchy', 'uml', ...(turtleSvg ? ['turtle'] : []), 'notes'] as DiagramView[]).map(view => (
                   <button type="button" key={view} onClick={() => setDiagramView(view)}
                     className={`px-2.5 py-1 ${diagramView === view ? 'bg-emerald-700 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}>
-                    {view === 'outline' ? 'Outline' : view === 'hierarchy' ? 'Hierarchy' : view === 'uml' ? 'Class' : view === 'turtle' ? 'Turtle' : view === 'notes' ? 'Notes' : 'Inputs'}
+                    {view === 'outline' ? 'Outline' : view === 'hierarchy' ? 'Hierarchy' : view === 'uml' ? 'Class' : view === 'turtle' ? 'Turtle' : 'Notes'}
                   </button>
                 ))}
               </div>
@@ -2098,22 +2308,6 @@ exec(code_obj, globals())
                 </div>
               )}
             </div>
-          ) : diagramView === 'inputs' && appSettings.useFixedInputs ? (
-            <div className="h-full flex flex-col gap-2">
-              <p className="text-xs text-slate-400 leading-relaxed flex-shrink-0">
-                One input value per line. Fed automatically to <code className="rounded bg-slate-700 px-1 text-emerald-300">input()</code> calls in order. Unused lines are preserved for re-runs.
-              </p>
-              <textarea
-                value={fixedInputsText}
-                onChange={e => {
-                  setFixedInputsText(e.target.value)
-                  persistFixedInputs(activeFilesystemId, e.target.value)
-                }}
-                className="flex-1 min-h-0 bg-slate-900 border border-slate-700 rounded p-2 font-mono text-xs text-slate-200 resize-none focus:outline-none focus:ring-1 focus:ring-emerald-500 leading-relaxed"
-                placeholder="Enter inputs, one per line..."
-                spellCheck={false}
-              />
-            </div>
           ) : (
             <div className="mx-auto h-full min-h-[280px]">
               {diagramView === 'uml' ? (
@@ -2170,7 +2364,7 @@ exec(code_obj, globals())
             {isQuickSettingsOpen && (
               <div className="absolute right-0 top-full mt-1.5 z-50 w-52 rounded-lg border border-slate-600 bg-slate-800 shadow-xl py-1">
                 <button type="button"
-                  onClick={() => setAppSettings(s => ({ ...s, useFixedInputs: !s.useFixedInputs }))}
+                  onClick={toggleFixedInputs}
                   className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-slate-200 hover:bg-slate-700 transition-colors">
                   <span className={`flex h-4 w-4 items-center justify-center rounded border text-xs ${appSettings.useFixedInputs ? 'border-emerald-500 bg-emerald-600 text-white' : 'border-slate-500'}`}>
                     {appSettings.useFixedInputs && '✓'}
@@ -2539,6 +2733,13 @@ exec(code_obj, globals())
                             onBookOpen={url => void handleBookOpen(url)}
                             onLocalFileImport={(m, n) => handleLocalFileImport(m, n)}
                             onFolderConnect={h => handleFolderConnect(h)}
+                            isLocalFolderConnected={localFolderFsId === activeFilesystemId}
+                            onLocalFolderSync={op => syncToLocalFolder(op)}
+                            onReloadFolder={() => void handleReloadFolder()}
+                            onDisconnectFolder={handleDisconnectFolder}
+                            onCloseFolder={() => void handleCloseFolder()}
+                            diskDeleteWarnDismissed={diskDeleteWarnDismissed}
+                            onDismissDiskDeleteWarn={() => setDiskDeleteWarnDismissed(true)}
                             reloadTrigger={vfsReloadTrigger}
                           />
                         </div>
@@ -2607,7 +2808,7 @@ exec(code_obj, globals())
                         <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Watches</div>
                         <div className="flex items-center gap-1">
                           <IconButton title="Add watch expression"
-                            onClick={() => { const expr = window.prompt('Watch expression:'); if (expr?.trim()) setWatches(w => [...w, expr.trim()]) }}>
+                            onClick={() => { void (async () => { const expr = await dialogs.prompt({ title: 'Add watch', message: 'Watch expression:', placeholder: 'e.g. x + y' }); if (expr?.trim()) setWatches(w => w.includes(expr.trim()) ? w : [...w, expr.trim()]) })() }}>
                             <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M12 4v16m8-8H4" />
                             </svg>
@@ -2693,6 +2894,15 @@ exec(code_obj, globals())
                 <div className="flex justify-between items-center gap-3">
                   <div className="min-w-0 flex items-baseline gap-2">
                     <div className="font-bold uppercase tracking-wider flex-shrink-0 flex items-center gap-1.5">
+                      {openFilePath && (
+                        <button type="button" onClick={() => void handleCloseFile()}
+                          title="Close file" aria-label="Close file"
+                          className="text-slate-500 hover:text-red-400 transition-colors self-center flex-shrink-0">
+                          <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                        </button>
+                      )}
                       {isUnsaved && <span className="inline-block w-2 h-2 rounded-full bg-amber-400 flex-shrink-0" title="Unsaved changes" />}
                       Code Editor{openFilePath ? ` (${codeFileName})` : ''}
                     </div>
@@ -2796,61 +3006,97 @@ exec(code_obj, globals())
               <div className="flex flex-col overflow-hidden min-h-0 flex-shrink-0"
                 style={{ height: viewMode === 'developer' && hasConsoleAndStructure ? `${rightColSplit}%` : '100%' }}>
                 <div className="bg-slate-900 py-2 px-3 border-b border-slate-700 flex-shrink-0 flex items-center justify-between gap-2">
-                  <div className="font-bold uppercase tracking-wider text-xs text-teal-400">Console Output</div>
-                  <div className="flex items-center gap-1.5">
-                    <label className="text-[10px] text-slate-500 uppercase tracking-wider">Size</label>
-                    <select
-                      value={consoleFontSize}
-                      onChange={e => setConsoleFontSize(Number(e.target.value))}
-                      title="Console font size"
-                      className="bg-slate-800 border border-slate-600 rounded text-[11px] text-slate-300 px-1 py-0.5 cursor-pointer focus:outline-none focus:ring-1 focus:ring-teal-500"
-                    >
-                      {[9, 10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24].map(s => (
-                        <option key={s} value={s}>{s}px</option>
-                      ))}
-                    </select>
-                  </div>
+                  {appSettings.useFixedInputs ? (
+                    <div className="flex rounded overflow-hidden border border-slate-700 text-[11px]">
+                      <button type="button" onClick={() => setConsoleTab('console')}
+                        className={`px-2.5 py-1 font-bold uppercase tracking-wider ${consoleTab === 'console' ? 'bg-teal-700 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}>
+                        Console
+                      </button>
+                      <button type="button" onClick={() => setConsoleTab('inputs')}
+                        className={`px-2.5 py-1 font-bold uppercase tracking-wider ${consoleTab === 'inputs' ? 'bg-teal-700 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}>
+                        Inputs
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="font-bold uppercase tracking-wider text-xs text-teal-400">Console Output</div>
+                  )}
+                  {(!appSettings.useFixedInputs || consoleTab === 'console') && (
+                    <div className="flex items-center gap-1.5">
+                      <label className="text-[10px] text-slate-500 uppercase tracking-wider">Size</label>
+                      <select
+                        value={consoleFontSize}
+                        onChange={e => setConsoleFontSize(Number(e.target.value))}
+                        title="Console font size"
+                        className="bg-slate-800 border border-slate-600 rounded text-[11px] text-slate-300 px-1 py-0.5 cursor-pointer focus:outline-none focus:ring-1 focus:ring-teal-500"
+                      >
+                        {[9, 10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24].map(s => (
+                          <option key={s} value={s}>{s}px</option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
                 </div>
-                {appSettings.inputMode === 'inline-console' ? (
-                  <div className="flex-1 min-h-0 overflow-hidden">
-                    <ConsoleTerminal
-                      ref={consoleTermRef}
-                      inputRequest={inputRequest}
-                      onInput={handleInputSubmit}
-                      onStop={forceStop}
-                      fontSize={consoleFontSize}
-                      theme={theme}
+                {/* Inputs tab (fixed inputs) */}
+                {appSettings.useFixedInputs && consoleTab === 'inputs' && (
+                  <div className="flex flex-col flex-1 min-h-0 overflow-hidden bg-slate-900/40 p-3 gap-2">
+                    <p className="text-xs text-slate-400 leading-relaxed flex-shrink-0">
+                      One input value per line. Fed automatically to <code className="rounded bg-slate-700 px-1 text-emerald-300">input()</code> calls in order.
+                    </p>
+                    <textarea
+                      value={fixedInputsText}
+                      onChange={e => {
+                        setFixedInputsText(e.target.value)
+                        persistFixedInputs(activeFilesystemId, e.target.value)
+                      }}
+                      className="flex-1 min-h-0 bg-slate-900 border border-slate-700 rounded p-2 font-mono text-xs text-slate-200 resize-none focus:outline-none focus:ring-1 focus:ring-emerald-500 leading-relaxed"
+                      placeholder="Enter inputs, one per line..."
+                      spellCheck={false}
                     />
                   </div>
-                ) : (
-                  <div className="flex flex-col flex-1 overflow-hidden bg-slate-900/40 min-h-0">
-                    <div ref={outputRef} className="flex-1 overflow-y-auto font-mono text-xs leading-relaxed text-slate-300 whitespace-pre-wrap break-words p-3">
-                      {outputLog || <span className="text-slate-500 italic">Console output will appear here.</span>}
-                    </div>
-                    {/* Inline input for input-bar mode */}
-                    {inputRequest !== null && appSettings.inputMode === 'input-bar' && !(appSettings.useFixedInputs && fixedInputsQueueRef.current.length > 0) && (
-                      <div className="flex-shrink-0 border-t border-amber-500/40 bg-slate-900/60 px-3 py-2 flex items-center gap-2">
-                        <span className="flex-shrink-0 font-mono text-xs text-amber-300 truncate max-w-[200px]">
-                          {inputRequest.prompt || '>>>'}
-                        </span>
-                        <input
-                          key={inputRequest.id}
-                          ref={inlineInputRef}
-                          type="text"
-                          value={inputValue}
-                          className="flex-1 min-w-0 bg-transparent border-none outline-none font-mono text-xs text-white caret-amber-400"
-                          placeholder="type here and press Enter…"
-                          onChange={e => setInputValue(e.target.value)}
-                          onKeyDown={e => { if (e.key === 'Enter') handleInputSubmit() }}
-                        />
-                        <button type="button" onClick={forceStop}
-                          className="flex-shrink-0 text-[10px] font-semibold text-red-400 hover:text-red-300 border border-slate-600 rounded px-1.5 py-0.5 transition-colors">
-                          Stop
-                        </button>
-                      </div>
-                    )}
-                  </div>
                 )}
+                {/* Console content — kept mounted (preserves terminal buffer); hidden when Inputs tab is active */}
+                <div className={appSettings.useFixedInputs && consoleTab === 'inputs' ? 'hidden' : 'flex flex-col flex-1 min-h-0 overflow-hidden'}>
+                  {appSettings.inputMode === 'inline-console' ? (
+                    <div className="flex-1 min-h-0 overflow-hidden">
+                      <ConsoleTerminal
+                        ref={consoleTermRef}
+                        inputRequest={inputRequest}
+                        onInput={handleInputSubmit}
+                        onStop={forceStop}
+                        fontSize={consoleFontSize}
+                        theme={theme}
+                      />
+                    </div>
+                  ) : (
+                    <div className="flex flex-col flex-1 overflow-hidden bg-slate-900/40 min-h-0">
+                      <div ref={outputRef} className="flex-1 overflow-y-auto font-mono text-xs leading-relaxed text-slate-300 whitespace-pre-wrap break-words p-3">
+                        {outputLog || <span className="text-slate-500 italic">Console output will appear here.</span>}
+                      </div>
+                      {/* Inline input for input-bar mode */}
+                      {inputRequest !== null && appSettings.inputMode === 'input-bar' && !(appSettings.useFixedInputs && fixedInputsQueueRef.current.length > 0) && (
+                        <div className="flex-shrink-0 border-t border-amber-500/40 bg-slate-900/60 px-3 py-2 flex items-center gap-2">
+                          <span className="flex-shrink-0 font-mono text-xs text-amber-300 truncate max-w-[200px]">
+                            {inputRequest.prompt || '>>>'}
+                          </span>
+                          <input
+                            key={inputRequest.id}
+                            ref={inlineInputRef}
+                            type="text"
+                            value={inputValue}
+                            className="flex-1 min-w-0 bg-transparent border-none outline-none font-mono text-xs text-white caret-amber-400"
+                            placeholder="type here and press Enter…"
+                            onChange={e => setInputValue(e.target.value)}
+                            onKeyDown={e => { if (e.key === 'Enter') handleInputSubmit() }}
+                          />
+                          <button type="button" onClick={forceStop}
+                            className="flex-shrink-0 text-[10px] font-semibold text-red-400 hover:text-red-300 border border-slate-600 rounded px-1.5 py-0.5 transition-colors">
+                            Stop
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
               </div>
             )}
 

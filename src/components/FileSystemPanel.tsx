@@ -9,7 +9,8 @@ import { isBookUrl, BOOK_FS_PREFIX, BOOK_SRC_PREFIX, getBookFsDisplayName } from
 import { isHtmlFile } from '../utils/htmlPreview'
 import { ConfirmDialog } from './dialogs/ConfirmDialog'
 import { SaveFileDialog } from './dialogs/SaveFileDialog'
-import type { VFSEntry, VFSFilesystem } from '../types'
+import { useDialogs } from './dialogs/DialogProvider'
+import type { VFSEntry, VFSFilesystem, LocalFolderSyncOp } from '../types'
 
 interface Props {
   activeFilesystemId: string
@@ -27,11 +28,25 @@ interface Props {
   onBookOpen?: (url: string) => void
   onLocalFileImport?: (fileMap: Map<string, ArrayBuffer>, sourceName: string) => Promise<void>
   onFolderConnect?: (handle: FileSystemDirectoryHandle) => Promise<void>
+  isLocalFolderConnected?: boolean
+  onLocalFolderSync?: (op: LocalFolderSyncOp) => Promise<void>
+  onReloadFolder?: () => void
+  onDisconnectFolder?: () => void
+  onCloseFolder?: () => void
+  diskDeleteWarnDismissed?: boolean
+  onDismissDiskDeleteWarn?: () => void
   reloadTrigger: number
 }
 
 interface ContextMenu {
   x: number; y: number; entry: VFSEntry
+}
+
+interface ConfirmConfig {
+  message: string
+  warning?: string
+  checkboxLabel?: string
+  onConfirm: (checked: boolean) => void
 }
 
 interface ImagePreview {
@@ -41,8 +56,12 @@ interface ImagePreview {
 export function FileSystemPanel({
   activeFilesystemId, currentWorkingDir, openFilePath, hiddenPaths, isChallengeMode,
   onFilesystemChange, onFilesystemForcedChange, onFilesystemCreated, onCwdChange, onOpenFile, onError, onBookOpen,
-  onPreviewHtml, onLocalFileImport, onFolderConnect, reloadTrigger,
+  onPreviewHtml, onLocalFileImport, onFolderConnect,
+  isLocalFolderConnected, onLocalFolderSync, onReloadFolder, onDisconnectFolder, onCloseFolder,
+  diskDeleteWarnDismissed, onDismissDiskDeleteWarn,
+  reloadTrigger,
 }: Props) {
+  const dialogs = useDialogs()
   const [filesystems, setFilesystems] = useState<VFSFilesystem[]>([])
   const [currentFsEntry, setCurrentFsEntry] = useState<VFSFilesystem | null>(null)
   const [currentPath, setCurrentPath] = useState('/')
@@ -51,7 +70,7 @@ export function FileSystemPanel({
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null)
   const [renameId, setRenameId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
-  const [confirmConfig, setConfirmConfig] = useState<{ message: string; onConfirm: () => void } | null>(null)
+  const [confirmConfig, setConfirmConfig] = useState<ConfirmConfig | null>(null)
   const [showNewFolderInline, setShowNewFolderInline] = useState(false)
   const [newFolderName, setNewFolderName] = useState('')
   const [showNewFsDialog, setShowNewFsDialog] = useState(false)
@@ -150,7 +169,9 @@ export function FileSystemPanel({
   const commitRename = async (entry: VFSEntry) => {
     if (!renameValue.trim() || renameValue === entry.name) { setRenameId(null); return }
     try {
-      await renameEntry(activeFilesystemId, entry.path, renameValue.trim())
+      const newName = renameValue.trim()
+      await renameEntry(activeFilesystemId, entry.path, newName)
+      if (isLocalFolderConnected) await onLocalFolderSync?.({ kind: 'rename', path: entry.path, newName })
       setRenameId(null); void reload()
     } catch (err) { onError(String(err)); setRenameId(null) }
   }
@@ -159,11 +180,19 @@ export function FileSystemPanel({
     setContextMenu(null)
     if (isProtected(entry)) { onError('main.py cannot be deleted from the default filesystem.'); return }
     if (entry.path === openFilePath) { onError('Cannot delete the currently open file.'); return }
+    const warnDisk = !!isLocalFolderConnected && !diskDeleteWarnDismissed
     setConfirmConfig({
       message: `Delete "${entry.name}"${entry.type === 'folder' ? ' and all its contents' : ''}?`,
-      onConfirm: async () => {
-        try { await deleteEntry(activeFilesystemId, entry.path); void reload() }
+      warning: warnDisk ? 'This will also permanently delete it from your connected local folder on disk.' : undefined,
+      checkboxLabel: warnDisk ? "Don't warn me again for this folder" : undefined,
+      onConfirm: async (dontWarnAgain) => {
+        try {
+          await deleteEntry(activeFilesystemId, entry.path)
+          if (isLocalFolderConnected) await onLocalFolderSync?.({ kind: 'delete', path: entry.path })
+          void reload()
+        }
         catch (err) { onError(String(err)) }
+        if (warnDisk && dontWarnAgain) onDismissDiskDeleteWarn?.()
         setConfirmConfig(null)
       },
     })
@@ -201,6 +230,7 @@ export function FileSystemPanel({
       } else {
         await createEntry(activeFilesystemId, parentPath, filename, 'file', pendingUpload.content, pendingUpload.mimeType)
       }
+      if (isLocalFolderConnected) await onLocalFolderSync?.({ kind: 'write', path, content: pendingUpload.content })
       setPendingUpload(null); setShowSaveDialog(false)
       setCurrentPath(parentPath); void reload()
     } catch (err) { onError(String(err)) }
@@ -209,7 +239,10 @@ export function FileSystemPanel({
   const handleNewFolder = async () => {
     if (!newFolderName.trim()) return
     try {
-      await createEntry(activeFilesystemId, currentPath, newFolderName.trim(), 'folder')
+      const folderName = newFolderName.trim()
+      await createEntry(activeFilesystemId, currentPath, folderName, 'folder')
+      const folderPath = currentPath === '/' ? `/${folderName}` : `${currentPath}/${folderName}`
+      if (isLocalFolderConnected) await onLocalFolderSync?.({ kind: 'mkdir', path: folderPath })
       setNewFolderName(''); setShowNewFolderInline(false); void reload()
     } catch (err) { onError(String(err)) }
   }
@@ -272,7 +305,11 @@ export function FileSystemPanel({
       const fsList = await listFilesystems()
       const existing = fsList.find(f => f.name === url)
       if (existing) {
-        if (!window.confirm(`A filesystem for this URL already exists. Overwrite with fresh content from the URL?`)) {
+        if (!(await dialogs.confirm({
+          title: 'Filesystem already exists',
+          message: 'A filesystem for this URL already exists. Overwrite with fresh content from the URL?',
+          confirmLabel: 'Overwrite', danger: true,
+        }))) {
           setUrlLoading(false)
           return
         }
@@ -439,12 +476,19 @@ export function FileSystemPanel({
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 12h4" />
           </svg>
         </ToolbarBtn>
-        <ToolbarBtn title="Connect local folder (live filesystem or learning book)" onClick={() => void handleFolderOpen()}>
+        <ToolbarBtn title="Connect local folder (two-way sync with disk, or learning book)" onClick={() => void handleFolderOpen()}>
           <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 11v6m-3-3l3 3 3-3" />
           </svg>
         </ToolbarBtn>
+        {isLocalFolderConnected && (
+          <ToolbarBtn title="Reload from connected local folder (pick up external edits on disk)" onClick={() => onReloadFolder?.()}>
+            <svg className="w-3.5 h-3.5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+          </ToolbarBtn>
+        )}
         <ToolbarBtn title="Open from URL (ZIP or book.json)" onClick={() => { setUrlError(''); setShowUrlDialog(true) }}>
           <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <circle cx="12" cy="12" r="10" strokeWidth="2" />
@@ -463,6 +507,28 @@ export function FileSystemPanel({
           </svg>
         </ToolbarBtn>
       </div>
+
+      {/* Connected local folder banner */}
+      {isLocalFolderConnected && (
+        <div className="px-2 py-1.5 border-b border-slate-700 bg-emerald-500/10 flex items-center gap-2 flex-shrink-0">
+          <svg className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+          </svg>
+          <span className="flex-1 truncate text-emerald-500 text-[11px] font-medium" title="Changes save back to your local OS folder">
+            Connected to local OS folder
+          </span>
+          <button type="button" onClick={() => onDisconnectFolder?.()}
+            title="Keep the files as an independent virtual filesystem, but stop syncing to disk"
+            className="text-[10px] text-slate-400 hover:text-slate-200 underline decoration-dotted flex-shrink-0">
+            Disconnect
+          </button>
+          <button type="button" onClick={() => onCloseFolder?.()}
+            title="Remove this filesystem and return to the default (files stay on disk)"
+            className="text-[10px] text-slate-400 hover:text-red-400 underline decoration-dotted flex-shrink-0">
+            Close
+          </button>
+        </div>
+      )}
 
       {/* Breadcrumb */}
       <div className="px-2 py-1 border-b border-slate-700 flex items-center gap-0.5 overflow-x-auto flex-shrink-0">
@@ -499,8 +565,12 @@ export function FileSystemPanel({
             const isCwd = entry.path === currentWorkingDir && entry.type === 'folder'
             return (
               <div key={entry.id}
-                className={`group flex items-center gap-1.5 px-2 py-1 cursor-pointer rounded mx-1 transition-colors
-                  ${selectedId === entry.id ? 'bg-slate-600' : 'hover:bg-slate-700'}`}
+                className={`group flex items-center gap-1.5 px-2 py-1 cursor-pointer rounded mx-1 transition-colors border-l-2
+                  ${isOpen
+                    ? 'border-emerald-400 bg-emerald-500/10'
+                    : selectedId === entry.id
+                      ? 'border-transparent bg-slate-500/20'
+                      : 'border-transparent hover:bg-slate-500/10'}`}
                 onClick={() => { setSelectedId(entry.id); void handleOpenEntry(entry) }}
                 onContextMenu={e => handleContextMenu(e, entry)}>
                 {renameId === entry.id ? (
@@ -574,6 +644,9 @@ export function FileSystemPanel({
       {/* Dialogs */}
       {confirmConfig && (
         <ConfirmDialog message={confirmConfig.message}
+          warning={confirmConfig.warning}
+          checkboxLabel={confirmConfig.checkboxLabel}
+          confirmLabel="Delete"
           onConfirm={confirmConfig.onConfirm}
           onCancel={() => setConfirmConfig(null)} />
       )}
