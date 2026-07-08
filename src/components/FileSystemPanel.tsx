@@ -19,6 +19,7 @@ interface Props {
   isChallengeMode?: boolean
   onFilesystemChange: (id: string) => void
   onFilesystemForcedChange: (id: string) => void
+  onFilesystemCreated: (id: string) => void
   onCwdChange: (path: string) => void
   onOpenFile: (entry: VFSEntry) => void
   onPreviewHtml: (entry: VFSEntry) => void
@@ -39,7 +40,7 @@ interface ImagePreview {
 
 export function FileSystemPanel({
   activeFilesystemId, currentWorkingDir, openFilePath, hiddenPaths, isChallengeMode,
-  onFilesystemChange, onFilesystemForcedChange, onCwdChange, onOpenFile, onError, onBookOpen,
+  onFilesystemChange, onFilesystemForcedChange, onFilesystemCreated, onCwdChange, onOpenFile, onError, onBookOpen,
   onPreviewHtml, onLocalFileImport, onFolderConnect, reloadTrigger,
 }: Props) {
   const [filesystems, setFilesystems] = useState<VFSFilesystem[]>([])
@@ -115,7 +116,7 @@ export function FileSystemPanel({
 
   const navigate = (path: string) => { setCurrentPath(path); setSelectedId(null) }
 
-  const handleDoubleClick = async (entry: VFSEntry) => {
+  const handleOpenEntry = async (entry: VFSEntry) => {
     if (entry.type === 'folder') { navigate(entry.path); return }
     const mime = entry.mimeType ?? guessMimeType(entry.name)
     if (isImageMime(mime)) {
@@ -221,10 +222,10 @@ export function FileSystemPanel({
   const handleCreateFs = async () => {
     if (!newFsName.trim()) return
     try {
-      const { id: newFsId } = await createFilesystem(newFsName.trim())
-      setNewFsName(''); setShowNewFsDialog(false)
+      const { id: newFsId } = await createFilesystem(newFsName.trim(), { seedMainPy: true })
+      setNewFsName(''); setShowNewFsDialog(false); setShowFsMenu(false)
       void reload()
-      onFilesystemChange(newFsId)
+      onFilesystemCreated(newFsId)
     } catch (err) { onError(String(err)) }
   }
 
@@ -414,9 +415,9 @@ export function FileSystemPanel({
       </div>
 
       {/* Toolbar */}
-      <div className="px-2 py-1 border-b border-slate-700 flex items-center gap-1 flex-shrink-0">
-        <input ref={uploadInputRef} type="file" className="hidden" onChange={handleUpload} />
-        <input ref={zipInputRef} type="file" accept=".zip" className="hidden" onChange={e => void handleZipFileChange(e)} />
+      <div className="px-2 py-1 border-b border-slate-700 flex flex-wrap items-center gap-1 flex-shrink-0">
+        <input ref={uploadInputRef} type="file" aria-label="Upload file" className="hidden" onChange={handleUpload} />
+        <input ref={zipInputRef} type="file" accept=".zip" aria-label="Open ZIP file" className="hidden" onChange={e => void handleZipFileChange(e)} />
         <ToolbarBtn title="New file" onClick={handleNewFile}>
           <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 13h6m-3-3v6m-9 1V7a2 2 0 012-2h6l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
@@ -450,7 +451,6 @@ export function FileSystemPanel({
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M2 12h20M12 2a15.3 15.3 0 010 20M12 2a15.3 15.3 0 000 20" />
           </svg>
         </ToolbarBtn>
-        <div className="flex-1" />
         <ToolbarBtn title="Set current folder as working directory" onClick={handleSetCwd}>
           <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
@@ -485,6 +485,7 @@ export function FileSystemPanel({
               <path d="M10 4H4c-1.11 0-2 .89-2 2v12c0 1.11.89 2 2 2h16c1.11 0 2-.89 2-2V8c0-1.11-.89-2-2-2h-8l-2-2z" />
             </svg>
             <input autoFocus value={newFolderName} onChange={e => setNewFolderName(e.target.value)}
+              aria-label="New folder name" placeholder="Folder name..."
               onKeyDown={e => { if (e.key === 'Enter') void handleNewFolder(); if (e.key === 'Escape') setShowNewFolderInline(false) }}
               onBlur={() => { if (!newFolderName.trim()) setShowNewFolderInline(false) }}
               className="flex-1 bg-slate-900 border border-slate-600 rounded px-1 py-0.5 text-xs text-white focus:outline-none focus:ring-1 focus:ring-sky-400" />
@@ -498,15 +499,15 @@ export function FileSystemPanel({
             const isCwd = entry.path === currentWorkingDir && entry.type === 'folder'
             return (
               <div key={entry.id}
-                className={`flex items-center gap-1.5 px-2 py-1 cursor-pointer rounded mx-1 transition-colors
+                className={`group flex items-center gap-1.5 px-2 py-1 cursor-pointer rounded mx-1 transition-colors
                   ${selectedId === entry.id ? 'bg-slate-600' : 'hover:bg-slate-700'}`}
-                onClick={() => setSelectedId(entry.id)}
-                onDoubleClick={() => void handleDoubleClick(entry)}
+                onClick={() => { setSelectedId(entry.id); void handleOpenEntry(entry) }}
                 onContextMenu={e => handleContextMenu(e, entry)}>
                 {renameId === entry.id ? (
                   <>
                     <EntryIcon entry={entry} />
                     <input autoFocus value={renameValue} onChange={e => setRenameValue(e.target.value)}
+                      aria-label="Rename" placeholder="Name..."
                       onKeyDown={e => { if (e.key === 'Enter') void commitRename(entry); if (e.key === 'Escape') setRenameId(null) }}
                       onBlur={() => void commitRename(entry)}
                       onClick={e => e.stopPropagation()}
@@ -520,6 +521,16 @@ export function FileSystemPanel({
                     {isOpen && <span className="text-[9px] text-emerald-400 flex-shrink-0">open</span>}
                     {entry.type === 'file' && entry.size !== undefined && (
                       <span className="text-slate-600 text-[9px] flex-shrink-0">{formatSize(entry.size)}</span>
+                    )}
+                    {entry.type === 'file' && (
+                      <button type="button"
+                        onClick={e => { e.stopPropagation(); void handleDownload(entry) }}
+                        title="Download to your computer"
+                        className="text-slate-500 hover:text-sky-400 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
+                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                        </svg>
+                      </button>
                     )}
                   </>
                 )}
@@ -543,7 +554,7 @@ export function FileSystemPanel({
           style={{ left: contextMenu.x, top: contextMenu.y }}
           onMouseDown={e => e.stopPropagation()}>
           {contextMenu.entry.type === 'file' && (
-            <CtxItem label="Open" onClick={() => { void handleDoubleClick(contextMenu.entry); setContextMenu(null) }} />
+            <CtxItem label="Open" onClick={() => { void handleOpenEntry(contextMenu.entry); setContextMenu(null) }} />
           )}
           {canPreviewHtml(contextMenu.entry) && (
             <CtxItem label="Preview HTML" onClick={() => { onPreviewHtml(contextMenu.entry); setContextMenu(null) }} />
@@ -581,6 +592,7 @@ export function FileSystemPanel({
             <div className="flex items-center justify-between w-full">
               <span className="text-slate-300 text-sm">{imagePreview.name}</span>
               <button onClick={() => { URL.revokeObjectURL(imagePreview.url); setImagePreview(null) }}
+                title="Close preview" aria-label="Close preview"
                 className="text-slate-400 hover:text-slate-200">
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />

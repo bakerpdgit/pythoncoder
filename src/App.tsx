@@ -204,6 +204,14 @@ export default function App() {
   const [leftSidebarSplit, setLeftSidebarSplit] = useState(55) // % of left sidebar for FS (top)
   const [inspectorSplit, setInspectorSplit] = useState(50)    // % of inspector for globals (top)
   const [watchesSplit, setWatchesSplit] = useState(25)        // % of inspector height for watches (bottom)
+  // Left-sidebar sections use fixed pixel heights so their total can exceed the
+  // viewport (the sidebar then scrolls); each section has its own resize handle.
+  const [fsSectionHeight, setFsSectionHeight] = useState(340)
+  const [globalsHeight, setGlobalsHeight] = useState(240)
+  const [localsHeight, setLocalsHeight] = useState(220)
+  const [watchesHeight, setWatchesHeight] = useState(220)
+  const [fsCollapsed, setFsCollapsed] = useState(false)
+  const fsCollapsedBeforeRunRef = useRef<boolean | null>(null)
   const [rightColSplit, setRightColSplit] = useState(42)      // % of right col for Console (top)
   const [bookPanelWidth, setBookPanelWidth] = useState(360)   // px width of book panel
   const [bookPanelCollapsed, setBookPanelCollapsed] = useState(false)
@@ -257,6 +265,11 @@ export default function App() {
   const mainContainerRef = useRef<HTMLDivElement | null>(null)
   const centerRef = useRef<HTMLDivElement | null>(null)
   const leftSidebarRef = useRef<HTMLDivElement | null>(null)
+  const sidebarStackRef = useRef<HTMLDivElement | null>(null)
+  const fsSecRef = useRef<HTMLDivElement | null>(null)
+  const globalsSecRef = useRef<HTMLDivElement | null>(null)
+  const localsSecRef = useRef<HTMLDivElement | null>(null)
+  const watchesSecRef = useRef<HTMLDivElement | null>(null)
   const rightColRef = useRef<HTMLDivElement | null>(null)
   const inspectorRef = useRef<HTMLDivElement | null>(null)
   const mainThreadMountedPathsRef = useRef<string[]>([])
@@ -400,6 +413,19 @@ export default function App() {
 
   useEffect(() => startVersionPolling(() => setUpdateAvailable(true)), [])
 
+  // Auto-collapse the File System section while code runs (more room for variables),
+  // then restore whatever state it was in before the run.
+  useEffect(() => {
+    if (isRunning) {
+      fsCollapsedBeforeRunRef.current = fsCollapsed
+      setFsCollapsed(true)
+    } else if (fsCollapsedBeforeRunRef.current !== null) {
+      setFsCollapsed(fsCollapsedBeforeRunRef.current)
+      fsCollapsedBeforeRunRef.current = null
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isRunning])
+
   useEffect(() => {
     const text = getStoredFixedInputs(activeFilesystemId)
     setFixedInputsText(text)
@@ -465,15 +491,14 @@ export default function App() {
         setFsSidebarWidth(Math.max(160, Math.min(400, drag.startVal + (e.clientX - drag.startX))))
       } else if (drag.type === 'col-bookpanel') {
         setBookPanelWidth(Math.max(240, Math.min(600, drag.startVal + (drag.startX - e.clientX))))
-      } else if (drag.type === 'row-leftsidebar' && leftSidebarRef.current) {
-        const rect = leftSidebarRef.current.getBoundingClientRect()
-        setLeftSidebarSplit(Math.max(20, Math.min(80, ((e.clientY - rect.top) / rect.height) * 100)))
-      } else if (drag.type === 'row-inspector' && inspectorRef.current) {
-        const rect = inspectorRef.current.getBoundingClientRect()
-        setInspectorSplit(Math.max(20, Math.min(80, ((e.clientY - rect.top) / rect.height) * 100)))
-      } else if (drag.type === 'row-watches' && inspectorRef.current) {
-        const rect = inspectorRef.current.getBoundingClientRect()
-        setWatchesSplit(Math.max(10, Math.min(60, (1 - (e.clientY - rect.top) / rect.height) * 100)))
+      } else if (drag.type === 'row-fs') {
+        setFsSectionHeight(Math.max(80, drag.startVal + (e.clientY - drag.startY)))
+      } else if (drag.type === 'row-globals') {
+        setGlobalsHeight(Math.max(80, drag.startVal + (e.clientY - drag.startY)))
+      } else if (drag.type === 'row-locals') {
+        setLocalsHeight(Math.max(80, drag.startVal + (e.clientY - drag.startY)))
+      } else if (drag.type === 'row-watches') {
+        setWatchesHeight(Math.max(60, drag.startVal + (e.clientY - drag.startY)))
       } else if (drag.type === 'row-rightcol' && rightColRef.current) {
         const rect = rightColRef.current.getBoundingClientRect()
         setRightColSplit(Math.max(20, Math.min(80, ((e.clientY - rect.top) / rect.height) * 100)))
@@ -1273,6 +1298,33 @@ export default function App() {
     setCurrentWorkingDir('/')
   }
 
+  const handleFilesystemCreated = async (id: string) => {
+    clearEditorForSwitch()
+    setActiveFilesystemId(id)
+    setCurrentWorkingDir('/')
+    await autoOpenMainPy(id)
+  }
+
+  // Double-clicking a section's resize handle: minimise every other section and
+  // grow this one to fill the remaining sidebar height.
+  const fitSectionExclusive = (section: 'fs' | 'globals' | 'locals' | 'watches') => {
+    setFsCollapsed(section !== 'fs')
+    setInspectorCollapsed({ globals: section !== 'globals', locals: section !== 'locals', watches: section !== 'watches' })
+    const targetRef = section === 'fs' ? fsSecRef : section === 'globals' ? globalsSecRef : section === 'locals' ? localsSecRef : watchesSecRef
+    const setHeight = section === 'fs' ? setFsSectionHeight : section === 'globals' ? setGlobalsHeight : section === 'locals' ? setLocalsHeight : setWatchesHeight
+    requestAnimationFrame(() => {
+      const stack = sidebarStackRef.current
+      const target = targetRef.current
+      if (!stack || !target) return
+      let used = 0
+      for (const child of Array.from(stack.children)) {
+        if (child === target) continue
+        used += (child as HTMLElement).offsetHeight
+      }
+      setHeight(Math.max(80, stack.clientHeight - used - 4))
+    })
+  }
+
   // ── Runtime execution ─────────────────────────────────────────────────────
 
   const addToTurtleHistory = (svg: string) => {
@@ -1531,9 +1583,9 @@ export default function App() {
     appendOutput('\n[INFO] Pyodide environment reset. Files are preserved.')
   }
 
-  const startTraceWorker = async () => {
+  const startTraceWorker = async (modeOverride?: 'trace' | 'run' | 'break') => {
     if (!hasSab || !hasCode) return
-    const choice = runModeChoice
+    const choice = modeOverride ?? runModeChoice
     if (pendingRestore) pendingRestore()
     setPendingRestore(null)
     fixedInputsQueueRef.current = appSettings.useFixedInputs
@@ -2082,7 +2134,7 @@ exec(code_obj, globals())
   return (
     <div className="h-screen w-screen flex flex-col overflow-hidden text-sm">
       {/* Header */}
-      <div className="bg-slate-800 border-b border-slate-700 flex justify-between items-center px-6 py-3 shadow-md z-10">
+      <div className="bg-slate-800 border-b border-slate-700 flex justify-between items-center px-6 py-1.5 shadow-md z-10">
         <div className="flex items-center gap-3">
           <svg className="w-8 h-8 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
@@ -2185,7 +2237,7 @@ exec(code_obj, globals())
                         key={key}
                         type="button"
                         disabled={disabled}
-                        onClick={() => { setRunModeChoice(key); setIsRunDropdownOpen(false) }}
+                        onClick={() => { setRunModeChoice(key); setIsRunDropdownOpen(false); void startTraceWorker(key) }}
                         className={`w-full px-3 py-2.5 text-left transition-colors ${disabled ? 'opacity-40 cursor-not-allowed' : 'hover:bg-slate-700'}`}
                       >
                         <div className={`font-semibold text-sm flex items-center gap-1.5 ${runModeChoice === key ? color : 'text-slate-200'}`}>
@@ -2446,61 +2498,69 @@ exec(code_obj, globals())
                 </button>
               </div>
 
-              {/* File System */}
-              {visiblePanels.filesystem && (
-                <div className="flex flex-col overflow-hidden min-h-0 flex-shrink-0"
-                  style={{ height: hasInspectorAndFs ? `${leftSidebarSplit}%` : '100%' }}>
-                  <div className="bg-slate-900 py-2 px-3 border-b border-slate-700 text-[10px] font-bold uppercase tracking-wider text-slate-400 flex-shrink-0">
-                    File System
-                  </div>
-                  <div className="overflow-hidden min-h-0 flex-1">
-                    <FileSystemPanel
-                      activeFilesystemId={activeFilesystemId}
-                      currentWorkingDir={currentWorkingDir}
-                      openFilePath={openFilePath}
-                      hiddenPaths={challengeHiddenPaths}
-                      isChallengeMode={!!bookNavState?.activeChallengeId}
-                      onFilesystemChange={id => void handleFilesystemChange(id)}
-                      onFilesystemForcedChange={handleFilesystemForcedChange}
-                      onCwdChange={setCurrentWorkingDir}
-                      onOpenFile={entry => void onOpenVFSFile(entry)}
-                      onPreviewHtml={entry => void handlePreviewHtml(entry)}
-                      onError={msg => setCodeStatus(msg)}
-                      onBookOpen={url => void handleBookOpen(url)}
-                      onLocalFileImport={(m, n) => handleLocalFileImport(m, n)}
-                      onFolderConnect={h => handleFolderConnect(h)}
-                      reloadTrigger={vfsReloadTrigger}
-                    />
-                  </div>
-                </div>
-              )}
+              {/* Scrollable stack — each section has a fixed pixel height so the
+                  combined total may exceed the viewport, in which case this
+                  container scrolls. Each section carries its own resize handle. */}
+              <div ref={sidebarStackRef} className="flex-1 min-h-0 overflow-y-auto flex flex-col">
 
-              {/* Resize handle: FS ↔ Inspector */}
-              {hasInspectorAndFs && (
-                <div className="resize-handle-row flex-shrink-0"
-                  onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'row-leftsidebar', startX: e.clientX, startY: e.clientY, startVal: leftSidebarSplit }; document.body.style.cursor = 'row-resize'; document.body.style.userSelect = 'none' }}>
-                  <div className="resize-bar" style={{ height: '3px', width: '48px' }} />
-                </div>
-              )}
-
-              {/* Variable Inspector */}
-              {visiblePanels.visualizer && (
-                <div ref={inspectorRef} className="flex-1 flex flex-col overflow-hidden min-h-0">
-                  <div className="bg-slate-900 py-2 px-3 border-b border-slate-700 flex items-center justify-between flex-shrink-0">
-                    <div className="font-bold uppercase tracking-wider text-[10px] text-sky-300">Variables</div>
-                    <div className="flex items-center gap-1.5">
-                      <span className={`text-[10px] uppercase tracking-wider ${hasSab ? 'text-emerald-400' : 'text-red-400'}`}>
-                        {hasSab ? 'SAB ✓' : 'SAB ✗'}
-                      </span>
-                      {isRunning && activeRuntime === 'main-thread' && (
-                        <span className="text-[10px] text-amber-400 truncate max-w-[100px]">{mainThreadStatus}</span>
+                {/* File System (collapsible; auto-collapses while running) */}
+                {visiblePanels.filesystem && (
+                  <>
+                    <div ref={fsSecRef} className="flex flex-col overflow-hidden flex-shrink-0 min-h-0"
+                      style={fsCollapsed ? undefined : { height: fsSectionHeight }}>
+                      <div className="bg-slate-900 py-2 px-3 border-b border-slate-700 flex items-center justify-between flex-shrink-0">
+                        <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">File System</div>
+                        <button type="button"
+                          onClick={() => setFsCollapsed(c => !c)}
+                          title={fsCollapsed ? 'Expand' : 'Collapse'}
+                          className="text-slate-500 hover:text-slate-300 transition-colors">
+                          <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            {fsCollapsed
+                              ? <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M19 9l-7 7-7-7" />
+                              : <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5 15l7-7 7 7" />}
+                          </svg>
+                        </button>
+                      </div>
+                      {!fsCollapsed && (
+                        <div className="overflow-hidden min-h-0 flex-1">
+                          <FileSystemPanel
+                            activeFilesystemId={activeFilesystemId}
+                            currentWorkingDir={currentWorkingDir}
+                            openFilePath={openFilePath}
+                            hiddenPaths={challengeHiddenPaths}
+                            isChallengeMode={!!bookNavState?.activeChallengeId}
+                            onFilesystemChange={id => void handleFilesystemChange(id)}
+                            onFilesystemForcedChange={handleFilesystemForcedChange}
+                            onFilesystemCreated={id => void handleFilesystemCreated(id)}
+                            onCwdChange={setCurrentWorkingDir}
+                            onOpenFile={entry => void onOpenVFSFile(entry)}
+                            onPreviewHtml={entry => void handlePreviewHtml(entry)}
+                            onError={msg => setCodeStatus(msg)}
+                            onBookOpen={url => void handleBookOpen(url)}
+                            onLocalFileImport={(m, n) => handleLocalFileImport(m, n)}
+                            onFolderConnect={h => handleFolderConnect(h)}
+                            reloadTrigger={vfsReloadTrigger}
+                          />
+                        </div>
                       )}
                     </div>
-                  </div>
-                  <div className="flex-1 flex flex-col overflow-hidden min-h-0">
-                    {/* Globals */}
-                    <div className="overflow-hidden min-h-0 flex flex-col"
-                      style={{ flex: inspectorCollapsed.globals ? '0 0 auto' : (!currentFunc || inspectorCollapsed.locals) ? '1 1 0' : `0 0 ${inspectorSplit}%` }}>
+                    {!fsCollapsed && (
+                      <div className="resize-handle-row flex-shrink-0"
+                        title="Drag to resize · double-click to fill"
+                        onDoubleClick={() => fitSectionExclusive('fs')}
+                        onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'row-fs', startX: e.clientX, startY: e.clientY, startVal: fsSectionHeight }; document.body.style.cursor = 'row-resize'; document.body.style.userSelect = 'none' }}>
+                        <div className="resize-bar" style={{ height: '3px', width: '48px' }} />
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {/* Variable inspector sections */}
+                {visiblePanels.visualizer && (
+                  <>
+                    {/* Global Variables */}
+                    <div ref={globalsSecRef} className="overflow-hidden flex flex-col flex-shrink-0 min-h-0"
+                      style={inspectorCollapsed.globals ? undefined : { height: globalsHeight }}>
                       <InspectorPane title="Global Variables" root={globalsInspectorRoot}
                         path={globalsInspectorPath} setPath={setGlobalsInspectorPath}
                         emptyMessage="Run code to see globals."
@@ -2508,17 +2568,20 @@ exec(code_obj, globals())
                         isCollapsed={inspectorCollapsed.globals}
                         onToggleCollapsed={() => setInspectorCollapsed(c => ({ ...c, globals: !c.globals }))} />
                     </div>
-                    {/* Locals */}
+                    {!inspectorCollapsed.globals && (
+                      <div className="resize-handle-row flex-shrink-0"
+                        title="Drag to resize · double-click to fill"
+                        onDoubleClick={() => fitSectionExclusive('globals')}
+                        onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'row-globals', startX: e.clientX, startY: e.clientY, startVal: globalsHeight }; document.body.style.cursor = 'row-resize'; document.body.style.userSelect = 'none' }}>
+                        <div className="resize-bar" style={{ height: '3px', width: '48px' }} />
+                      </div>
+                    )}
+
+                    {/* Local Variables */}
                     {currentFunc && (
                       <>
-                        {!inspectorCollapsed.globals && !inspectorCollapsed.locals && (
-                          <div className="resize-handle-row flex-shrink-0"
-                            onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'row-inspector', startX: e.clientX, startY: e.clientY, startVal: inspectorSplit }; document.body.style.cursor = 'row-resize'; document.body.style.userSelect = 'none' }}>
-                            <div className="resize-bar" style={{ height: '3px', width: '48px' }} />
-                          </div>
-                        )}
-                        <div className="overflow-hidden min-h-0 flex flex-col"
-                          style={{ flex: inspectorCollapsed.locals ? '0 0 auto' : '1 1 0' }}>
+                        <div ref={localsSecRef} className="overflow-hidden flex flex-col flex-shrink-0 min-h-0"
+                          style={inspectorCollapsed.locals ? undefined : { height: localsHeight }}>
                           <InspectorPane title="Local Variables" root={localsInspectorRoot}
                             path={localsInspectorPath} setPath={setLocalsInspectorPath}
                             emptyMessage="Waiting for code to enter a function..."
@@ -2526,18 +2589,20 @@ exec(code_obj, globals())
                             isCollapsed={inspectorCollapsed.locals}
                             onToggleCollapsed={() => setInspectorCollapsed(c => ({ ...c, locals: !c.locals }))} />
                         </div>
+                        {!inspectorCollapsed.locals && (
+                          <div className="resize-handle-row flex-shrink-0"
+                            title="Drag to resize · double-click to fill"
+                            onDoubleClick={() => fitSectionExclusive('locals')}
+                            onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'row-locals', startX: e.clientX, startY: e.clientY, startVal: localsHeight }; document.body.style.cursor = 'row-resize'; document.body.style.userSelect = 'none' }}>
+                            <div className="resize-bar" style={{ height: '3px', width: '48px' }} />
+                          </div>
+                        )}
                       </>
                     )}
-                    {/* Watches resize handle */}
-                    {!inspectorCollapsed.watches && (
-                      <div className="resize-handle-row flex-shrink-0"
-                        onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'row-watches', startX: e.clientX, startY: e.clientY, startVal: watchesSplit }; document.body.style.cursor = 'row-resize'; document.body.style.userSelect = 'none' }}>
-                        <div className="resize-bar" style={{ height: '3px', width: '48px' }} />
-                      </div>
-                    )}
+
                     {/* Watches */}
-                    <div className="border-t border-slate-700 overflow-hidden flex flex-col"
-                      style={{ flex: inspectorCollapsed.watches ? '0 0 auto' : `0 0 ${watchesSplit}%`, minHeight: 0 }}>
+                    <div ref={watchesSecRef} className="border-t border-slate-700 overflow-hidden flex flex-col flex-shrink-0 min-h-0"
+                      style={inspectorCollapsed.watches ? undefined : { height: watchesHeight }}>
                       <div className="flex-shrink-0 px-3 py-2 flex items-center justify-between">
                         <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Watches</div>
                         <div className="flex items-center gap-1">
@@ -2567,7 +2632,7 @@ exec(code_obj, globals())
                         </div>
                       </div>
                       {!inspectorCollapsed.watches && (
-                        <div className="flex-1 overflow-y-auto">
+                        <div className="flex-1 overflow-y-auto min-h-0">
                           {watches.length === 0
                             ? <div className="px-3 py-2 text-xs text-slate-500 italic">No watches. Click + to add.</div>
                             : <div className="p-2 flex flex-col gap-1">
@@ -2588,9 +2653,19 @@ exec(code_obj, globals())
                         </div>
                       )}
                     </div>
-                  </div>
-                </div>
-              )}
+                    {!inspectorCollapsed.watches && (
+                      <div className="resize-handle-row flex-shrink-0"
+                        title="Drag to resize · double-click to fill"
+                        onDoubleClick={() => fitSectionExclusive('watches')}
+                        onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'row-watches', startX: e.clientX, startY: e.clientY, startVal: watchesHeight }; document.body.style.cursor = 'row-resize'; document.body.style.userSelect = 'none' }}>
+                        <div className="resize-bar" style={{ height: '3px', width: '48px' }} />
+                      </div>
+                    )}
+                    {/* Marks the end of the sections */}
+                    <div className="border-t border-slate-700 flex-shrink-0" />
+                  </>
+                )}
+              </div>
             </div>
 
             {/* Resize handle: left sidebar width */}
@@ -2614,14 +2689,14 @@ exec(code_obj, globals())
             {/* Code editor area */}
             <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
               <input ref={fileInputRef} type="file" className="hidden" aria-hidden="true" onChange={handleCodeFileChange} />
-              <div className="bg-slate-900 py-2 px-4 border-b border-slate-700 text-slate-400 text-xs flex-shrink-0">
-                <div className="flex justify-between items-start gap-3">
-                  <div className="min-w-0">
-                    <div className="font-bold uppercase tracking-wider truncate flex items-center gap-1.5">
+              <div className="bg-slate-900 py-1.5 px-4 border-b border-slate-700 text-slate-400 text-xs flex-shrink-0">
+                <div className="flex justify-between items-center gap-3">
+                  <div className="min-w-0 flex items-baseline gap-2">
+                    <div className="font-bold uppercase tracking-wider flex-shrink-0 flex items-center gap-1.5">
                       {isUnsaved && <span className="inline-block w-2 h-2 rounded-full bg-amber-400 flex-shrink-0" title="Unsaved changes" />}
-                      Code Trace ({openFilePath ? openFilePath : (codeFileName || DEFAULT_CODE_FILENAME)})
+                      Code Editor{openFilePath ? ` (${codeFileName})` : ''}
                     </div>
-                    <div className="mt-1 normal-case tracking-normal text-[11px] text-slate-500">{codeStatus}</div>
+                    <div className="normal-case tracking-normal text-[11px] text-slate-500 truncate">{codeStatus}</div>
                   </div>
                   <div className="flex items-center gap-2 flex-shrink-0">
                     {/* Editor font size dropdown */}
@@ -2639,29 +2714,14 @@ exec(code_obj, globals())
                         <option key={sz} value={sz}>{sz}px</option>
                       ))}
                     </select>
-                    <IconButton title="New file in virtual filesystem" onClick={handleNewFileButton} disabled={isRunning}>
+                    <IconButton title="Clear all breakpoints" onClick={() => { breakpointsRef.current = new Set(); setBreakpoints(new Set()) }} disabled={breakpoints.size === 0}>
                       <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 13h6m-3-3v6m-9 1V7a2 2 0 012-2h6l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
-                      </svg>
-                    </IconButton>
-                    <IconButton title="Upload file to virtual filesystem" onClick={handleLoadButtonClick} disabled={isRunning}>
-                      <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
                       </svg>
                     </IconButton>
                     <IconButton title="Save to virtual filesystem" onClick={() => void handleSaveCode()} disabled={!hasCode || isRunning}>
                       <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2zM17 21v-8H7v8M7 3v5h8" />
-                      </svg>
-                    </IconButton>
-                    <IconButton title="Download to OS filesystem" onClick={() => triggerDownload(codeFileName, codeText, 'text/x-python;charset=utf-8')} disabled={!hasCode}>
-                      <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                      </svg>
-                    </IconButton>
-                    <IconButton title="Clear all breakpoints" onClick={() => { breakpointsRef.current = new Set(); setBreakpoints(new Set()) }} disabled={breakpoints.size === 0}>
-                      <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
                       </svg>
                     </IconButton>
                   </div>

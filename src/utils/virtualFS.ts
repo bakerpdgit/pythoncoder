@@ -96,11 +96,15 @@ export async function listFilesystems(): Promise<VFSFilesystem[]> {
   return idbGetAll<VFSFilesystem>(store)
 }
 
-export async function createFilesystem(name: string): Promise<VFSFilesystem> {
+export async function createFilesystem(name: string, opts?: { seedMainPy?: boolean }): Promise<VFSFilesystem> {
   const db = await openVFSDb()
   const fs: VFSFilesystem = { id: crypto.randomUUID(), name, createdAt: Date.now() }
   const store = db.transaction('filesystems', 'readwrite').objectStore('filesystems')
   await idbAdd(store, fs)
+  if (opts?.seedMainPy) {
+    const content = new TextEncoder().encode(DEFAULT_MAIN_PY_CONTENT).buffer as ArrayBuffer
+    await createEntry(fs.id, '/', 'main.py', 'file', content, 'text/x-python')
+  }
   return fs
 }
 

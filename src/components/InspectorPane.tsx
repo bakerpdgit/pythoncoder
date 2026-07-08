@@ -65,6 +65,17 @@ const formatInspectorValue = (node: InspectorNode | null): string => {
   return node.summary ?? node.type ?? 'Value'
 }
 
+// Short summary for the detail heading — omits the type name (shown separately above)
+// so we don't render e.g. "Demo" then "Demo • 3 attrs".
+const formatInspectorSummaryShort = (node: InspectorNode | null): string => {
+  if (!node) return 'Unavailable'
+  if (node.kind === 'object') return `${node.attrs?.length ?? 0} attrs`
+  if (node.kind === 'sequence') return `${node.length ?? node.items?.length ?? 0} items`
+  if (node.kind === 'mapping') return `${node.length ?? node.entries?.length ?? 0} entries`
+  if (node.kind === 'scope') return `${node.entries?.length ?? 0} values`
+  return formatInspectorValue(node)
+}
+
 const MAX_INLINE_STR = 80
 
 const formatInspectorPrimitive = (node: InspectorNode | null): string => {
@@ -159,32 +170,6 @@ export const InspectorPane = ({
   const breadcrumbs = buildInspectorBreadcrumbs(root, path, showRuntimeValues)
   const isAtRootScope = path.length === 0 && root.node.kind === 'scope'
 
-  const renderPrimitiveValue = (node: InspectorNode, cardKey: string) => {
-    if (node.kind === 'primitive' && typeof node.value === 'string') {
-      const isLong = node.value.length > MAX_INLINE_STR
-      const display = isLong ? `"${node.value.slice(0, MAX_INLINE_STR)}…"` : `"${node.value}"`
-      return (
-        <div className="mt-1 break-all whitespace-pre-wrap text-xs text-emerald-300">
-          {display}
-          {isLong && (
-            <button
-              type="button"
-              className="ml-2 text-sky-400 hover:text-sky-300 text-[10px] underline"
-              onClick={e => { e.stopPropagation(); setPopupContent(node.value as string) }}
-            >
-              show full
-            </button>
-          )}
-        </div>
-      )
-    }
-    return (
-      <div className={`mt-1 break-all whitespace-pre-wrap text-xs ${copiedKey === cardKey ? 'text-amber-300' : 'text-emerald-300'}`}>
-        {formatInspectorPrimitive(node)}
-      </div>
-    )
-  }
-
   return (
     <>
       <div className="flex h-full flex-col rounded-lg border border-slate-700 bg-slate-900/60">
@@ -215,10 +200,14 @@ export const InspectorPane = ({
           {/* Summary box */}
           {!isAtRootScope && (
             <div className="flex-shrink-0 rounded-lg border border-slate-700 bg-black/20 p-3">
-              <div className="text-[11px] uppercase tracking-wider text-slate-500">{activeNode?.type || 'Value'}</div>
-              <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
-                <h3 className="text-lg font-bold text-white">{formatInspectorValue(activeNode)}</h3>
-                {isInspectorCompound(activeNode) && <span className="text-xs text-slate-400">{children.length} visible</span>}
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-baseline gap-2 min-w-0">
+                  <span className="text-sm font-bold text-white truncate">{activeNode?.type || 'Value'}</span>
+                  {isInspectorCompound(activeNode) && (
+                    <span className="text-xs text-slate-400 flex-shrink-0">{formatInspectorSummaryShort(activeNode)}</span>
+                  )}
+                </div>
+                {isInspectorCompound(activeNode) && <span className="text-xs text-slate-400 flex-shrink-0">{children.length} visible</span>}
               </div>
               {activeNode?.truncated && <div className="mt-3 text-xs text-amber-300">Showing first 120 entries.</div>}
               {!isInspectorCompound(activeNode) && (
@@ -229,58 +218,51 @@ export const InspectorPane = ({
             </div>
           )}
 
-          {/* Variable grid */}
+          {/* Variable list — one row per variable, click a compound to drill in */}
           {isInspectorCompound(activeNode) ? (
             children.length > 0 ? (
-              <div className="grid grid-cols-1 gap-2 xl:grid-cols-2">
+              <div className="flex flex-col overflow-hidden rounded-lg border border-slate-700 divide-y divide-slate-800">
                 {children.map((child, index) => {
                   const childNode = child.value
                   const canOpen = isInspectorCompound(childNode)
                   const cardKey = `${child.label}-${index}`
-                  const cardClasses = `rounded-lg border p-2 text-left transition-colors ${canOpen ? 'border-slate-600 bg-slate-900/70 hover:border-sky-500 cursor-pointer' : 'border-slate-700 bg-slate-900/40'}`
+                  const isLongString = childNode?.kind === 'primitive' && typeof childNode.value === 'string' && childNode.value.length > MAX_INLINE_STR
 
                   const handleContextMenu = (e: React.MouseEvent) => {
                     e.preventDefault()
                     copy(cardKey, getCopyText(childNode))
                   }
+                  const onRowClick = canOpen
+                    ? () => setPath([...path, { index, label: child.label }])
+                    : isLongString
+                      ? () => setPopupContent(childNode.value as string)
+                      : undefined
 
-                  if (canOpen) {
-                    return (
-                      <button
-                        type="button"
-                        key={cardKey}
-                        onClick={() => setPath([...path, { index, label: child.label }])}
-                        onContextMenu={handleContextMenu}
-                        className={cardClasses}
-                        title="Right-click to copy"
-                      >
-                        <div className="flex items-start justify-between gap-2">
-                          <span className="break-all font-semibold text-slate-100">{child.label}</span>
-                          <span className="text-[10px] uppercase tracking-wider text-slate-500">{childNode.type}</span>
-                        </div>
-                        <div className="mt-1 text-xs text-slate-300">{formatInspectorValue(childNode)}</div>
-                        <div className="mt-2 text-[11px] text-sky-300">
-                          {copiedKey === cardKey ? '✓ Copied' : 'Open ›'}
-                        </div>
-                      </button>
-                    )
-                  }
+                  const valueText = canOpen ? formatInspectorValue(childNode) : formatInspectorPrimitive(childNode)
+                  const rowClasses = `flex w-full items-center gap-2 px-2 py-1 text-left transition-colors bg-slate-800/60 ${onRowClick ? 'hover:bg-slate-700 cursor-pointer' : ''}`
 
-                  return (
-                    <div
-                      key={cardKey}
-                      className={cardClasses}
-                      onContextMenu={handleContextMenu}
-                      title="Right-click to copy"
-                    >
-                      <div className="flex items-start justify-between gap-2">
-                        <span className="break-all font-semibold text-slate-100">{child.label}</span>
-                        <span className="text-[10px] uppercase tracking-wider text-slate-500">{childNode?.type || 'value'}</span>
-                      </div>
-                      {renderPrimitiveValue(childNode, cardKey)}
-                      {copiedKey === cardKey && (
-                        <div className="mt-1 text-[10px] text-amber-300">✓ Copied</div>
-                      )}
+                  const rowInner = (
+                    <>
+                      <span className="flex-shrink-0 max-w-[45%] truncate font-semibold text-slate-100" title={child.label}>{child.label}</span>
+                      <span className="flex-shrink-0 text-[9px] uppercase tracking-wider text-slate-500">{childNode?.type || 'value'}</span>
+                      <span className={`flex-1 truncate text-right text-xs ${copiedKey === cardKey ? 'text-amber-300' : 'text-emerald-300'}`}
+                        title={valueText}>
+                        {copiedKey === cardKey ? '✓ Copied' : valueText}
+                      </span>
+                      {canOpen
+                        ? <span className="flex-shrink-0 text-sky-300">›</span>
+                        : isLongString ? <span className="flex-shrink-0 text-[10px] text-sky-400 underline">full</span> : null}
+                    </>
+                  )
+
+                  return onRowClick ? (
+                    <button type="button" key={cardKey} onClick={onRowClick} onContextMenu={handleContextMenu}
+                      className={rowClasses} title={canOpen ? 'Open — right-click to copy' : 'Show full — right-click to copy'}>
+                      {rowInner}
+                    </button>
+                  ) : (
+                    <div key={cardKey} className={rowClasses} onContextMenu={handleContextMenu} title="Right-click to copy">
+                      {rowInner}
                     </div>
                   )
                 })}
