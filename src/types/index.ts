@@ -5,6 +5,12 @@ export type TurtleMode = 'pyo-js-turtle' | 'basthon-svg'
 export type InputMode = 'inline-console' | 'input-bar' | 'popup-dialog'
 export type ViewMode = 'minimal' | 'developer'
 
+/** An editor breakpoint. `condition` is a Python boolean expression; empty = unconditional. */
+export interface Breakpoint {
+  enabled: boolean
+  condition: string
+}
+
 export interface AppSettings {
   turtleMode: TurtleMode
   inputMode: InputMode

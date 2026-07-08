@@ -191,9 +191,6 @@ export const InspectorPane = ({
                   </button>
                 </React.Fragment>
               ))}
-              <button type="button" onClick={() => setPath([])} className="ml-auto rounded border border-slate-600 px-2 py-1 text-slate-300 hover:border-sky-500">
-                Back
-              </button>
             </div>
           )}
 

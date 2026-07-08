@@ -62,7 +62,11 @@ for node in ast.walk(tree):
 
 frame_depths = {}
 pending_action = None
-current_breakpoints = []
+# Maps enabled breakpoint line numbers -> condition string ("" = unconditional).
+current_breakpoints = {}
+# Set by should_pause when the current pause is a genuine (condition-satisfied)
+# breakpoint hit, so the JS side can distinguish it from step/initial pauses.
+breakpoint_hit = False
 MAX_ITEMS = 120
 MAX_STRING = 120
 
@@ -243,8 +247,22 @@ def find_innermost_control_block(line_no):
         return None
     return min(matches, key=lambda block: (block["end"] - block["start"], -block["start"]))
 
+def breakpoint_matches(frame, line_no):
+    # Returns True when line_no has an enabled breakpoint whose condition (if any)
+    # evaluates truthy in the current frame. A broken condition never pauses.
+    if line_no not in current_breakpoints:
+        return False
+    cond = current_breakpoints[line_no]
+    if not cond:
+        return True
+    try:
+        return bool(eval(cond, frame.f_globals, frame.f_locals))
+    except Exception:
+        return False
+
 def should_pause(frame, line_no):
-    global pending_action
+    global pending_action, breakpoint_hit
+    breakpoint_hit = False
     if pending_action is None:
         return True
 
@@ -275,8 +293,9 @@ def should_pause(frame, line_no):
         return True
 
     if action_type == "continue":
-        if line_no in current_breakpoints:
+        if breakpoint_matches(frame, line_no):
             pending_action = None
+            breakpoint_hit = True
             return True
         return False
 
@@ -329,7 +348,7 @@ def trace_calls(frame, event, arg):
     watch_vals = evaluate_watches(frame)
     current_depth = get_depth(frame)
 
-    cmd = js_trace_callback(line_no, func_name, class_name, sim_state, watch_vals)
+    cmd = js_trace_callback(line_no, func_name, class_name, sim_state, watch_vals, breakpoint_hit)
     if cmd == 2:
         pending_action = {"type": "step_over", "depth": current_depth, "frame_id": id(frame), "line": line_no}
     elif cmd == 3:
@@ -387,26 +406,40 @@ self.onmessage = async function (e: MessageEvent) {
 
   const useSvgTurtle = Boolean(e.data.svgTurtleBootstrap)
 
-  pyodide.globals.set('js_trace_callback', (line: number, func: string, cls: string, stateStr: string, watchValsStr: string) => {
+  pyodide.globals.set('js_trace_callback', (line: number, func: string, cls: string, stateStr: string, watchValsStr: string, isBreakpoint: boolean) => {
     let turtleSvg = ''
     if (useSvgTurtle) {
       try { turtleSvg = String(pyodide.globals.get('__turtle_svg__') ?? '') } catch { /* ignore */ }
     }
     let watchValues: Record<string, unknown> = {}
     try { if (watchValsStr && watchValsStr !== '{}') watchValues = JSON.parse(watchValsStr) } catch { /* ignore */ }
-    self.postMessage({ type: 'trace', line, func, cls, state: stateStr, turtleSvg, watchValues })
+    self.postMessage({ type: 'trace', line, func, cls, state: stateStr, turtleSvg, watchValues, isBreakpoint })
     Atomics.store(int32View, 0, 1)
     Atomics.wait(int32View, 0, 1)
     const cmd = Atomics.load(int32View, 1)
+    // Rebuild the breakpoint map: enabled line numbers (int32[500]=count,
+    // int32[501..]) plus a conditions JSON blob (int32[600]=byteLen, uint8[2404..]).
+    // A Map (not a plain object) makes pyodide.toPy produce int keys.
     const bpCount = Atomics.load(int32View, 500)
-    const bps: number[] = []
-    for (let i = 0; i < bpCount && i < 99; i++) bps.push(Atomics.load(int32View, 501 + i))
-    pyodide.globals.set('current_breakpoints', pyodide.toPy(bps))
+    const bpMap = new Map<number, string>()
+    for (let i = 0; i < bpCount && i < 99; i++) bpMap.set(Atomics.load(int32View, 501 + i), '')
+    try {
+      const condLen = Atomics.load(int32View, 600)
+      if (condLen > 0) {
+        // .slice() (not .subarray()) copies into a non-shared ArrayBuffer;
+        // TextDecoder.decode() rejects SharedArrayBuffer-backed views.
+        const condBytes = uint8View.slice(2404, 2404 + Math.min(condLen, 592))
+        const condMap = JSON.parse(new TextDecoder().decode(condBytes)) as Record<string, string>
+        for (const k in condMap) bpMap.set(Number(k), condMap[k])
+      }
+    } catch { /* ignore malformed conditions */ }
+    pyodide.globals.set('current_breakpoints', pyodide.toPy(bpMap))
     // Read updated watch expressions from SAB (int32[750]=length at bytes 3000-3003, json at bytes 3004+)
     try {
       const watchLen = Atomics.load(int32View, 750)
       if (watchLen >= 0) {
-        const watchBytes = uint8View.subarray(3004, 3004 + Math.min(watchLen, 1092))
+        // .slice() copies out of the SharedArrayBuffer (TextDecoder can't decode a shared view).
+        const watchBytes = uint8View.slice(3004, 3004 + Math.min(watchLen, 1092))
         const exprs: string[] = watchLen === 0 ? [] : JSON.parse(new TextDecoder().decode(watchBytes))
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         pyodide.globals.set('watch_expressions', (pyodide as any).toPy(exprs))

@@ -54,7 +54,7 @@ import type {
   StructureModel, DiagramModel, HierarchyModel, OutlineModel, DiagramView, VFSEntry,
   LocalFolderSyncOp,
   AppSettings, BookNavState, BookChallenge, NamedLayout, InspectorNode,
-  OverallTestResult, TesterRunOutput, ViewMode,
+  OverallTestResult, TesterRunOutput, ViewMode, Breakpoint,
 } from './types'
 import { evaluateAll } from './utils/testMatcher'
 import { startVersionPolling } from './utils/versionCheck'
@@ -180,6 +180,23 @@ const PYTHON_KEYWORDS = new Set([
   'return', 'try', 'while', 'with', 'yield',
 ])
 
+// Build Monaco glyph decorations for the current breakpoints. Shared between the
+// [breakpoints] effect and editor (re)mount so glyphs survive an editor remount
+// (e.g. after a "run" that hid the code panel).
+const buildBreakpointDecorations = (map: Map<number, Breakpoint>): MonacoEditor.IModelDeltaDecoration[] =>
+  [...map.entries()].map(([line, bp]) => {
+    const classes = ['monaco-breakpoint-glyph']
+    if (!bp.enabled) classes.push('monaco-breakpoint-disabled')
+    if (bp.condition.trim()) classes.push('monaco-breakpoint-conditional')
+    const hover = bp.condition.trim()
+      ? `Conditional breakpoint: ${bp.condition}${bp.enabled ? '' : ' (disabled)'}`
+      : bp.enabled ? 'Breakpoint' : 'Breakpoint (disabled)'
+    return {
+      range: { startLineNumber: line, startColumn: 1, endLineNumber: line, endColumn: 1 },
+      options: { glyphMarginClassName: classes.join(' '), glyphMarginHoverMessage: { value: hover }, stickiness: 1 },
+    }
+  })
+
 export default function App() {
   const dialogs = useDialogs()
   const [codeText, setCodeText] = useState('')
@@ -254,8 +271,14 @@ export default function App() {
   const [showInterpreterVars] = useState(false)
   const [globalsInspectorPath, setGlobalsInspectorPath] = useState<InspectorPath>([])
   const [localsInspectorPath, setLocalsInspectorPath] = useState<InspectorPath>([])
-  const [breakpoints, setBreakpoints] = useState<Set<number>>(new Set())
-  const breakpointsRef = useRef<Set<number>>(new Set())
+  // A breakpoint is keyed by line number. `enabled` false = present but inactive
+  // (hollow glyph); `condition` non-empty = conditional (glyph shows a tilde).
+  const [breakpoints, setBreakpoints] = useState<Map<number, Breakpoint>>(new Map())
+  const breakpointsRef = useRef<Map<number, Breakpoint>>(new Map())
+  const [bpMenu, setBpMenu] = useState<{ line: number; x: number; y: number } | null>(null)
+  const bpMenuRef = useRef<HTMLDivElement | null>(null)
+  const [isBpToolMenuOpen, setIsBpToolMenuOpen] = useState(false)
+  const bpToolMenuRef = useRef<HTMLDivElement | null>(null)
   const [runModeChoice, setRunModeChoice] = useState<'trace' | 'run' | 'break'>('trace')
   const [isRunDropdownOpen, setIsRunDropdownOpen] = useState(false)
   const [editorFontSize, setEditorFontSize] = useState(() => getStoredEditorFontSize())
@@ -531,6 +554,19 @@ export default function App() {
     return () => document.removeEventListener('mousedown', handle)
   }, [isRunDropdownOpen])
 
+  // Close the breakpoint context menu / toolbar menu on outside click or Escape.
+  useEffect(() => {
+    if (!bpMenu && !isBpToolMenuOpen) return
+    const handle = (e: MouseEvent) => {
+      if (bpMenu && !bpMenuRef.current?.contains(e.target as Node)) setBpMenu(null)
+      if (isBpToolMenuOpen && !bpToolMenuRef.current?.contains(e.target as Node)) setIsBpToolMenuOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { setBpMenu(null); setIsBpToolMenuOpen(false) } }
+    document.addEventListener('mousedown', handle)
+    document.addEventListener('keydown', onKey)
+    return () => { document.removeEventListener('mousedown', handle); document.removeEventListener('keydown', onKey) }
+  }, [bpMenu, isBpToolMenuOpen])
+
   useEffect(() => {
     if (!isPanelMenuOpen && !isRuntimeMenuOpen && !isQuickSettingsOpen) return
     const handlePointerDown = (event: MouseEvent) => {
@@ -644,12 +680,7 @@ export default function App() {
     const editor = editorRef.current
     const decorations = breakpointDecorationsRef.current
     if (!editor || !decorations) return
-    decorations.set(
-      [...breakpoints].map(line => ({
-        range: { startLineNumber: line, startColumn: 1, endLineNumber: line, endColumn: 1 },
-        options: { glyphMarginClassName: 'monaco-breakpoint-glyph', stickiness: 1 },
-      })),
-    )
+    decorations.set(buildBreakpointDecorations(breakpoints))
   }, [breakpoints])
 
   // Sync current line highlight into editor decorations
@@ -738,6 +769,45 @@ export default function App() {
     return () => window.clearTimeout(id)
   }, [turtleScrubPlaying, turtleScrubStep, turtleSvgHistory.length, turtleScrubSpeed])
 
+  // ── Breakpoint mutation helpers ────────────────────────────────────────────
+  const commitBreakpoints = (next: Map<number, Breakpoint>) => {
+    breakpointsRef.current = next
+    setBreakpoints(new Map(next))
+  }
+  const toggleBreakpointAt = (line: number) => {
+    const next = new Map(breakpointsRef.current)
+    if (next.has(line)) next.delete(line)
+    else next.set(line, { enabled: true, condition: '' })
+    commitBreakpoints(next)
+  }
+  const setBreakpointAt = (line: number, bp: Breakpoint) => {
+    const next = new Map(breakpointsRef.current)
+    next.set(line, bp)
+    commitBreakpoints(next)
+  }
+  const removeBreakpointAt = (line: number) => {
+    const next = new Map(breakpointsRef.current)
+    next.delete(line)
+    commitBreakpoints(next)
+  }
+  const setAllBreakpointsEnabled = (enabled: boolean) => {
+    const next = new Map<number, Breakpoint>()
+    for (const [line, bp] of breakpointsRef.current) next.set(line, { ...bp, enabled })
+    commitBreakpoints(next)
+  }
+  const editBreakpointConditionAt = async (line: number) => {
+    const existing = breakpointsRef.current.get(line)
+    const condition = await dialogs.prompt({
+      title: 'Conditional breakpoint',
+      message: 'Pause here only when this Python expression is true (leave blank to clear):',
+      defaultValue: existing?.condition ?? '',
+      placeholder: 'e.g. i == 5 and total > 100',
+      confirmLabel: 'Set',
+    })
+    if (condition === null) return
+    setBreakpointAt(line, { enabled: existing?.enabled ?? true, condition: condition.trim() })
+  }
+
   // ── Monaco editor handlers ────────────────────────────────────────────────
 
   const handleEditorBeforeMount = (monaco: Monaco) => {
@@ -754,18 +824,35 @@ export default function App() {
     editorDecorationsRef.current = editor.createDecorationsCollection()
     breakpointDecorationsRef.current = editor.createDecorationsCollection()
     traceValueDecorationsRef.current = editor.createDecorationsCollection()
+    // Restore breakpoint glyphs: the editor may be remounting after a run that
+    // hid the code panel, and the [breakpoints] effect won't re-fire on remount.
+    breakpointDecorationsRef.current.set(buildBreakpointDecorations(breakpointsRef.current))
 
     editor.onMouseDown(e => {
-      if (e.target.type === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN) {
+      if (e.event.leftButton && e.target.type === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN) {
         const line = e.target.position?.lineNumber
         if (!line) return
-        const next = new Set(breakpointsRef.current)
-        if (next.has(line)) next.delete(line)
-        else next.add(line)
-        breakpointsRef.current = next
-        setBreakpoints(new Set(next))
+        setBpMenu(null)
+        toggleBreakpointAt(line)
       }
     })
+
+    // Right-click on the glyph margin opens a custom breakpoint menu (disable /
+    // delete / edit condition). A capture-phase listener lets us suppress
+    // Monaco's own context menu only for the glyph margin.
+    const domNode = editor.getDomNode()
+    if (domNode) {
+      domNode.addEventListener('contextmenu', (ev: MouseEvent) => {
+        const target = editor.getTargetAtClientPoint(ev.clientX, ev.clientY)
+        if (target && target.type === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN) {
+          const line = target.position?.lineNumber
+          if (!line) return
+          ev.preventDefault()
+          ev.stopPropagation()
+          setBpMenu({ line, x: ev.clientX, y: ev.clientY })
+        }
+      }, true)
+    }
 
     // Track cursor position for notes editing
     editor.onDidChangeCursorPosition(e => {
@@ -836,8 +923,8 @@ export default function App() {
 
   const loadCodeText = (text: string, fileName = DEFAULT_CODE_FILENAME, vfsPath: string | null = null) => {
     const cleanCode = cleanCodeText(text)
-    breakpointsRef.current = new Set()
-    setBreakpoints(new Set())
+    breakpointsRef.current = new Map()
+    setBreakpoints(new Map())
     setCodeText(cleanCode)
     setCodeFileName(fileName)
     setCodeStatus(`${fileName} loaded.`)
@@ -1834,7 +1921,9 @@ export default function App() {
         if (mode === 'run') {
           sendTraceCommand(TRACE_CMD_CONTINUE)
         } else if (mode === 'break') {
-          if (breakpointsRef.current.has(data.line)) {
+          // The worker only reports isBreakpoint when an enabled breakpoint's
+          // condition (if any) held, so trust its verdict rather than re-checking.
+          if (data.isBreakpoint) {
             workerRunModeRef.current = 'trace'
             setCurrentLine(data.line); setCurrentFunc(data.func); setCurrentClass(data.cls || '')
             if (data.state && data.state !== '{}') {
@@ -2108,9 +2197,20 @@ exec(code_obj, globals())
         setTurtleScrubPlaying(false)
         setTurtleScrubStep(turtleSvgHistoryRef.current.length - 1)
       }
-      const bpArr = [...breakpointsRef.current]
-      int32[500] = bpArr.length
-      bpArr.forEach((ln, i) => { if (i < 99) int32[501 + i] = ln })
+      // Only enabled breakpoints reach the worker. Line numbers go in
+      // int32[500]=count / int32[501..]; conditions (line→expr, conditional
+      // ones only) go as JSON in int32[600]=byteLen / uint8[2404..].
+      const enabledBps = [...breakpointsRef.current.entries()].filter(([, bp]) => bp.enabled)
+      int32[500] = Math.min(enabledBps.length, 99)
+      const conditions: Record<number, string> = {}
+      enabledBps.forEach(([ln, bp], i) => {
+        if (i < 99) int32[501 + i] = ln
+        if (bp.condition.trim()) conditions[ln] = bp.condition.trim()
+      })
+      const condBytes = new TextEncoder().encode(JSON.stringify(conditions))
+      const condLen = Math.min(condBytes.length, 592)
+      uint8.set(condBytes.subarray(0, condLen), 2404)
+      int32[600] = condLen
       // Write current watch expressions to SAB (int32[750]=length, uint8[3004..]=JSON)
       const watchJson = JSON.stringify(watchesRef.current)
       const watchBytes = new TextEncoder().encode(watchJson)
@@ -2924,11 +3024,42 @@ exec(code_obj, globals())
                         <option key={sz} value={sz}>{sz}px</option>
                       ))}
                     </select>
-                    <IconButton title="Clear all breakpoints" onClick={() => { breakpointsRef.current = new Set(); setBreakpoints(new Set()) }} disabled={breakpoints.size === 0}>
-                      <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
-                      </svg>
-                    </IconButton>
+                    <div ref={bpToolMenuRef} className="relative">
+                      <button
+                        type="button"
+                        title="Breakpoints"
+                        aria-label="Breakpoints"
+                        onClick={() => setIsBpToolMenuOpen(o => !o)}
+                        disabled={breakpoints.size === 0}
+                        className="icon-button"
+                      >
+                        <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <circle cx="12" cy="12" r="7" strokeWidth="2" />
+                        </svg>
+                      </button>
+                      {isBpToolMenuOpen && (
+                        <div className="absolute right-0 top-full mt-1 z-50 w-44 rounded-lg border border-slate-600 bg-slate-800 shadow-xl py-1">
+                          {([
+                            { key: 'remove' as const, label: 'Remove all breakpoints' },
+                            { key: 'disable' as const, label: 'Disable all' },
+                            { key: 'enable' as const, label: 'Enable all' },
+                          ]).map(({ key, label }) => (
+                            <button
+                              key={key}
+                              type="button"
+                              onClick={() => {
+                                if (key === 'remove') commitBreakpoints(new Map())
+                                else setAllBreakpointsEnabled(key === 'enable')
+                                setIsBpToolMenuOpen(false)
+                              }}
+                              className="w-full px-3 py-2 text-left text-sm text-slate-200 hover:bg-slate-700 transition-colors"
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                     <IconButton title="Save to virtual filesystem" onClick={() => void handleSaveCode()} disabled={!hasCode || isRunning}>
                       <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2zM17 21v-8H7v8M7 3v5h8" />
@@ -3185,6 +3316,49 @@ exec(code_obj, globals())
           onCancel={() => { setShowCodeSaveDialog(false); setPendingCodeLoad(null) }}
         />
       )}
+
+      {/* Right-click breakpoint context menu */}
+      {bpMenu && (() => {
+        const line = bpMenu.line
+        const bp = breakpointsRef.current.get(line)
+        const itemClass = 'w-full px-3 py-2 text-left text-slate-200 hover:bg-slate-700 transition-colors'
+        return (
+          <div
+            ref={bpMenuRef}
+            className="fixed z-[70] w-56 rounded-lg border border-slate-600 bg-slate-800 shadow-2xl py-1 text-sm"
+            style={{ left: bpMenu.x, top: bpMenu.y }}
+          >
+            <div className="px-3 py-1.5 text-[11px] uppercase tracking-wider text-slate-500 border-b border-slate-700">Line {line}</div>
+            {bp ? (
+              <>
+                <button type="button" className={itemClass}
+                  onClick={() => { setBreakpointAt(line, { ...bp, enabled: !bp.enabled }); setBpMenu(null) }}>
+                  {bp.enabled ? 'Disable breakpoint' : 'Enable breakpoint'}
+                </button>
+                <button type="button" className={itemClass}
+                  onClick={() => { setBpMenu(null); void editBreakpointConditionAt(line) }}>
+                  {bp.condition.trim() ? 'Edit condition…' : 'Add condition…'}
+                </button>
+                <button type="button" className="w-full px-3 py-2 text-left text-red-300 hover:bg-slate-700 transition-colors"
+                  onClick={() => { removeBreakpointAt(line); setBpMenu(null) }}>
+                  Delete breakpoint
+                </button>
+              </>
+            ) : (
+              <>
+                <button type="button" className={itemClass}
+                  onClick={() => { setBreakpointAt(line, { enabled: true, condition: '' }); setBpMenu(null) }}>
+                  Add breakpoint
+                </button>
+                <button type="button" className={itemClass}
+                  onClick={() => { setBpMenu(null); void editBreakpointConditionAt(line) }}>
+                  Add conditional breakpoint…
+                </button>
+              </>
+            )}
+          </div>
+        )
+      })()}
     </div>
   )
 }
