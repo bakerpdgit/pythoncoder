@@ -57,23 +57,23 @@ pre code { font-family: "Courier New", Courier, monospace; }
 
 .resize-handle-col {
   cursor: col-resize;
-  width: 8px;
+  width: 4px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  margin: 0 2px;
+  margin: 0 1px;
   z-index: 20;
 }
 
 .resize-handle-row {
   cursor: row-resize;
-  height: 8px;
+  height: 4px;
   flex-shrink: 0;
   display: flex;
   justify-content: center;
   align-items: center;
-  margin: 2px 0;
+  margin: 1px 0;
   z-index: 20;
 }
 

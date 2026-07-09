@@ -18,11 +18,11 @@ import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides, getStored
 import { triggerDownload, getBaseFileStem } from './utils/download'
 import { buildCommentExport, buildDocstringExport, replaceExistingDocstring, getDefinitionNote, getDefaultDefinitionNote, sanitizeNoteText } from './utils/export'
 import { loadMainThreadPyodide, resetMainThreadPyodide, PYGAME_MAIN_THREAD_BOOTSTRAP, TURTLE_CANVAS_BOOTSTRAP, TURTLE_SVG_BOOTSTRAP, SVG_TURTLE_WORKER_SETUP } from './utils/mainThread'
-import { fetchBookManifest, getOrCreateChallengeFs, getHiddenPathsForFs, BOOK_FS_PREFIX, BOOK_SRC_PREFIX } from './utils/bookLoader'
+import { fetchBookManifest, getOrCreateChallengeFs, getHiddenPathsForFs, isBookUrl, BOOK_FS_PREFIX, BOOK_SRC_PREFIX } from './utils/bookLoader'
 import {
   ensureDefaultFilesystem, getAllFiles, syncFilesFromPyodide, writeFile,
   isTextMime, guessMimeType, mountFilesToPyodide, readFilesFromPyodide,
-  getEntryByPath, cleanFilesFromPyodide, ensureFilesystemFromUrl,
+  getEntryByPath, cleanFilesFromPyodide, ensureFilesystemFromUrl, loadFilesystemFromUrl,
   createFilesystem, deleteFilesystem, listFilesystems, importFileMapToFs,
 } from './utils/virtualFS'
 import { buildVfsPreviewUrl, ensureVfsPreviewServiceWorker, isHtmlFile } from './utils/htmlPreview'
@@ -450,7 +450,19 @@ export default function App() {
       await ensureDefaultFilesystem()
       setVfsReloadTrigger(t => t + 1)
 
-      const fsParam = new URLSearchParams(window.location.search).get('filesystem')
+      const params = new URLSearchParams(window.location.search)
+
+      // ?book=<encoded url> — auto-open a learning book (book.json or ZIP) hosted
+      // anywhere. Routing (GitHub-direct → proxy) is handled by openResourceUrl.
+      const bookParam = params.get('book')
+      if (bookParam) {
+        try {
+          await openResourceUrl(decodeURIComponent(bookParam))
+          return
+        } catch { /* fall through to default */ }
+      }
+
+      const fsParam = params.get('filesystem')
       if (fsParam) {
         const url = decodeURIComponent(fsParam)
         try {
@@ -1663,6 +1675,36 @@ export default function App() {
     }
   }
 
+  // Single entry point for "open a resource from the web" — used by the open-from-web
+  // wizards and the ?book= querystring. A book.json URL opens directly as a book; any
+  // other URL is fetched as a ZIP and opened as a book (if it contains book.json) or a
+  // plain filesystem otherwise.
+  const openResourceUrl = async (rawUrl: string) => {
+    const url = rawUrl.trim()
+    if (!url) return
+    try {
+      if (isBookUrl(url)) {
+        await handleBookOpen(url)
+        revealFilesystemPanel()
+        return
+      }
+      // Re-fetch fresh (avoids stale duplicates when the same link is reopened).
+      const existing = (await listFilesystems()).find(f => f.name === url)
+      if (existing) await deleteFilesystem(existing.id)
+      const fsId = await loadFilesystemFromUrl(url)
+      const bookEntry = await getEntryByPath(fsId, '/book.json')
+      if (bookEntry) {
+        await handleBookOpen(`vfs://fs:${fsId}/book.json`)
+      } else {
+        handleFilesystemForcedChange(fsId)
+        await autoOpenMainPy(fsId)
+      }
+      revealFilesystemPanel()
+    } catch (e) {
+      setCodeStatus(`Failed to open from URL: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
   const handleBookNavStateChange = (state: BookNavState) => {
     setBookNavState(state)
     persistBookNavState(state)
@@ -2748,7 +2790,7 @@ exec(code_obj, globals())
       )}
 
       {/* Main Layout */}
-      <div ref={mainContainerRef} className="flex-1 flex overflow-hidden p-2 gap-1.5">
+      <div ref={mainContainerRef} className="flex-1 flex overflow-hidden p-2 gap-[3px]">
 
         {/* LEFT SIDEBAR: File System (top) + Variable Inspector (bottom) */}
         {hasLeftSidebar && leftSidebarCollapsed && (
@@ -2823,6 +2865,9 @@ exec(code_obj, globals())
                             openFilePath={openFilePath}
                             hiddenPaths={challengeHiddenPaths}
                             isChallengeMode={!!bookNavState?.activeChallengeId}
+                            isBookOpen={!!bookNavState}
+                            onCloseBook={handleCloseBook}
+                            onOpenResourceUrl={url => void openResourceUrl(url)}
                             onFilesystemChange={id => void handleFilesystemChange(id)}
                             onFilesystemForcedChange={handleFilesystemForcedChange}
                             onFilesystemCreated={id => void handleFilesystemCreated(id)}
@@ -2979,7 +3024,7 @@ exec(code_obj, globals())
 
         {/* CENTER: Code Editor + Right Column (Developer) OR Code top / Console bottom (Minimal) */}
         {(visiblePanels.code || visiblePanels.output || (visiblePanels.diagram && viewMode === 'developer')) && (
-        <div ref={centerRef} className={`flex-1 ${viewMode === 'minimal' ? 'flex flex-col' : 'flex'} overflow-hidden gap-1.5 min-w-0`}>
+        <div ref={centerRef} className={`flex-1 ${viewMode === 'minimal' ? 'flex flex-col' : 'flex'} overflow-hidden gap-[3px] min-w-0`}>
 
         {/* Code Editor */}
         {visiblePanels.code && (

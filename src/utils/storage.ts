@@ -45,6 +45,23 @@ export const persistFixedInputs = (fsId: string, text: string): void => {
   } catch { /* ignore */ }
 }
 
+const GITHUB_TOKEN_KEY = 'pythoncoder-github-token'
+
+export const getStoredGitHubToken = (): string => {
+  try {
+    return localStorage.getItem(GITHUB_TOKEN_KEY) ?? ''
+  } catch {
+    return ''
+  }
+}
+
+export const persistGitHubToken = (token: string): void => {
+  try {
+    if (token.trim()) localStorage.setItem(GITHUB_TOKEN_KEY, token.trim())
+    else localStorage.removeItem(GITHUB_TOKEN_KEY)
+  } catch { /* ignore */ }
+}
+
 const BOOK_NAV_KEY = 'pythoncoder-book-nav'
 
 export const getStoredBookNavState = (): BookNavState | null => {

@@ -3,13 +3,13 @@ import {
   listChildren, listFilesystems, createFilesystem, deleteFilesystem, renameFilesystem,
   createEntry, deleteEntry, renameEntry, getEntryByPath, guessMimeType,
   isTextMime, isImageMime, downloadEntryAsZip, downloadSingleFile, writeFile,
-  getParentPath, loadFilesystemFromUrl,
+  getParentPath,
 } from '../utils/virtualFS'
-import { isBookUrl, BOOK_FS_PREFIX, BOOK_SRC_PREFIX, getBookFsDisplayName } from '../utils/bookLoader'
+import { BOOK_FS_PREFIX, BOOK_SRC_PREFIX, getBookFsDisplayName } from '../utils/bookLoader'
 import { isHtmlFile } from '../utils/htmlPreview'
 import { ConfirmDialog } from './dialogs/ConfirmDialog'
 import { SaveFileDialog } from './dialogs/SaveFileDialog'
-import { useDialogs } from './dialogs/DialogProvider'
+import { OpenResourceDialog } from './dialogs/OpenResourceDialog'
 import type { VFSEntry, VFSFilesystem, LocalFolderSyncOp } from '../types'
 
 interface Props {
@@ -18,6 +18,9 @@ interface Props {
   openFilePath: string | null
   hiddenPaths?: string[]
   isChallengeMode?: boolean
+  isBookOpen?: boolean
+  onCloseBook?: () => void
+  onOpenResourceUrl?: (url: string) => void
   onFilesystemChange: (id: string) => void
   onFilesystemForcedChange: (id: string) => void
   onFilesystemCreated: (id: string) => void
@@ -55,13 +58,13 @@ interface ImagePreview {
 
 export function FileSystemPanel({
   activeFilesystemId, currentWorkingDir, openFilePath, hiddenPaths, isChallengeMode,
+  isBookOpen, onCloseBook, onOpenResourceUrl,
   onFilesystemChange, onFilesystemForcedChange, onFilesystemCreated, onCwdChange, onOpenFile, onError, onBookOpen,
   onPreviewHtml, onLocalFileImport, onFolderConnect,
   isLocalFolderConnected, onLocalFolderSync, onReloadFolder, onDisconnectFolder, onCloseFolder,
   diskDeleteWarnDismissed, onDismissDiskDeleteWarn,
   reloadTrigger,
 }: Props) {
-  const dialogs = useDialogs()
   const [filesystems, setFilesystems] = useState<VFSFilesystem[]>([])
   const [currentFsEntry, setCurrentFsEntry] = useState<VFSFilesystem | null>(null)
   const [currentPath, setCurrentPath] = useState('/')
@@ -79,10 +82,8 @@ export function FileSystemPanel({
   const [pendingUpload, setPendingUpload] = useState<{ name: string; content: ArrayBuffer; mimeType: string } | null>(null)
   const [imagePreview, setImagePreview] = useState<ImagePreview | null>(null)
   const [showFsMenu, setShowFsMenu] = useState(false)
-  const [showUrlDialog, setShowUrlDialog] = useState(false)
-  const [urlInput, setUrlInput] = useState('')
-  const [urlLoading, setUrlLoading] = useState(false)
-  const [urlError, setUrlError] = useState('')
+  const [showOpenDialog, setShowOpenDialog] = useState(false)
+  const [showNewMenu, setShowNewMenu] = useState(false)
   const uploadInputRef = useRef<HTMLInputElement>(null)
   const zipInputRef = useRef<HTMLInputElement>(null)
   const fsMenuRef = useRef<HTMLDivElement>(null)
@@ -287,50 +288,6 @@ export function FileSystemPanel({
     await downloadEntryAsZip(activeFilesystemId, '/', fs?.name ?? 'filesystem')
   }
 
-  const handleLoadFromUrl = async () => {
-    const url = urlInput.trim()
-    if (!url) return
-
-    // Book.json URL → open as learning book
-    if (isBookUrl(url)) {
-      setShowUrlDialog(false)
-      setUrlInput('')
-      onBookOpen?.(url)
-      return
-    }
-
-    setUrlLoading(true)
-    setUrlError('')
-    try {
-      const fsList = await listFilesystems()
-      const existing = fsList.find(f => f.name === url)
-      if (existing) {
-        if (!(await dialogs.confirm({
-          title: 'Filesystem already exists',
-          message: 'A filesystem for this URL already exists. Overwrite with fresh content from the URL?',
-          confirmLabel: 'Overwrite', danger: true,
-        }))) {
-          setUrlLoading(false)
-          return
-        }
-        await deleteFilesystem(existing.id)
-      }
-      const fsId = await loadFilesystemFromUrl(url)
-      setShowUrlDialog(false)
-      setUrlInput('')
-      const bookEntry = await getEntryByPath(fsId, '/book.json')
-      if (bookEntry && onBookOpen) {
-        onBookOpen(`vfs://fs:${fsId}/book.json`)
-      } else {
-        onFilesystemChange(fsId)
-      }
-    } catch (err) {
-      setUrlError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setUrlLoading(false)
-    }
-  }
-
   const handleZipFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     e.target.value = ''
@@ -376,10 +333,18 @@ export function FileSystemPanel({
 
   const currentFs = filesystems.find(f => f.id === activeFilesystemId)
 
+  // While a book is open but no exercise is chosen yet, the root file tree still
+  // shows the previous filesystem — which shouldn't be reachable until an
+  // exercise loads its own files (or the book is closed). Hide it until then.
+  const showFileBrowser = !isBookOpen || isChallengeMode
+
   return (
     <div className="flex flex-col h-full overflow-hidden text-xs select-none">
-      {/* Filesystem selector / challenge label */}
+      {/* Filesystem selector + open / close-book controls */}
       <div className="px-2 py-2 border-b border-slate-700 flex items-center gap-1 flex-shrink-0">
+        {/* Hidden inputs driven by the Open dialog and the Upload action */}
+        <input ref={uploadInputRef} type="file" aria-label="Upload file" className="hidden" onChange={handleUpload} />
+        <input ref={zipInputRef} type="file" accept=".zip" aria-label="Open ZIP file" className="hidden" onChange={e => void handleZipFileChange(e)} />
         {isChallengeMode ? (
           <div className="flex items-center gap-1.5 px-2 py-1.5 rounded border border-slate-700 bg-slate-900 text-amber-400 text-xs flex-1 min-w-0">
             <svg className="w-3 h-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -388,6 +353,13 @@ export function FileSystemPanel({
             <span className="truncate font-medium">
               {currentFsEntry ? getBookFsDisplayName(currentFsEntry.name) : 'Challenge Files'}
             </span>
+          </div>
+        ) : isBookOpen ? (
+          <div className="flex items-center gap-1.5 px-2 py-1.5 rounded border border-slate-700 bg-slate-900 text-amber-400 text-xs flex-1 min-w-0">
+            <svg className="w-3 h-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+            </svg>
+            <span className="truncate font-medium">Choose exercise</span>
           </div>
         ) : (
           <div className="relative flex-1" ref={fsMenuRef}>
@@ -449,65 +421,34 @@ export function FileSystemPanel({
             )}
           </div>
         )}
-      </div>
-
-      {/* Toolbar */}
-      <div className="px-2 py-1 border-b border-slate-700 flex flex-wrap items-center gap-1 flex-shrink-0">
-        <input ref={uploadInputRef} type="file" aria-label="Upload file" className="hidden" onChange={handleUpload} />
-        <input ref={zipInputRef} type="file" accept=".zip" aria-label="Open ZIP file" className="hidden" onChange={e => void handleZipFileChange(e)} />
-        <ToolbarBtn title="New file" onClick={handleNewFile}>
-          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 13h6m-3-3v6m-9 1V7a2 2 0 012-2h6l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
-          </svg>
-        </ToolbarBtn>
-        <ToolbarBtn title="New folder" onClick={() => { setShowNewFolderInline(true); setNewFolderName('') }}>
-          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 13h6m-3-3v6m4-11H4a2 2 0 00-2 2v12a2 2 0 002 2h16a2 2 0 002-2V8a2 2 0 00-2-2h-8l-2-2z" />
-          </svg>
-        </ToolbarBtn>
-        <ToolbarBtn title="Upload file" onClick={() => uploadInputRef.current?.click()}>
-          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-          </svg>
-        </ToolbarBtn>
-        <ToolbarBtn title="Open local ZIP file (import as filesystem or learning book)" onClick={() => zipInputRef.current?.click()}>
-          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8l1 12a2 2 0 002 2h8a2 2 0 002-2l1-12" />
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 12h4" />
-          </svg>
-        </ToolbarBtn>
-        <ToolbarBtn title="Connect local folder (two-way sync with disk, or learning book)" onClick={() => void handleFolderOpen()}>
-          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 11v6m-3-3l3 3 3-3" />
-          </svg>
-        </ToolbarBtn>
-        {isLocalFolderConnected && (
-          <ToolbarBtn title="Reload from connected local folder (pick up external edits on disk)" onClick={() => onReloadFolder?.()}>
-            <svg className="w-3.5 h-3.5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+        {isBookOpen ? (
+          <button type="button" onClick={() => onCloseBook?.()}
+            title="Close this learning book (needed before opening a different source)"
+            className="flex items-center gap-1 px-2 py-1.5 rounded border border-slate-600 text-slate-300 hover:border-red-500 hover:text-red-300 transition-colors flex-shrink-0 text-[11px]">
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
             </svg>
-          </ToolbarBtn>
+            Close book
+          </button>
+        ) : (
+          <button type="button" onClick={() => setShowOpenDialog(true)}
+            title="Open a ZIP, connect a local folder, or open a book from the web"
+            className="flex items-center gap-1 px-2 py-1.5 rounded border border-slate-600 text-slate-300 hover:border-sky-500 hover:text-sky-300 transition-colors flex-shrink-0">
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 11v4m-2-2h4" />
+            </svg>
+            Open
+          </button>
         )}
-        <ToolbarBtn title="Open from URL (ZIP or book.json)" onClick={() => { setUrlError(''); setShowUrlDialog(true) }}>
-          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <circle cx="12" cy="12" r="10" strokeWidth="2" />
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M2 12h20M12 2a15.3 15.3 0 010 20M12 2a15.3 15.3 0 000 20" />
-          </svg>
-        </ToolbarBtn>
-        <ToolbarBtn title="Set current folder as working directory" onClick={handleSetCwd}>
-          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-            <text x="12" y="17" textAnchor="middle" fontSize="7" fill="currentColor" stroke="none" fontFamily="monospace">~</text>
-          </svg>
-        </ToolbarBtn>
-        <ToolbarBtn title="Download filesystem as ZIP" onClick={() => void handleDownloadFs()}>
-          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-          </svg>
-        </ToolbarBtn>
       </div>
 
+      {!showFileBrowser ? (
+        <div className="flex-1 flex items-center justify-center px-6 text-center text-slate-500 text-[11px] leading-relaxed">
+          Choose an example or task from the book to load its files here.
+        </div>
+      ) : (
+      <>
       {/* Connected local folder banner */}
       {isLocalFolderConnected && (
         <div className="px-2 py-1.5 border-b border-slate-700 bg-emerald-500/10 flex items-center gap-2 flex-shrink-0">
@@ -530,17 +471,74 @@ export function FileSystemPanel({
         </div>
       )}
 
-      {/* Breadcrumb */}
-      <div className="px-2 py-1 border-b border-slate-700 flex items-center gap-0.5 overflow-x-auto flex-shrink-0">
-        {breadcrumbs.map((crumb, i) => (
-          <span key={crumb.path} className="flex items-center gap-0.5 flex-shrink-0">
-            {i > 0 && <span className="text-slate-600">/</span>}
-            <button onClick={() => navigate(crumb.path)}
-              className={`px-1 py-0.5 rounded hover:bg-slate-700 transition-colors ${i === breadcrumbs.length - 1 ? 'text-slate-200' : 'text-slate-400 hover:text-slate-200'}`}>
-              {crumb.label}
-            </button>
-          </span>
-        ))}
+      {/* Breadcrumb + root file actions */}
+      <div className="px-2 py-1 border-b border-slate-700 flex items-center gap-1 flex-shrink-0">
+        <div className="flex items-center gap-0.5 overflow-x-auto min-w-0">
+          {breadcrumbs.map((crumb, i) => (
+            <span key={crumb.path} className="flex items-center gap-0.5 flex-shrink-0">
+              {i > 0 && <span className="text-slate-600">/</span>}
+              <button onClick={() => navigate(crumb.path)}
+                className={`px-1 py-0.5 rounded hover:bg-slate-700 transition-colors ${i === breadcrumbs.length - 1 ? 'text-slate-200' : 'text-slate-400 hover:text-slate-200'}`}>
+                {crumb.label}
+              </button>
+            </span>
+          ))}
+        </div>
+        <div className="flex items-center gap-0.5 ml-auto flex-shrink-0">
+          {/* New file / New folder — combined, revealed on hover */}
+          <div className="relative flex-shrink-0"
+            onMouseEnter={() => setShowNewMenu(true)}
+            onMouseLeave={() => setShowNewMenu(false)}>
+            <ToolbarBtn title="New file or folder" onClick={() => setShowNewMenu(o => !o)}>
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 5v14m7-7H5" />
+              </svg>
+            </ToolbarBtn>
+            {showNewMenu && (
+              <div className="absolute right-0 top-full z-40 pt-1">
+                <div className="bg-slate-800 border border-slate-600 rounded shadow-xl py-1 min-w-[120px]">
+                  <button type="button" onClick={() => { setShowNewMenu(false); handleNewFile() }}
+                    className="w-full text-left px-3 py-1.5 text-slate-300 hover:bg-slate-700 flex items-center gap-2 transition-colors">
+                    <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 13h6m-3-3v6m-9 1V7a2 2 0 012-2h6l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
+                    </svg>
+                    New file
+                  </button>
+                  <button type="button" onClick={() => { setShowNewMenu(false); setShowNewFolderInline(true); setNewFolderName('') }}
+                    className="w-full text-left px-3 py-1.5 text-slate-300 hover:bg-slate-700 flex items-center gap-2 transition-colors">
+                    <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 13h6m-3-3v6m4-11H4a2 2 0 00-2 2v12a2 2 0 002 2h16a2 2 0 002-2V8a2 2 0 00-2-2h-8l-2-2z" />
+                    </svg>
+                    New folder
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+          <ToolbarBtn title="Upload file" onClick={() => uploadInputRef.current?.click()}>
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+            </svg>
+          </ToolbarBtn>
+          <ToolbarBtn title="Download filesystem as ZIP" onClick={() => void handleDownloadFs()}>
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+            </svg>
+          </ToolbarBtn>
+          {isLocalFolderConnected && (
+            <ToolbarBtn title="Reload from connected local folder (pick up external edits on disk)" onClick={() => onReloadFolder?.()}>
+              <svg className="w-3.5 h-3.5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+            </ToolbarBtn>
+          )}
+          <ToolbarBtn title="Set current folder as working directory" onClick={handleSetCwd}>
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+              <text x="12" y="17" textAnchor="middle" fontSize="7" fill="currentColor" stroke="none" fontFamily="monospace">~</text>
+            </svg>
+          </ToolbarBtn>
+        </div>
       </div>
 
       {/* File list */}
@@ -617,6 +615,8 @@ export function FileSystemPanel({
           <span className="text-sky-500">{currentWorkingDir}</span>
         </div>
       </div>
+      </>
+      )}
 
       {/* Context menu */}
       {contextMenu && (
@@ -677,47 +677,14 @@ export function FileSystemPanel({
         </div>
       )}
 
-      {/* Load from URL dialog */}
-      {showUrlDialog && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70"
-          onClick={() => { if (!urlLoading) { setShowUrlDialog(false); setUrlInput(''); setUrlError('') } }}>
-          <div className="bg-slate-800 border border-slate-600 rounded-lg shadow-2xl p-5 w-[440px] max-w-[95vw] text-xs"
-            onClick={e => e.stopPropagation()}>
-            <div className="text-sm font-bold text-white mb-1">Open from URL</div>
-            <p className="text-slate-400 mb-3 leading-relaxed">
-              Enter a URL to a <strong className="text-slate-300">book.json</strong> or a <strong className="text-slate-300">book ZIP</strong> to open a learning book, or any other ZIP to load as a filesystem.<br />
-              GitHub blob/raw URLs are automatically fetched via jsDelivr.
-            </p>
-            <input
-              autoFocus
-              type="url"
-              value={urlInput}
-              onChange={e => { setUrlInput(e.target.value); setUrlError('') }}
-              onKeyDown={e => { if (e.key === 'Enter' && !urlLoading) void handleLoadFromUrl(); if (e.key === 'Escape') { setShowUrlDialog(false); setUrlInput(''); setUrlError('') } }}
-              placeholder="https://..."
-              className="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-white text-xs focus:outline-none focus:ring-1 focus:ring-sky-400 mb-2"
-            />
-            {urlError && <div className="text-red-400 text-[11px] mb-2">{urlError}</div>}
-            <div className="flex justify-end gap-2 mt-1">
-              <button onClick={() => { setShowUrlDialog(false); setUrlInput(''); setUrlError('') }}
-                disabled={urlLoading}
-                className="px-3 py-1.5 rounded border border-slate-600 text-slate-300 hover:border-slate-400 disabled:opacity-50 transition-colors">
-                Cancel
-              </button>
-              <button onClick={() => void handleLoadFromUrl()}
-                disabled={urlLoading || !urlInput.trim()}
-                className="px-3 py-1.5 rounded bg-sky-600 hover:bg-sky-500 text-white font-semibold disabled:opacity-50 transition-colors flex items-center gap-2">
-                {urlLoading && (
-                  <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
-                  </svg>
-                )}
-                {urlLoading ? 'Loading...' : 'Load'}
-              </button>
-            </div>
-          </div>
-        </div>
+      {/* Open a source dialog (local ZIP / local folder / from the web) */}
+      {showOpenDialog && (
+        <OpenResourceDialog
+          onClose={() => setShowOpenDialog(false)}
+          onOpenLocalZip={() => zipInputRef.current?.click()}
+          onConnectFolder={() => void handleFolderOpen()}
+          onOpenResourceUrl={url => onOpenResourceUrl?.(url)}
+        />
       )}
     </div>
   )

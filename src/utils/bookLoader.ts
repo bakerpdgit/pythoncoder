@@ -1,5 +1,6 @@
 import type { BookAdditionalFile, BookChild, BookChallenge, BookManifest, BookRef } from '../types'
 import { listFilesystems, createFilesystem, writeFile, guessMimeType, deleteFilesystem, getEntryByPath } from './virtualFS'
+import { fetchResourceBuffer, fetchResourceText } from './bookSource'
 
 function isVfsUrl(url: string): boolean {
   return url.startsWith('vfs://fs:')
@@ -40,9 +41,12 @@ export async function fetchBookManifest(url: string): Promise<BookManifest> {
     if (!entry?.content) throw new Error(`Cannot load book.json from VFS: ${url}`)
     return JSON.parse(new TextDecoder().decode(entry.content)) as BookManifest
   }
-  const resp = await fetch(url)
-  if (!resp.ok) throw new Error(`Cannot load book.json from ${url}: HTTP ${resp.status}`)
-  return resp.json() as Promise<BookManifest>
+  const text = await fetchResourceText(url)
+  try {
+    return JSON.parse(text) as BookManifest
+  } catch {
+    throw new Error(`Cannot parse book.json from ${url}`)
+  }
 }
 
 function normPath(p: string): string {
@@ -92,9 +96,7 @@ async function fetchFileIntoFs(
       await writeFile(fsId, `/${relPath}`, entry.content, mime)
       return true
     }
-    const resp = await fetch(url)
-    if (!resp.ok) return false
-    const content = await resp.arrayBuffer()
+    const content = await fetchResourceBuffer(url)
     await writeFile(fsId, `/${relPath}`, content, mime)
     return true
   } catch { return false }
@@ -159,9 +161,7 @@ export async function fetchGuideContent(bookUrl: string, guide: string): Promise
     if (!entry?.content) throw new Error(`Cannot load guide from VFS: ${url}`)
     return new TextDecoder().decode(entry.content)
   }
-  const resp = await fetch(url)
-  if (!resp.ok) throw new Error(`Cannot load guide: HTTP ${resp.status}`)
-  return resp.text()
+  return fetchResourceText(url)
 }
 
 export function findChallenge(manifest: BookManifest, challengeId: string): BookChallenge | null {

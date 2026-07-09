@@ -1,4 +1,5 @@
 import type { VFSEntry, VFSFile, VFSFilesystem } from '../types'
+import { fetchResourceBuffer, MIN_PLAUSIBLE_ZIP_BYTES } from './bookSource'
 
 const DB_NAME = 'pythoncoder-vfs'
 
@@ -356,21 +357,6 @@ export function readFilesFromPyodide(pyodide: any, mountedPaths: string[], cwd: 
 
 // ── URL filesystem loader ────────────────────────────────────────────────────
 
-function toJsDelivrUrl(url: string): string | null {
-  if (url.includes('cdn.jsdelivr.net')) return null
-  const rawMatch = url.match(/^https?:\/\/raw\.githubusercontent\.com\/([^/]+)\/([^/]+)\/([^/]+)\/(.+)$/)
-  if (rawMatch) return `https://cdn.jsdelivr.net/gh/${rawMatch[1]}/${rawMatch[2]}@${rawMatch[3]}/${rawMatch[4]}`
-  const ghMatch = url.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/(raw|blob)\/([^/]+)\/(.+)$/)
-  if (ghMatch) return `https://cdn.jsdelivr.net/gh/${ghMatch[1]}/${ghMatch[2]}@${ghMatch[4]}/${ghMatch[5]}`
-  return null
-}
-
-function toRawGithubUrl(url: string): string | null {
-  const ghMatch = url.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/(raw|blob)\/([^/]+)\/(.+)$/)
-  if (ghMatch) return `https://raw.githubusercontent.com/${ghMatch[1]}/${ghMatch[2]}/${ghMatch[4]}/${ghMatch[5]}`
-  return null
-}
-
 function detectCommonPrefix(filenames: string[]): string {
   if (filenames.length === 0) return ''
   if (filenames.some(f => !f.includes('/'))) return ''
@@ -380,39 +366,9 @@ function detectCommonPrefix(filenames: string[]): string {
   return filenames.every(f => f.startsWith(candidate)) ? candidate : ''
 }
 
-// jsDelivr's CDN occasionally caches a 22-byte empty-EOCD ZIP for binary blobs
-// (HTTP 200, content-type application/zip, but zero files inside). Treat any
-// suspiciously small payload as a miss so we fall through to the next source.
-const MIN_PLAUSIBLE_ZIP_BYTES = 64
-
-async function tryFetchBuffer(url: string): Promise<ArrayBuffer | null> {
-  try {
-    const r = await fetch(url)
-    if (!r.ok) return null
-    const buf = await r.arrayBuffer()
-    if (buf.byteLength < MIN_PLAUSIBLE_ZIP_BYTES) return null
-    return buf
-  } catch {
-    return null
-  }
-}
-
 async function fetchZip(url: string): Promise<ArrayBuffer> {
-  // raw.githubusercontent.com sets Access-Control-Allow-Origin: * and serves
-  // the authoritative bytes, so prefer it over jsDelivr for github URLs.
-  const rawUrl = toRawGithubUrl(url)
-  if (rawUrl) {
-    const buf = await tryFetchBuffer(rawUrl)
-    if (buf) return buf
-  }
-  const jsdelivrUrl = toJsDelivrUrl(url)
-  if (jsdelivrUrl) {
-    const buf = await tryFetchBuffer(jsdelivrUrl)
-    if (buf) return buf
-  }
-  const r = await fetch(url)
-  if (!r.ok) throw new Error(`HTTP ${r.status} fetching ${url}`)
-  return r.arrayBuffer()
+  // Routing (GitHub-direct → proxy → jsDelivr) lives in bookSource.fetchResourceBuffer.
+  return fetchResourceBuffer(url, { minBytes: MIN_PLAUSIBLE_ZIP_BYTES })
 }
 
 export async function loadFilesystemFromUrl(url: string): Promise<string> {

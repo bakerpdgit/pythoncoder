@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
 import { createReadStream, existsSync, statSync } from "node:fs";
 import { extname, join, normalize, resolve } from "node:path";
+import { handleCorsProxy } from "./scripts/corsProxy.mjs";
 
 const root = resolve("dist");
 const port = Number(process.env.PORT || 3000);
@@ -94,6 +95,16 @@ function getSafePath(urlPath) {
 
 const server = createServer((req, res) => {
   setIsolationHeaders(res);
+
+  if ((req.url || "").split("?")[0] === "/api/proxy") {
+    handleCorsProxy(req, res).catch((e) => {
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
+      }
+      res.end(`Proxy error: ${e instanceof Error ? e.message : String(e)}`);
+    });
+    return;
+  }
 
   if (req.url === "/__isolation__") {
     return sendJson(res, 200, {

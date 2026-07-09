@@ -3,6 +3,8 @@ import react from '@vitejs/plugin-react'
 import type { Plugin } from 'vite'
 import { createReadStream, existsSync, statSync, readdirSync, mkdirSync, copyFileSync, writeFileSync } from 'fs'
 import { resolve, extname, join, relative } from 'path'
+// @ts-ignore - plain .mjs helper shared with server.mjs; no type declarations
+import { handleCorsProxy } from './scripts/corsProxy.mjs'
 
 const isolationHeaders = {
   'Cross-Origin-Opener-Policy': 'same-origin',
@@ -83,8 +85,23 @@ function tutorialPlugin(): Plugin {
   }
 }
 
+// Serve /api/proxy in dev & preview so the CORS proxy works the same as in
+// production (Cloudflare Pages Function / server.mjs).
+function corsProxyPlugin(): Plugin {
+  const mw = (server: { middlewares: { use: (fn: (req: any, res: any, next: () => void) => void) => void } }) => {
+    server.middlewares.use((req, res, next) => {
+      void handleCorsProxy(req, res).then((handled: boolean) => { if (!handled) next() })
+    })
+  }
+  return {
+    name: 'cors-proxy',
+    configureServer: mw,
+    configurePreviewServer: mw,
+  }
+}
+
 export default defineConfig({
-  plugins: [react(), tutorialPlugin(), versionPlugin()],
+  plugins: [react(), corsProxyPlugin(), tutorialPlugin(), versionPlugin()],
   worker: {
     format: 'iife',
   },

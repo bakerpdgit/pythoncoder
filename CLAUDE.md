@@ -28,13 +28,6 @@ npm run preview
 ```
 Vite's own preview server serving `dist/` on `http://localhost:3000`.
 
-**Encrypt prelim code** (when the AQA source Python changes):
-```
-node encrypt.mjs <input.py> enc.txt AQA_PRELIM_2026::       # A Level
-node encrypt.mjs <input.py> enc_as.txt AQA_PRELIM_2026_AS:: # AS Level
-```
-You will be prompted for a password interactively. The output files `enc.txt` and `enc_as.txt` are committed and loaded by the interactives at runtime.
-
 ## Architecture
 
 This is a **Vite 5 + React 18 + TypeScript** application. Source lives in `src/`, production output goes to `dist/`.
