@@ -61,6 +61,11 @@ export const PANEL_OPTIONS = [
     label: 'Structure',
     description: 'Outline, hierarchy, UML, turtle and notes tabs.',
   },
+  {
+    key: 'teacherTools',
+    label: 'Teacher Tools',
+    description: 'Create and edit learning books: exercises, tests, guides and files.',
+  },
 ] as const
 
 export const FS_SIDEBAR_WIDTH = 240

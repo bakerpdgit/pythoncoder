@@ -179,11 +179,11 @@ export const persistSettings = (settings: AppSettings): void => {
 const LAYOUT_PREFS_KEY = 'pythoncoder-layout-prefs'
 
 export const MINIMAL_VISIBLE_PANELS: PanelVisibility = {
-  code: true, output: true, diagram: false, filesystem: true, visualizer: true, notes: true,
+  code: true, output: true, diagram: false, filesystem: true, visualizer: true, notes: true, teacherTools: false,
 }
 
 export const DEVELOPER_VISIBLE_PANELS: PanelVisibility = {
-  code: true, output: true, diagram: true, filesystem: true, visualizer: true, notes: true,
+  code: true, output: true, diagram: true, filesystem: true, visualizer: true, notes: true, teacherTools: false,
 }
 
 export const defaultPanelsForView = (mode: ViewMode): PanelVisibility =>
@@ -206,6 +206,7 @@ const sanitisePanels = (raw: unknown): PanelVisibility | null => {
     filesystem: !!r.filesystem,
     visualizer: !!r.visualizer,
     notes: r.notes === false ? false : true,
+    teacherTools: r.teacherTools === true,
   }
 }
 

@@ -1,0 +1,11 @@
+.graphicsPane {
+  overflow: auto;
+  text-align: center;
+}
+
+.graphicsPane canvas {
+  background-color: #f8f8f8;
+  float: center;
+  border:black 1px solid;
+  margin:5px;
+}

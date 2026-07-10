@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import type { BookChallenge, BookManifest, BookNavState, BookTestOutputReq, BreadcrumbEntry, OverallTestResult } from '../types'
+import { GuideEditor } from './editors/GuideEditor'
 import {
   isBookRef, fetchBookManifest, fetchGuideContent, resolveBookUrl,
   findChallenge, getAdjacentChallenge, getChallengeFsName,
@@ -21,6 +22,16 @@ interface Props {
   completedChallenges: Record<string, boolean>
   isCollapsed: boolean
   onToggleCollapse: () => void
+  // ── Teacher edit mode ──
+  editMode?: boolean
+  editManifest?: BookManifest | null
+  transientTicks?: Set<string>
+  onAddExercise?: (afterId?: string) => void
+  onDeleteExercise?: (id: string) => void
+  onMoveExercise?: (id: string, dir: -1 | 1) => void
+  onRenameExercise?: (id: string, name: string) => void
+  onToggleExample?: (id: string) => void
+  onSaveGuide?: (guidePath: string, markdown: string) => void
 }
 
 // ── Markdown renderer ───────────────────────────────────────────────────────
@@ -129,9 +140,12 @@ function CompletedTick() {
   )
 }
 
-export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClose, testResult, isTestRunning, testStatus, onClearTestResult, completedChallenges, isCollapsed, onToggleCollapse }: Props) {
+export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClose, testResult, isTestRunning, testStatus, onClearTestResult, completedChallenges, isCollapsed, onToggleCollapse,
+  editMode = false, editManifest = null, transientTicks, onAddExercise, onDeleteExercise, onMoveExercise, onRenameExercise, onToggleExample, onSaveGuide }: Props) {
   const dialogs = useDialogs()
   const [manifest, setManifest] = useState<BookManifest | null>(null)
+  const [renamingId, setRenamingId] = useState<string | null>(null)
+  const [renameDraft, setRenameDraft] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [guideMarkdown, setGuideMarkdown] = useState('')
@@ -170,8 +184,11 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
   }, [])
 
   useEffect(() => {
+    // In edit mode the live manifest is owned by App (bookEditStore); render it
+    // directly instead of re-fetching book.json from the VFS.
+    if (editMode && editManifest) { setManifest(editManifest); setLoading(false); setError(''); return }
     void loadManifest(navState.currentBookUrl)
-  }, [navState.currentBookUrl, loadManifest])
+  }, [navState.currentBookUrl, loadManifest, editMode, editManifest])
 
   useEffect(() => {
     if (!navState.activeChallengeId || !manifest) {
@@ -325,6 +342,15 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
     onNavStateChange({ ...navState, activeChallengeId: challenge.id })
     onEnterChallenge(navState.currentBookUrl, challenge)
   }, [navState, onNavStateChange, onEnterChallenge])
+
+  const handleDeleteExercise = useCallback(async (challenge: BookChallenge) => {
+    if (!(await dialogs.confirm({
+      title: 'Delete exercise',
+      message: `Delete "${challenge.name}" and its files? This cannot be undone.`,
+      confirmLabel: 'Delete', danger: true,
+    }))) return
+    onDeleteExercise?.(challenge.id)
+  }, [dialogs, onDeleteExercise])
 
   const handlePrevNext = useCallback((delta: -1 | 1) => {
     if (!manifest || !navState.activeChallengeId) return
@@ -512,6 +538,12 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
                   </svg>
                   Loading guide…
                 </div>
+              ) : editMode && activeChallenge?.guide ? (
+                <GuideEditor
+                  key={activeChallenge.id}
+                  initialMarkdown={guideMarkdown}
+                  onSave={md => onSaveGuide?.(activeChallenge.guide!, md)}
+                />
               ) : (
                 <div
                   className={`text-slate-300 leading-relaxed book-font-${bookFontSize}`}
@@ -541,7 +573,68 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
                   )
                 }
                 const isExample = child.isExample === 'True' || child.isExample === true
-                const done = isCompleted(child.id)
+                const done = editMode ? (transientTicks?.has(child.id) ?? false) : isCompleted(child.id)
+
+                if (editMode) {
+                  const isRenaming = renamingId === child.id
+                  const canUp = i > 0
+                  const canDown = i < manifest.children.length - 1
+                  const commitRename = () => {
+                    const name = renameDraft.trim()
+                    if (name && name !== child.name) onRenameExercise?.(child.id, name)
+                    setRenamingId(null)
+                  }
+                  return (
+                    <div key={`${i}-${child.id}`} className="group flex items-center gap-1 px-2 py-1.5 hover:bg-slate-700/60 transition-colors">
+                      {/* Rename (pencil) */}
+                      <button type="button" title="Rename exercise"
+                        onClick={() => { setRenamingId(child.id); setRenameDraft(child.name) }}
+                        className="text-slate-500 hover:text-sky-300 p-0.5 flex-shrink-0">
+                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                        </svg>
+                      </button>
+                      {/* Example / task toggle */}
+                      <button type="button" title={isExample ? 'Marked as example — click to make it a task' : 'Marked as task — click to make it an example'}
+                        onClick={() => onToggleExample?.(child.id)}
+                        className={`flex-shrink-0 p-0.5 ${isExample ? 'text-slate-400 hover:text-emerald-400' : 'text-emerald-400 hover:text-slate-400'}`}>
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                        </svg>
+                      </button>
+                      {isRenaming ? (
+                        <input autoFocus value={renameDraft} onChange={e => setRenameDraft(e.target.value)}
+                          aria-label="Exercise name" title="Exercise name"
+                          onBlur={commitRename}
+                          onKeyDown={e => { if (e.key === 'Enter') commitRename(); if (e.key === 'Escape') setRenamingId(null) }}
+                          className="flex-1 min-w-0 bg-slate-900 border border-slate-600 rounded px-1.5 py-0.5 text-xs text-white focus:outline-none focus:ring-1 focus:ring-sky-400" />
+                      ) : (
+                        <button type="button" onClick={() => enterChallenge(child)}
+                          className="flex-1 min-w-0 text-left truncate text-xs text-slate-300 hover:text-slate-100">
+                          {child.name}
+                          {done && <span className="ml-1 text-emerald-400">✓</span>}
+                          {!isExample && <span className="ml-1 text-[9px] text-emerald-500 font-semibold">task</span>}
+                        </button>
+                      )}
+                      {/* Up / down / delete */}
+                      <div className="flex items-center flex-shrink-0 opacity-60 group-hover:opacity-100 transition-opacity">
+                        <button type="button" title="Move up" disabled={!canUp} onClick={() => onMoveExercise?.(child.id, -1)}
+                          className="text-slate-500 hover:text-slate-200 disabled:opacity-30 disabled:cursor-not-allowed p-0.5">
+                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 15l7-7 7 7" /></svg>
+                        </button>
+                        <button type="button" title="Move down" disabled={!canDown} onClick={() => onMoveExercise?.(child.id, 1)}
+                          className="text-slate-500 hover:text-slate-200 disabled:opacity-30 disabled:cursor-not-allowed p-0.5">
+                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" /></svg>
+                        </button>
+                        <button type="button" title="Delete exercise" onClick={() => void handleDeleteExercise(child)}
+                          className="text-slate-500 hover:text-red-400 p-0.5">
+                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                        </button>
+                      </div>
+                    </div>
+                  )
+                }
+
                 return (
                   <button type="button" key={`${i}-${child.id}`}
                     onClick={() => enterChallenge(child)}
@@ -557,6 +650,16 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
                   </button>
                 )
               })}
+
+              {editMode && (
+                <button type="button" onClick={() => onAddExercise?.()}
+                  className="mt-1 w-full flex items-center gap-2 px-3 py-2 text-left text-sky-400 hover:text-sky-300 hover:bg-slate-700/60 transition-colors border-t border-slate-700/60">
+                  <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
+                  </svg>
+                  <span className="text-xs font-medium">Add exercise</span>
+                </button>
+              )}
             </div>
           )}
         </div>

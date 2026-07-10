@@ -46,6 +46,7 @@ export interface PanelVisibility {
   notes: boolean
   output: boolean
   filesystem: boolean
+  teacherTools: boolean
 }
 
 // ── Virtual File System types ──────────────────────────────────────────────
@@ -253,6 +254,12 @@ export interface BookTestCase {
   reveal?: boolean
 }
 
+/** Solution reference (pythonsponge convention). `file` is a relative .py path. */
+export interface BookSolution {
+  file: string
+  showSolution?: number | boolean
+}
+
 export interface BookChallenge {
   id: string
   name: string
@@ -261,6 +268,8 @@ export interface BookChallenge {
   isExample?: string | boolean
   tests?: BookTestCase[]
   additionalFiles?: BookAdditionalFile[]
+  typ?: string
+  sol?: BookSolution
 }
 
 // ── Test runner result types ───────────────────────────────────────────────

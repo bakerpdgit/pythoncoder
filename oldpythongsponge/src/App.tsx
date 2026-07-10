@@ -1,0 +1,159 @@
+import "./App.css";
+import SessionWrapper from "./auth/components/SessionWrapper";
+import { VsThemeContextProvider } from "./themes/VsThemeContext";
+import { CssBaseline } from "@mui/material";
+import { NotificationsWrapper } from "./components/NotificationsContext";
+import {
+  BrowserRouter,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+} from "react-router-dom";
+import StartPage from "./StartPage";
+import AuthCallbackPage from "./auth/AuthCallbackPage";
+
+import StudentDashboard from "./studentDashboard/StudentDashboard";
+import HeaderBar from "./components/HeaderBar";
+import BookUpload from "./book/components/BookUpload";
+import { useEffect, useState, lazy, Suspense } from "react";
+import Book from "./book/Book";
+import FolderPicker from "./components/FolderPicker";
+import packageJson from "../package.json";
+import { BookUploadType } from "./book/components/BookUpload";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { AiProvider } from "./ai/AiContext";
+
+const AdminWrapper = lazy(() => import("./auth/AdminWrapper"));
+const AllClasses = lazy(() => import("./teacher/AllClasses"));
+const Tools = lazy(() => import("./teacher/Tools"));
+const ThisYear = lazy(() => import("./teacher/ThisYear"));
+const BookEditorFrame = lazy(() => import("./vscode-frame/BookEditorFrame"));
+
+const AppContainer = () => {
+  const searchParams = new URLSearchParams(useLocation().search);
+  const bookPath = searchParams.get("bk") || searchParams.get("book");
+  const isTeacher = searchParams.get("teacher") || "";
+  const [bookFile, setBookFile] = useState<File | null>(null);
+  const [localFolder, setLocalFolder] = useState<
+    FileSystemDirectoryHandle | undefined
+  >();
+  const navigate = useNavigate();
+
+  const openBookFromZip = (file: File, openType: BookUploadType) => {
+    setBookFile(file);
+    let editParam = "";
+    if (openType === "editing") {
+      editParam = "open-edit";
+    } else if (openType === "cloning") {
+      editParam = "clone";
+    }
+    navigate({
+      pathname: "/",
+      search: `?bk=book.json${editParam ? "&edit=" + editParam : ""}`,
+    });
+  };
+
+  const openLocalFolder = (
+    folder: FileSystemDirectoryHandle,
+    isForEditing: boolean
+  ) => {
+    setLocalFolder(folder);
+    navigate({
+      pathname: "/",
+      search: `?bk=book.json${
+        isForEditing ? "&edit=open-edit" : "&edit=localpreview"
+      }`,
+    });
+  };
+
+  useEffect(() => {
+    navigator.serviceWorker.register("pysw.js").then(function (reg) {
+      if (navigator.serviceWorker.controller === null || !reg.active) {
+        window.location.reload();
+      }
+    });
+    console.log("PythonSponge version: " + packageJson.version);
+  }, []);
+
+  if (bookPath || bookFile) {
+    return (
+      <AiProvider>
+        <Book
+          zipFile={bookFile || undefined}
+          localFolder={localFolder}
+          onBookUploaded={openBookFromZip}
+        />
+      </AiProvider>
+    );
+  } else {
+    return (
+      <>
+        <HeaderBar />
+        <BookUpload
+          isForEditing={isTeacher?.length > 0}
+          onBookUploaded={openBookFromZip}
+        />
+        <FolderPicker
+          isForEditing={isTeacher?.length > 0}
+          onFolderPicked={openLocalFolder}
+        />
+      </>
+    );
+  }
+};
+
+const envServerUrlOverride = import.meta.env.VITE_SERVER_URL;
+const queryClient = new QueryClient();
+
+function App() {
+  const serverUrl = envServerUrlOverride
+    ? envServerUrlOverride
+    : window.location.origin;
+
+  return (
+    <VsThemeContextProvider>
+      <CssBaseline>
+        <NotificationsWrapper>
+          <QueryClientProvider client={queryClient}>
+            <BrowserRouter>
+              <Routes>
+                <Route element={<SessionWrapper serverUrl={serverUrl} />}>
+                  <Route path="start" element={<StartPage />} />
+                  <Route path="auth-callback" element={<AuthCallbackPage />} />
+                  <Route
+                    path="student/books"
+                    element={<StudentDashboard baseUrl={serverUrl} />}
+                  />
+                  <Route
+                    path="teacher"
+                    element={
+                      <Suspense fallback={<div>Loading teacher area...</div>}>
+                        <AdminWrapper urlBase={serverUrl} />
+                      </Suspense>
+                    }
+                  >
+                    <Route path="classes" element={<AllClasses />} />
+                    <Route path="tools" element={<Tools />} />
+                    <Route index path="*" element={<ThisYear />} />
+                  </Route>
+                  <Route
+                    path="book-editor-frame"
+                    element={
+                      <Suspense fallback={<div>Loading book editor...</div>}>
+                        <BookEditorFrame />
+                      </Suspense>
+                    }
+                  />
+                  <Route index path="*" element={<AppContainer />} />
+                </Route>
+              </Routes>
+            </BrowserRouter>
+          </QueryClientProvider>
+        </NotificationsWrapper>
+      </CssBaseline>
+    </VsThemeContextProvider>
+  );
+}
+
+export default App;

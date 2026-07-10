@@ -18,16 +18,21 @@ import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides, getStored
 import { triggerDownload, getBaseFileStem } from './utils/download'
 import { buildCommentExport, buildDocstringExport, replaceExistingDocstring, getDefinitionNote, getDefaultDefinitionNote, sanitizeNoteText } from './utils/export'
 import { loadMainThreadPyodide, resetMainThreadPyodide, PYGAME_MAIN_THREAD_BOOTSTRAP, TURTLE_CANVAS_BOOTSTRAP, TURTLE_SVG_BOOTSTRAP, SVG_TURTLE_WORKER_SETUP } from './utils/mainThread'
-import { fetchBookManifest, getOrCreateChallengeFs, getHiddenPathsForFs, isBookUrl, BOOK_FS_PREFIX, BOOK_SRC_PREFIX } from './utils/bookLoader'
+import { fetchBookManifest, getOrCreateChallengeFs, getHiddenPathsForFs, isBookUrl, isBookRef, BOOK_FS_PREFIX, BOOK_SRC_PREFIX } from './utils/bookLoader'
 import {
   ensureDefaultFilesystem, getAllFiles, syncFilesFromPyodide, writeFile,
   isTextMime, guessMimeType, mountFilesToPyodide, readFilesFromPyodide,
   getEntryByPath, cleanFilesFromPyodide, ensureFilesystemFromUrl, loadFilesystemFromUrl,
-  createFilesystem, deleteFilesystem, listFilesystems, importFileMapToFs,
+  createFilesystem, deleteFilesystem, listFilesystems, importFileMapToFs, downloadEntryAsZip,
 } from './utils/virtualFS'
 import { buildVfsPreviewUrl, ensureVfsPreviewServiceWorker, isHtmlFile } from './utils/htmlPreview'
 import { FileSystemPanel } from './components/FileSystemPanel'
 import { BookPanel } from './components/BookPanel'
+import { TeacherToolsPanel } from './components/TeacherToolsPanel'
+import { TestEditor } from './components/editors/TestEditor'
+import { BookJsonEditor } from './components/editors/BookJsonEditor'
+import * as bookEdit from './utils/bookEditStore'
+import type { BookEditSession } from './utils/bookEditStore'
 import { HtmlPreviewDialog } from './components/HtmlPreviewDialog'
 import { SaveFileDialog } from './components/dialogs/SaveFileDialog'
 import { getExplanation, getDefinitionKey } from './data/explanations'
@@ -53,95 +58,16 @@ import type {
   Theme, RuntimeKey, PanelVisibility, InputRequest, SabRef, SimState, InspectorPath,
   StructureModel, DiagramModel, HierarchyModel, OutlineModel, DiagramView, VFSEntry,
   LocalFolderSyncOp,
-  AppSettings, BookNavState, BookChallenge, NamedLayout, InspectorNode,
+  AppSettings, BookNavState, BookChallenge, BookManifest, BookTestCase, BookAdditionalFile, NamedLayout, InspectorNode,
   OverallTestResult, TesterRunOutput, ViewMode, Breakpoint,
 } from './types'
 import { evaluateAll } from './utils/testMatcher'
 import { startVersionPolling } from './utils/versionCheck'
 import { useDialogs } from './components/dialogs/DialogProvider'
-
-async function readDirectoryToMap(handle: FileSystemDirectoryHandle, prefix = ''): Promise<Map<string, ArrayBuffer>> {
-  const map = new Map<string, ArrayBuffer>()
-  for await (const [name, entry] of handle) {
-    const relPath = prefix ? `${prefix}/${name}` : name
-    if (entry.kind === 'directory') {
-      const sub = await readDirectoryToMap(entry as FileSystemDirectoryHandle, relPath)
-      for (const [k, v] of sub) map.set(k, v)
-    } else {
-      const file = await (entry as FileSystemFileHandle).getFile()
-      map.set(relPath, await file.arrayBuffer())
-    }
-  }
-  return map
-}
-
-async function writeFileToFolderHandle(root: FileSystemDirectoryHandle, vfsPath: string, content: ArrayBuffer): Promise<void> {
-  const parts = vfsPath.replace(/^\//, '').split('/')
-  const filename = parts.pop()!
-  let dir = root
-  for (const part of parts) dir = await dir.getDirectoryHandle(part, { create: true })
-  const fh = await dir.getFileHandle(filename, { create: true })
-  const w = await fh.createWritable()
-  await w.write(content)
-  await w.close()
-}
-
-// Resolve the parent directory handle for a VFS path, returning the final segment name.
-async function resolveParentDir(root: FileSystemDirectoryHandle, vfsPath: string, create: boolean): Promise<{ dir: FileSystemDirectoryHandle; name: string }> {
-  const parts = vfsPath.replace(/^\//, '').split('/')
-  const name = parts.pop()!
-  let dir = root
-  for (const part of parts) dir = await dir.getDirectoryHandle(part, { create })
-  return { dir, name }
-}
-
-async function mkdirInFolderHandle(root: FileSystemDirectoryHandle, vfsPath: string): Promise<void> {
-  const parts = vfsPath.replace(/^\//, '').split('/').filter(Boolean)
-  let dir = root
-  for (const part of parts) dir = await dir.getDirectoryHandle(part, { create: true })
-}
-
-async function deleteFromFolderHandle(root: FileSystemDirectoryHandle, vfsPath: string): Promise<void> {
-  const { dir, name } = await resolveParentDir(root, vfsPath, false)
-  await dir.removeEntry(name, { recursive: true })
-}
-
-async function copyDirContents(src: FileSystemDirectoryHandle, dst: FileSystemDirectoryHandle): Promise<void> {
-  for await (const [name, entry] of src) {
-    if (entry.kind === 'directory') {
-      const sub = await dst.getDirectoryHandle(name, { create: true })
-      await copyDirContents(entry as FileSystemDirectoryHandle, sub)
-    } else {
-      const buf = await (await (entry as FileSystemFileHandle).getFile()).arrayBuffer()
-      const fh = await dst.getFileHandle(name, { create: true })
-      const w = await fh.createWritable()
-      await w.write(buf)
-      await w.close()
-    }
-  }
-}
-
-async function renameInFolderHandle(root: FileSystemDirectoryHandle, oldPath: string, newName: string): Promise<void> {
-  const { dir, name } = await resolveParentDir(root, oldPath, false)
-  let handle: FileSystemHandle
-  try { handle = await dir.getFileHandle(name) }
-  catch { handle = await dir.getDirectoryHandle(name) }
-  // Prefer the native in-place rename where available (Chromium).
-  if (typeof handle.move === 'function') { await handle.move(newName); return }
-  // Fallback: copy to the new name, then remove the original.
-  if (handle.kind === 'file') {
-    const buf = await (await (handle as FileSystemFileHandle).getFile()).arrayBuffer()
-    const fh = await dir.getFileHandle(newName, { create: true })
-    const w = await fh.createWritable()
-    await w.write(buf)
-    await w.close()
-    await dir.removeEntry(name)
-  } else {
-    const newDir = await dir.getDirectoryHandle(newName, { create: true })
-    await copyDirContents(handle as FileSystemDirectoryHandle, newDir)
-    await dir.removeEntry(name, { recursive: true })
-  }
-}
+import {
+  readDirectoryToMap, writeFileToFolderHandle, mkdirInFolderHandle,
+  deleteFromFolderHandle, renameInFolderHandle,
+} from './utils/localFolderIo'
 
 const MONACO_DARK_THEME: MonacoEditor.IStandaloneThemeData = {
   base: 'vs-dark', inherit: true,
@@ -249,6 +175,16 @@ export default function App() {
   const [bookNavState, setBookNavState] = useState<BookNavState | null>(null)
   const [activeBookChallenge, setActiveBookChallenge] = useState<BookChallenge | null>(null)
   const [completedChallenges, setCompletedChallenges] = useState<Record<string, boolean>>(() => getStoredCompletions())
+  // ── Teacher Tools / book editing ──
+  const [bookEditSession, setBookEditSession] = useState<BookEditSession | null>(null)
+  const [editManifest, setEditManifest] = useState<BookManifest | null>(null)
+  const [transientTicks, setTransientTicks] = useState<Set<string>>(new Set())
+  const [teacherColWidth, setTeacherColWidth] = useState(300)   // px width of teacher tools column
+  const [editorTab, setEditorTab] = useState<'starter' | 'solution'>('starter')  // code editor tab in edit mode
+  const [showBookJsonEditor, setShowBookJsonEditor] = useState(false)
+  const solutionPathRef = useRef<string | null>(null)          // active challenge's sol.file path
+  const captureRunRef = useRef(false)                          // a "capture test case" run is in progress
+  const captureInputsRef = useRef<string[]>([])                // inputs consumed during a capture run
   const [testResult, setTestResult] = useState<OverallTestResult | null>(null)
   const [isTestRunning, setIsTestRunning] = useState(false)
   const [testRunnerStatus, setTestRunnerStatus] = useState('')
@@ -264,7 +200,7 @@ export default function App() {
   const [isQuickSettingsOpen, setIsQuickSettingsOpen] = useState(false)
   const [fixedInputsText, setFixedInputsText] = useState<string>('')
   // Active tab of the console panel. Only shows as tabs when fixed inputs are on.
-  const [consoleTab, setConsoleTab] = useState<'console' | 'inputs'>('console')
+  const [consoleTab, setConsoleTab] = useState<'console' | 'inputs' | 'tests'>('console')
   const [popupInputValue, setPopupInputValue] = useState('')
   const [diagramView, setDiagramView] = useState<DiagramView>('outline')
   const [outlineExpandedIds, setOutlineExpandedIds] = useState<Set<string>>(() => new Set())
@@ -328,6 +264,7 @@ export default function App() {
   const inlineInputRef = useRef<HTMLInputElement | null>(null)
   const popupDialogRef = useRef<HTMLDialogElement | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const teacherZipInputRef = useRef<HTMLInputElement | null>(null)
   const panelMenuRef = useRef<HTMLDivElement | null>(null)
   const runtimeMenuRef = useRef<HTMLDivElement | null>(null)
   const quickSettingsRef = useRef<HTMLDivElement | null>(null)
@@ -424,11 +361,15 @@ export default function App() {
   const hasRightCol = visiblePanels.output || visiblePanels.diagram
   const hasConsoleAndStructure = visiblePanels.output && visiblePanels.diagram
   const hasBookPanel = !!bookNavState
+  const isBookEditMode = !!bookEditSession
+  const bookName = editManifest?.name ?? null
 
   // ── Derived: is the active challenge a testable task? ─────────────────────
 
+  // In edit mode the teacher can run tests against any challenge that has tests
+  // (including examples); normally only non-example task challenges show Submit.
   const isTaskChallenge = !!activeBookChallenge &&
-    !(activeBookChallenge.isExample === 'True' || activeBookChallenge.isExample === true) &&
+    (isBookEditMode || !(activeBookChallenge.isExample === 'True' || activeBookChallenge.isExample === true)) &&
     (activeBookChallenge.tests?.length ?? 0) > 0
 
   // ── Effects ──────────────────────────────────────────────────────────────
@@ -620,6 +561,8 @@ export default function App() {
         setCenterVerticalSplit(Math.max(20, Math.min(85, ((e.clientY - rect.top) / rect.height) * 100)))
       } else if (drag.type === 'col-structure') {
         setStructureColWidth(Math.max(240, Math.min(720, drag.startVal + (drag.startX - e.clientX))))
+      } else if (drag.type === 'col-teacher') {
+        setTeacherColWidth(Math.max(240, Math.min(520, drag.startVal + (drag.startX - e.clientX))))
       }
     }
     const onMouseUp = () => { resizeDragRef.current = null; document.body.style.cursor = ''; document.body.style.userSelect = '' }
@@ -1050,6 +993,16 @@ export default function App() {
   }
 
   const saveCurrentToVFS = async () => {
+    // Edit mode, Solution tab: the solution lives in the book source, never the
+    // per-challenge working filesystem.
+    if (isBookEditMode && editorTab === 'solution' && bookEditSession && solutionPathRef.current) {
+      try {
+        await bookEdit.writeBookFile(bookEditSession.srcFsId, solutionPathRef.current, codeText)
+        savedCodeRef.current = codeText
+        setIsUnsaved(false)
+      } catch { return false }
+      return true
+    }
     if (!openFilePath) return true
     const content = new TextEncoder().encode(codeText)
     try {
@@ -1059,6 +1012,11 @@ export default function App() {
       setVfsReloadTrigger(t => t + 1)
     } catch { return false }
     await syncToLocalFolder({ kind: 'write', path: openFilePath, content: content.buffer as ArrayBuffer })
+    // Edit mode, Starter tab: mirror the starter into the book source too.
+    if (isBookEditMode && editorTab === 'starter' && bookEditSession && activeBookChallengeRef.current?.py) {
+      try { await bookEdit.writeBookFile(bookEditSession.srcFsId, activeBookChallengeRef.current.py, codeText) }
+      catch { /* best effort */ }
+    }
     return true
   }
 
@@ -1482,7 +1440,7 @@ export default function App() {
       pygameLayoutSnapshotRef.current = { visiblePanels: { ...visiblePanels }, leftWidth }
     }
     setShowExportDialog(false)
-    setVisiblePanels({ code: false, visualizer: false, diagram: true, notes: false, output: true, filesystem: false })
+    setVisiblePanels({ code: false, visualizer: false, diagram: true, notes: false, output: true, filesystem: false, teacherTools: false })
     setIsPygameRunActive(true)
   }
 
@@ -1500,7 +1458,7 @@ export default function App() {
       consoleLayoutSnapshotRef.current = { visiblePanels: { ...visiblePanels }, leftWidth }
     }
     setShowExportDialog(false)
-    setVisiblePanels({ code: false, visualizer: false, diagram: false, notes: false, output: true, filesystem: false })
+    setVisiblePanels({ code: false, visualizer: false, diagram: false, notes: false, output: true, filesystem: false, teacherTools: false })
     setIsConsolePresentationMode(true)
   }
 
@@ -1518,7 +1476,7 @@ export default function App() {
       turtleLayoutSnapshotRef.current = { visiblePanels: { ...visiblePanels }, leftWidth }
     }
     setShowExportDialog(false)
-    setVisiblePanels({ code: false, visualizer: false, diagram: true, notes: false, output: true, filesystem: false })
+    setVisiblePanels({ code: false, visualizer: false, diagram: true, notes: false, output: true, filesystem: false, teacherTools: false })
     setIsTurtleCanvasRunActive(true)
   }
 
@@ -1536,7 +1494,7 @@ export default function App() {
       svgTurtleLayoutSnapshotRef.current = { visiblePanels: { ...visiblePanels }, leftWidth }
     }
     setShowExportDialog(false)
-    setVisiblePanels({ code: false, visualizer: false, diagram: true, notes: false, output: true, filesystem: false })
+    setVisiblePanels({ code: false, visualizer: false, diagram: true, notes: false, output: true, filesystem: false, teacherTools: false })
   }
 
   const restoreSvgTurtlePresentationMode = () => {
@@ -1720,6 +1678,8 @@ export default function App() {
     try {
       await saveCurrentToVFS()
       clearEditorForSwitch()
+      setEditorTab('starter')
+      solutionPathRef.current = challenge.sol?.file ?? null
       setActiveBookChallenge(challenge)
       activeBookChallengeRef.current = challenge
       setTestResult(null)
@@ -1751,6 +1711,388 @@ export default function App() {
     clearEditorForSwitch()
     setActiveFilesystemId('default')
     setCurrentWorkingDir('/')
+    // Tear down any teacher edit session.
+    bookEdit.closeBookSession()
+    setBookEditSession(null)
+    setEditManifest(null)
+    setTransientTicks(new Set())
+  }
+
+  // ── Teacher Tools: book authoring lifecycle ───────────────────────────────
+
+  const revealTeacherToolsPanel = () => {
+    setVisiblePanels(prev => prev.teacherTools ? prev : { ...prev, teacherTools: true })
+  }
+
+  // Enter edit mode for a freshly created/opened book source session.
+  const enterBookEditSession = async (sess: BookEditSession) => {
+    const manifest = await bookEdit.readManifest(sess.srcFsId)
+    // Close any currently-open (non-edit) book first.
+    setActiveBookChallenge(null)
+    activeBookChallengeRef.current = null
+    setChallengeHiddenPaths([])
+    setTestResult(null)
+    clearEditorForSwitch()
+    setActiveFilesystemId('default')
+    setBookEditSession(sess)
+    setEditManifest(manifest)
+    setTransientTicks(new Set())
+    const newState: BookNavState = {
+      rootUrl: sess.rootUrl, currentBookUrl: sess.rootUrl, breadcrumb: [], activeChallengeId: null,
+    }
+    setBookNavState(newState)
+    persistBookNavState(newState)
+    revealTeacherToolsPanel()
+  }
+
+  // Called whenever the in-memory manifest changes: persist to the source VFS
+  // (which mirrors to a connected folder) and refresh state.
+  const commitManifest = async (manifest: BookManifest) => {
+    if (!bookEditSession) return
+    setEditManifest(manifest)
+    try { await bookEdit.writeManifest(bookEditSession.srcFsId, manifest) }
+    catch (e) { setCodeStatus(`Could not save book: ${e instanceof Error ? e.message : String(e)}`) }
+  }
+
+  const handleNewBook = async () => {
+    const name = await dialogs.prompt({
+      title: 'New learning book', message: 'What should the book be called?',
+      placeholder: 'My Python Book', confirmLabel: 'Create',
+    })
+    if (!name?.trim()) return
+    try {
+      const sess = await bookEdit.createNewBook(name.trim())
+      await enterBookEditSession(sess)
+    } catch (e) { setCodeStatus(`Could not create book: ${e instanceof Error ? e.message : String(e)}`) }
+  }
+
+  const handleOpenBookZip = () => { teacherZipInputRef.current?.click() }
+
+  const handleTeacherZipChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    try {
+      const { default: JSZip } = await import('jszip')
+      const zip = await JSZip.loadAsync(await file.arrayBuffer())
+      const fileMap = new Map<string, ArrayBuffer>()
+      for (const [name, zf] of Object.entries(zip.files)) {
+        if (zf.dir || name.startsWith('__MACOSX')) continue
+        fileMap.set(name, await zf.async('arraybuffer'))
+      }
+      const sess = await bookEdit.createBookFromFileMap(fileMap, file.name.replace(/\.zip$/i, ''), null)
+      await enterBookEditSession(sess)
+    } catch (err) { setCodeStatus(`Could not open book ZIP: ${err instanceof Error ? err.message : String(err)}`) }
+  }
+
+  const handleConnectBookFolder = async () => {
+    try {
+      const picker = (window as unknown as { showDirectoryPicker?: (o?: { mode?: string }) => Promise<FileSystemDirectoryHandle> }).showDirectoryPicker
+      if (!picker) { setCodeStatus('Your browser does not support connecting a local folder.'); return }
+      const handle = await picker({ mode: 'readwrite' })
+      const perm = await handle.requestPermission({ mode: 'readwrite' })
+      if (perm !== 'granted') { setCodeStatus('Folder permission denied.'); return }
+      const fileMap = await readDirectoryToMap(handle)
+      let sess: BookEditSession
+      try {
+        sess = await bookEdit.createBookFromFileMap(fileMap, handle.name, handle)
+      } catch {
+        // No book.json in the folder — offer to start a new book there.
+        const name = await dialogs.prompt({
+          title: 'New book in this folder', message: 'No book.json found. Create a new book here?',
+          placeholder: handle.name, confirmLabel: 'Create',
+        })
+        if (!name?.trim()) return
+        sess = await bookEdit.createNewBook(name.trim(), handle)
+      }
+      await enterBookEditSession(sess)
+      setCodeStatus(`Editing book in local folder "${handle.name}" — changes save to disk.`)
+    } catch (e) {
+      if (e instanceof DOMException && e.name === 'AbortError') return
+      setCodeStatus(`Folder connect failed: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
+  const handleExportBookZip = async () => {
+    if (!bookEditSession) return
+    try { await downloadEntryAsZip(bookEditSession.srcFsId, '/', editManifest?.name || 'book') }
+    catch (e) { setCodeStatus(`Export failed: ${e instanceof Error ? e.message : String(e)}`) }
+  }
+
+  const handleReloadBookFolder = async () => {
+    if (!bookEditSession?.folderHandle) return
+    try {
+      const manifest = await bookEdit.reloadFromFolder(bookEditSession.srcFsId)
+      setEditManifest(manifest)
+      setVfsReloadTrigger(t => t + 1)
+      setCodeStatus('Reloaded book from folder.')
+    } catch (e) { setCodeStatus(`Reload failed: ${e instanceof Error ? e.message : String(e)}`) }
+  }
+
+  const handleOpenBookJsonEditor = () => {
+    if (!editManifest) return
+    setShowBookJsonEditor(true)
+  }
+
+  const handleBookJsonSave = (manifest: BookManifest) => {
+    if (!bookEditSession) return
+    setShowBookJsonEditor(false)
+    setEditManifest(manifest)
+    void bookEdit.writeManifest(bookEditSession.srcFsId, manifest)
+    // If the active challenge was removed/renamed in the raw JSON, drop back to the list.
+    const stillThere = activeBookChallengeRef.current
+      && manifest.children.some(c => !isBookRef(c) && c.id === activeBookChallengeRef.current!.id)
+    if (!stillThere && bookNavState?.activeChallengeId) {
+      setActiveBookChallenge(null); activeBookChallengeRef.current = null
+      handleBookNavStateChange({ ...bookNavState, activeChallengeId: null })
+    }
+  }
+
+  const handleVerifyAllSolutions = () => {
+    // Wired in a later phase (whole-book solution verification).
+    setCodeStatus('Verify-all-solutions is coming soon.')
+  }
+
+  // ── Teacher Tools: exercise-list editing ──────────────────────────────────
+
+  const handleAddExercise = async (afterId?: string) => {
+    if (!bookEditSession || !editManifest) return
+    try {
+      const { manifest } = await bookEdit.addExercise(bookEditSession.srcFsId, editManifest, afterId)
+      setEditManifest(manifest)
+    } catch (e) { setCodeStatus(`Could not add exercise: ${e instanceof Error ? e.message : String(e)}`) }
+  }
+
+  const handleDeleteExercise = async (id: string) => {
+    if (!bookEditSession || !editManifest) return
+    try {
+      const manifest = await bookEdit.deleteExercise(bookEditSession.srcFsId, editManifest, id)
+      setEditManifest(manifest)
+    } catch (e) { setCodeStatus(`Could not delete exercise: ${e instanceof Error ? e.message : String(e)}`) }
+  }
+
+  const handleMoveExercise = async (id: string, dir: -1 | 1) => {
+    if (!bookEditSession || !editManifest) return
+    try {
+      const manifest = await bookEdit.moveExercise(bookEditSession.srcFsId, editManifest, id, dir)
+      setEditManifest(manifest)
+    } catch (e) { setCodeStatus(`Could not reorder: ${e instanceof Error ? e.message : String(e)}`) }
+  }
+
+  const handleRenameExercise = (id: string, name: string) => {
+    if (!editManifest) return
+    const manifest: BookManifest = {
+      ...editManifest,
+      children: editManifest.children.map(c => (!isBookRef(c) && c.id === id) ? { ...c, name } : c),
+    }
+    void commitManifest(manifest)
+  }
+
+  const handleToggleExample = (id: string) => {
+    if (!editManifest) return
+    const manifest: BookManifest = {
+      ...editManifest,
+      children: editManifest.children.map(c => {
+        if (isBookRef(c) || c.id !== id) return c
+        const isEx = c.isExample === true || c.isExample === 'True'
+        const next = { ...c }
+        if (isEx) delete next.isExample
+        else next.isExample = true
+        return next
+      }),
+    }
+    void commitManifest(manifest)
+  }
+
+  const handleSaveGuide = (guidePath: string, markdown: string) => {
+    if (!bookEditSession) return
+    void bookEdit.writeBookFile(bookEditSession.srcFsId, guidePath, markdown)
+      .catch(e => setCodeStatus(`Could not save guide: ${e instanceof Error ? e.message : String(e)}`))
+  }
+
+  const handleTestsChange = (tests: BookTestCase[]) => {
+    const challenge = activeBookChallengeRef.current
+    if (!challenge || !bookEditSession || !editManifest) return
+    const manifest: BookManifest = {
+      ...editManifest,
+      children: editManifest.children.map(c => (!isBookRef(c) && c.id === challenge.id) ? { ...c, tests } : c),
+    }
+    setEditManifest(manifest)
+    void bookEdit.writeManifest(bookEditSession.srcFsId, manifest)
+    const updated = { ...challenge, tests }
+    setActiveBookChallenge(updated); activeBookChallengeRef.current = updated
+  }
+
+  // ── Teacher Tools: additional-file visibility + book-source sync ───────────
+
+  const applyChallengeAdditionalFiles = async (challenge: BookChallenge, additionalFiles: BookAdditionalFile[]) => {
+    if (!bookEditSession || !editManifest) return
+    const manifest: BookManifest = {
+      ...editManifest,
+      children: editManifest.children.map(c => (!isBookRef(c) && c.id === challenge.id) ? { ...c, additionalFiles } : c),
+    }
+    setEditManifest(manifest)
+    await bookEdit.writeManifest(bookEditSession.srcFsId, manifest)
+    const updated = { ...challenge, additionalFiles }
+    setActiveBookChallenge(updated); activeBookChallengeRef.current = updated
+  }
+
+  const handleToggleFileVisibility = (name: string) => {
+    const challenge = activeBookChallengeRef.current
+    if (!challenge) return
+    const af = [...(challenge.additionalFiles ?? [])]
+    const idx = af.findIndex(a => flatName(a.filename) === name)
+    if (idx >= 0) af[idx] = { ...af[idx], visible: !af[idx].visible }
+    else af.push({ filename: name, visible: false })  // first toggle hides it
+    void applyChallengeAdditionalFiles(challenge, af)
+    // Update the live hidden-paths set so the (student-facing) view is consistent.
+    setChallengeHiddenPaths(af.filter(a => !a.visible).map(a => '/' + flatName(a.filename)))
+  }
+
+  // Mirror the active challenge's working-FS files (except the starter .py) back
+  // into the book source, keeping additionalFiles in sync (new files default to
+  // visible; existing visibility flags are preserved).
+  const syncChallengeFilesToBook = async () => {
+    const challenge = activeBookChallengeRef.current
+    if (!isBookEditMode || !challenge || !bookEditSession || !editManifest) return
+    const pyName = challenge.py ? flatName(challenge.py) : null
+    const files = await getAllFiles(activeFilesystemId)
+    const existing = challenge.additionalFiles ?? []
+    const visibleMap = new Map(existing.map(a => [flatName(a.filename), a.visible]))
+    const newAF: BookAdditionalFile[] = []
+    for (const f of files) {
+      const name = flatName(f.path)
+      if (name === pyName) continue
+      await bookEdit.writeBookFileBuffer(bookEditSession.srcFsId, name, f.content)
+      newAF.push({ filename: name, visible: visibleMap.get(name) ?? true })
+    }
+    for (const a of existing) {
+      const name = flatName(a.filename)
+      if (!files.some(f => flatName(f.path) === name)) await bookEdit.deleteBookFile(bookEditSession.srcFsId, name)
+    }
+    if (JSON.stringify(newAF) !== JSON.stringify(existing)) {
+      await applyChallengeAdditionalFiles(challenge, newAF)
+    }
+  }
+
+  // After any working-filesystem change in edit mode, mirror files to the book source.
+  useEffect(() => {
+    if (!isBookEditMode || !activeBookChallenge) return
+    const t = setTimeout(() => { void syncChallengeFilesToBook() }, 400)
+    return () => clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [vfsReloadTrigger, isBookEditMode, activeBookChallenge?.id])
+
+  // ── Teacher Tools: Starter / Solution code tabs ───────────────────────────
+
+  const flatName = (p: string) => p.replace(/^.*\//, '')
+  const defaultSolutionPath = (challenge: BookChallenge) => {
+    const base = challenge.py ? flatName(challenge.py).replace(/\.py$/, '') : 'solution'
+    return `solutions/${base}.py`
+  }
+
+  const applyEditorText = (text: string) => {
+    setCodeText(text)
+    if (editorRef.current) {
+      applyingEditorValueRef.current = true
+      editorRef.current.setValue(text)
+      applyingEditorValueRef.current = false
+    }
+    setIsUnsaved(true)
+  }
+
+  const loadStarterBuffer = async () => {
+    const py = activeBookChallengeRef.current?.py
+    if (!py) return
+    const name = flatName(py)
+    const entry = await getEntryByPath(activeFilesystemId, '/' + name)
+    const text = entry?.content ? new TextDecoder().decode(entry.content) : ''
+    loadCodeText(text, name, '/' + name)
+  }
+
+  const loadSolutionBuffer = async () => {
+    const challenge = activeBookChallengeRef.current
+    if (!challenge || !bookEditSession || !editManifest) return
+    let solPath = challenge.sol?.file
+    if (!solPath) {
+      solPath = defaultSolutionPath(challenge)
+      await bookEdit.writeBookFile(bookEditSession.srcFsId, solPath, `# Solution to "${challenge.name}"\n`)
+      const manifest: BookManifest = {
+        ...editManifest,
+        children: editManifest.children.map(c => (!isBookRef(c) && c.id === challenge.id) ? { ...c, sol: { file: solPath!, showSolution: false } } : c),
+      }
+      setEditManifest(manifest)
+      await bookEdit.writeManifest(bookEditSession.srcFsId, manifest)
+      const updated = { ...challenge, sol: { file: solPath, showSolution: false } }
+      setActiveBookChallenge(updated); activeBookChallengeRef.current = updated
+    }
+    solutionPathRef.current = solPath
+    const text = await bookEdit.readBookFile(bookEditSession.srcFsId, solPath)
+    loadCodeText(text, flatName(solPath), solPath)
+  }
+
+  const switchEditorTab = async (next: 'starter' | 'solution') => {
+    if (next === editorTab || !isBookEditMode || !activeBookChallengeRef.current) return
+    await saveCurrentToVFS()
+    if (next === 'solution') await loadSolutionBuffer()
+    else await loadStarterBuffer()
+    setEditorTab(next)
+  }
+
+  const copyFromOtherTab = async () => {
+    const challenge = activeBookChallengeRef.current
+    if (!challenge || !bookEditSession) return
+    if (editorTab === 'solution') {
+      const py = challenge.py ? flatName(challenge.py) : null
+      if (!py) return
+      const entry = await getEntryByPath(activeFilesystemId, '/' + py)
+      applyEditorText(entry?.content ? new TextDecoder().decode(entry.content) : '')
+    } else {
+      const solPath = challenge.sol?.file ?? defaultSolutionPath(challenge)
+      applyEditorText(await bookEdit.readBookFile(bookEditSession.srcFsId, solPath))
+    }
+  }
+
+  // ── Teacher Tools: Capture test case (interactive record) ─────────────────
+
+  const startCaptureTestCase = () => {
+    captureRunRef.current = true
+    captureInputsRef.current = []
+    // Keep the console visible (for interactive input) without entering fullscreen.
+    setVisiblePanels(prev => prev.output ? prev : { ...prev, output: true })
+    setConsoleTab('console')
+    void startTraceWorker('run')
+  }
+
+  const runCaptureOutput = (code: string, files: Array<{ path: string; content: ArrayBuffer }>, inputs: Array<string | number>): Promise<string> =>
+    new Promise(resolve => {
+      const worker = new TesterWorker()
+      worker.onmessage = (e: MessageEvent) => {
+        const d = e.data
+        if (d.type === 'done') { worker.terminate(); resolve(String(d.results?.[0]?.output ?? '')) }
+        else if (d.type === 'error') { worker.terminate(); resolve('') }
+      }
+      worker.postMessage({ type: 'run_tests', code, files, tests: [{ in: inputs, out: [] }] })
+    })
+
+  const finishCaptureTestCase = async (inputs: string[]) => {
+    const challenge = activeBookChallengeRef.current
+    if (!challenge || !bookEditSession || !editManifest) return
+    try {
+      const files = await getAllFiles(activeFilesystemId)
+      const output = await runCaptureOutput(codeText, files, inputs)
+      const newTest: BookTestCase = { in: inputs.length === 1 ? inputs[0] : inputs, out: output }
+      const manifest: BookManifest = {
+        ...editManifest,
+        children: editManifest.children.map(c => (!isBookRef(c) && c.id === challenge.id) ? { ...c, tests: [...(c.tests ?? []), newTest] } : c),
+      }
+      setEditManifest(manifest)
+      await bookEdit.writeManifest(bookEditSession.srcFsId, manifest)
+      const updated = { ...challenge, tests: [...(challenge.tests ?? []), newTest] }
+      setActiveBookChallenge(updated); activeBookChallengeRef.current = updated
+      setConsoleTab('tests')
+      setCodeStatus('Captured a test case from the solution run. Edit it in the Tests tab.')
+    } catch (e) { setCodeStatus(`Capture failed: ${e instanceof Error ? e.message : String(e)}`) }
   }
 
   const handleSubmit = async () => {
@@ -1785,8 +2127,14 @@ export default function App() {
         const result = evaluateAll(capturedTests, runOutputs, capturedCode)
         setTestResult(result)
         if (result.allPassed && bookNavState && activeBookChallengeRef.current) {
-          persistCompletion(bookNavState.rootUrl, activeBookChallengeRef.current.id)
-          setCompletedChallenges(getStoredCompletions())
+          if (isBookEditMode) {
+            // Editing: show a transient tick only, never persist progress.
+            const cid = activeBookChallengeRef.current.id
+            setTransientTicks(prev => { const n = new Set(prev); n.add(cid); return n })
+          } else {
+            persistCompletion(bookNavState.rootUrl, activeBookChallengeRef.current.id)
+            setCompletedChallenges(getStoredCompletions())
+          }
         }
         setIsTestRunning(false)
         testerWorkerRef.current = null
@@ -1921,6 +2269,8 @@ export default function App() {
   const startTraceWorker = async (modeOverride?: 'trace' | 'run' | 'break') => {
     if (!hasSab || !hasCode) return
     const choice = modeOverride ?? runModeChoice
+    // Auto-refocus the Console when a run starts from the Tests tab.
+    if (consoleTab === 'tests') setConsoleTab('console')
     if (pendingRestore) pendingRestore()
     setPendingRestore(null)
     fixedInputsQueueRef.current = appSettings.useFixedInputs
@@ -1937,7 +2287,9 @@ export default function App() {
     const isSvgTurtleRun = (choice === 'run') && hasTurtleForMode && appSettings.turtleMode === 'basthon-svg'
 
     workerRunModeRef.current = choice
-    if (choice === 'run') {
+    // Capture runs stay in the editor (no fullscreen console) so the teacher can
+    // immediately review the captured test.
+    if (choice === 'run' && !captureRunRef.current) {
       if (isSvgTurtleRun) enterSvgTurtlePresentationMode()
       else enterConsolePresentationMode()
     }
@@ -2017,7 +2369,12 @@ export default function App() {
         const label = wasRunMode ? '[RUN FINISHED]' : '[TRACE RUN FINISHED]'
         appendOutput(`\n${label}`)
         setInputRequest(null); setInputValue(''); setIsRunning(false); setActiveRuntime('')
-        if (bookNavState && activeBookChallengeRef.current) {
+        // A "capture test case" run just finished: build a test from the recorded inputs.
+        if (captureRunRef.current) {
+          captureRunRef.current = false
+          void finishCaptureTestCase([...captureInputsRef.current])
+        }
+        if (bookNavState && activeBookChallengeRef.current && !isBookEditMode) {
           const ch = activeBookChallengeRef.current
           const isExample = ch.isExample === 'True' || ch.isExample === true
           if (isExample) {
@@ -2265,6 +2622,7 @@ exec(code_obj, globals())
 
   const handleInputSubmit = (submittedValue = inputValue) => {
     if (!sabRef.current) return
+    if (captureRunRef.current) captureInputsRef.current.push(submittedValue)
     const { int32, uint8 } = sabRef.current
     if (Atomics.load(int32, 0) === 2) {
       const encoder = new TextEncoder()
@@ -2584,6 +2942,17 @@ exec(code_obj, globals())
                         <div className="text-[11px] text-slate-500 mt-0.5">{desc}</div>
                       </button>
                     ))}
+                    {isBookEditMode && editorTab === 'solution' && activeBookChallenge && (
+                      <>
+                        <div className="border-t border-slate-700 my-1" />
+                        <button type="button"
+                          onClick={() => { setIsRunDropdownOpen(false); startCaptureTestCase() }}
+                          className="w-full px-3 py-2.5 text-left transition-colors hover:bg-slate-700">
+                          <div className="font-semibold text-sm flex items-center gap-1.5 text-amber-300">Capture test case</div>
+                          <div className="text-[11px] text-slate-500 mt-0.5">Run the solution, type inputs, save as a test</div>
+                        </button>
+                      </>
+                    )}
                   </div>
                 )}
               </div>
@@ -2863,7 +3232,11 @@ exec(code_obj, globals())
                             activeFilesystemId={activeFilesystemId}
                             currentWorkingDir={currentWorkingDir}
                             openFilePath={openFilePath}
-                            hiddenPaths={challengeHiddenPaths}
+                            hiddenPaths={isBookEditMode ? [] : challengeHiddenPaths}
+                            editMode={isBookEditMode && !!activeBookChallenge}
+                            challengePyName={activeBookChallenge?.py ? activeBookChallenge.py.replace(/^.*\//, '') : undefined}
+                            fileVisibility={Object.fromEntries((activeBookChallenge?.additionalFiles ?? []).map(a => [a.filename.replace(/^.*\//, ''), a.visible]))}
+                            onToggleFileVisibility={handleToggleFileVisibility}
                             isChallengeMode={!!bookNavState?.activeChallengeId}
                             isBookOpen={!!bookNavState}
                             onCloseBook={handleCloseBook}
@@ -3035,6 +3408,7 @@ exec(code_obj, globals())
             {/* Code editor area */}
             <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
               <input ref={fileInputRef} type="file" className="hidden" aria-hidden="true" onChange={handleCodeFileChange} />
+              <input ref={teacherZipInputRef} type="file" accept=".zip" className="hidden" aria-hidden="true" onChange={e => void handleTeacherZipChange(e)} />
               <div className="bg-slate-900 py-1.5 px-4 border-b border-slate-700 text-slate-400 text-xs flex-shrink-0">
                 <div className="flex justify-between items-center gap-3">
                   <div className="min-w-0 flex items-baseline gap-2">
@@ -3112,6 +3486,29 @@ exec(code_obj, globals())
                     </IconButton>
                   </div>
                 </div>
+                {/* Starter / Solution tabs (book edit mode) */}
+                {isBookEditMode && activeBookChallenge && (
+                  <div className="flex items-center gap-2 mt-1.5 pt-1.5 border-t border-slate-700/60">
+                    <div className="flex items-center rounded overflow-hidden border border-slate-700">
+                      <button type="button" onClick={() => void switchEditorTab('starter')}
+                        className={`px-2.5 py-0.5 text-[11px] font-semibold transition-colors ${editorTab === 'starter' ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
+                        Starter
+                      </button>
+                      <button type="button" onClick={() => void switchEditorTab('solution')}
+                        className={`px-2.5 py-0.5 text-[11px] font-semibold transition-colors ${editorTab === 'solution' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
+                        Solution
+                      </button>
+                    </div>
+                    <button type="button" onClick={() => void copyFromOtherTab()}
+                      title={editorTab === 'starter' ? 'Overwrite the starter with the solution code' : 'Overwrite the solution with the starter code'}
+                      className="text-[11px] text-slate-400 hover:text-slate-200 px-1.5 py-0.5 rounded border border-slate-700 hover:border-slate-500 transition-colors">
+                      {editorTab === 'starter' ? 'Copy from solution' : 'Copy from starter'}
+                    </button>
+                    {editorTab === 'solution' && (
+                      <span className="text-[10px] text-emerald-400/80">Editing the reference solution</span>
+                    )}
+                  </div>
+                )}
               </div>
               <div className="flex-1 overflow-hidden relative">
                 {openFilePath === null ? (
@@ -3182,21 +3579,29 @@ exec(code_obj, globals())
               <div className="flex flex-col overflow-hidden min-h-0 flex-shrink-0"
                 style={{ height: viewMode === 'developer' && hasConsoleAndStructure ? `${rightColSplit}%` : '100%' }}>
                 <div className="bg-slate-900 py-2 px-3 border-b border-slate-700 flex-shrink-0 flex items-center justify-between gap-2">
-                  {appSettings.useFixedInputs ? (
+                  {(appSettings.useFixedInputs || (isBookEditMode && !!activeBookChallenge)) ? (
                     <div className="flex rounded overflow-hidden border border-slate-700 text-[11px]">
                       <button type="button" onClick={() => setConsoleTab('console')}
                         className={`px-2.5 py-1 font-bold uppercase tracking-wider ${consoleTab === 'console' ? 'bg-teal-700 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}>
                         Console
                       </button>
-                      <button type="button" onClick={() => setConsoleTab('inputs')}
-                        className={`px-2.5 py-1 font-bold uppercase tracking-wider ${consoleTab === 'inputs' ? 'bg-teal-700 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}>
-                        Inputs
-                      </button>
+                      {appSettings.useFixedInputs && (
+                        <button type="button" onClick={() => setConsoleTab('inputs')}
+                          className={`px-2.5 py-1 font-bold uppercase tracking-wider ${consoleTab === 'inputs' ? 'bg-teal-700 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}>
+                          Inputs
+                        </button>
+                      )}
+                      {isBookEditMode && activeBookChallenge && (
+                        <button type="button" onClick={() => setConsoleTab('tests')}
+                          className={`px-2.5 py-1 font-bold uppercase tracking-wider ${consoleTab === 'tests' ? 'bg-amber-700 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}>
+                          Tests
+                        </button>
+                      )}
                     </div>
                   ) : (
                     <div className="font-bold uppercase tracking-wider text-xs text-teal-400">Console Output</div>
                   )}
-                  {(!appSettings.useFixedInputs || consoleTab === 'console') && (
+                  {(consoleTab === 'console') && (
                     <div className="flex items-center gap-1.5">
                       <label className="text-[10px] text-slate-500 uppercase tracking-wider">Size</label>
                       <select
@@ -3230,8 +3635,19 @@ exec(code_obj, globals())
                     />
                   </div>
                 )}
-                {/* Console content — kept mounted (preserves terminal buffer); hidden when Inputs tab is active */}
-                <div className={appSettings.useFixedInputs && consoleTab === 'inputs' ? 'hidden' : 'flex flex-col flex-1 min-h-0 overflow-hidden'}>
+                {/* Tests tab (book edit mode) */}
+                {isBookEditMode && activeBookChallenge && consoleTab === 'tests' && (
+                  <div className="flex flex-col flex-1 min-h-0 overflow-hidden bg-slate-900/30">
+                    <TestEditor
+                      tests={activeBookChallenge.tests ?? []}
+                      onChange={handleTestsChange}
+                      onRunTests={() => void handleSubmit()}
+                      isRunning={isTestRunning}
+                    />
+                  </div>
+                )}
+                {/* Console content — kept mounted (preserves terminal buffer); hidden when Inputs/Tests tab is active */}
+                <div className={consoleTab !== 'console' ? 'hidden' : 'flex flex-col flex-1 min-h-0 overflow-hidden'}>
                   {appSettings.inputMode === 'inline-console' ? (
                     <div className="flex-1 min-h-0 overflow-hidden">
                       <ConsoleTerminal
@@ -3309,8 +3725,34 @@ exec(code_obj, globals())
           </>
         )}
 
+        {/* TEACHER TOOLS column — full height, sits just before the book panel */}
+        {visiblePanels.teacherTools && (
+          <>
+            <div className="resize-handle-col"
+              onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'col-teacher', startX: e.clientX, startY: e.clientY, startVal: teacherColWidth }; document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none' }}>
+              <div className="resize-bar" style={{ width: '3px', height: '48px' }} />
+            </div>
+            <div className="flex-shrink-0 bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden"
+              style={{ width: teacherColWidth }}>
+              <TeacherToolsPanel
+                isEditing={isBookEditMode}
+                bookName={bookName}
+                folderConnected={!!bookEditSession?.folderHandle}
+                onNewBook={() => void handleNewBook()}
+                onOpenZip={handleOpenBookZip}
+                onConnectFolder={() => void handleConnectBookFolder()}
+                onExportZip={() => void handleExportBookZip()}
+                onReloadFolder={() => void handleReloadBookFolder()}
+                onCloseBook={handleCloseBook}
+                onOpenJsonEditor={handleOpenBookJsonEditor}
+                onVerifyAll={handleVerifyAllSolutions}
+              />
+            </div>
+          </>
+        )}
+
         {/* Resize handle: center ↔ book panel */}
-        {hasBookPanel && !bookPanelCollapsed && (visiblePanels.code || hasRightCol || (viewMode === 'minimal' && visiblePanels.diagram)) && (
+        {hasBookPanel && !bookPanelCollapsed && (visiblePanels.code || hasRightCol || (viewMode === 'minimal' && visiblePanels.diagram) || visiblePanels.teacherTools) && (
           <div className="resize-handle-col"
             onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'col-bookpanel', startX: e.clientX, startY: e.clientY, startVal: bookPanelWidth }; document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none' }}>
             <div className="resize-bar" style={{ width: '3px', height: '48px' }} />
@@ -3333,12 +3775,30 @@ exec(code_obj, globals())
               completedChallenges={completedChallenges}
               isCollapsed={bookPanelCollapsed}
               onToggleCollapse={() => setBookPanelCollapsed(o => !o)}
+              editMode={isBookEditMode}
+              editManifest={editManifest}
+              transientTicks={transientTicks}
+              onAddExercise={(afterId) => void handleAddExercise(afterId)}
+              onDeleteExercise={(id) => void handleDeleteExercise(id)}
+              onMoveExercise={(id, dir) => void handleMoveExercise(id, dir)}
+              onRenameExercise={handleRenameExercise}
+              onToggleExample={handleToggleExample}
+              onSaveGuide={handleSaveGuide}
             />
           </div>
         )}
       </div>
 
       <SettingsDialog isOpen={isSettingsOpen} settings={appSettings} onClose={() => setIsSettingsOpen(false)} onSettingsChange={setAppSettings} />
+
+      {showBookJsonEditor && editManifest && (
+        <BookJsonEditor
+          manifest={editManifest}
+          theme={theme}
+          onSave={handleBookJsonSave}
+          onClose={() => setShowBookJsonEditor(false)}
+        />
+      )}
 
       {htmlPreview && (
         <HtmlPreviewDialog
