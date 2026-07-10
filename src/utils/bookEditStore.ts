@@ -109,10 +109,13 @@ export async function createBookFromFileMap(
   return session
 }
 
-const NEW_BOOK_PY = `# Write your solution here\nname = input("What is your name? ")\nprint("Hello", name)\n`
-const NEW_BOOK_GUIDE = `# Welcome\n\nThis is an example page. Ask the student to say hello.\n\n\`\`\`python\nname = input("What is your name? ")\nprint("Hello", name)\n\`\`\`\n`
+const EXAMPLE_PY = `# This is an example — the student just runs it.\nname = input("What is your name? ")\nprint("Hello", name)\n`
+const EXAMPLE_GUIDE = `# Welcome\n\nThis is an **example** page. Run the code and see how \`input()\` and \`print()\` work.\n\n\`\`\`python\nname = input("What is your name? ")\nprint("Hello", name)\n\`\`\`\n`
+const TASK_STARTER = `# Ask the user for their favourite colour and reply.\n# Expected: "I also like <colour>"\n`
+const TASK_GUIDE = `# Your first task\n\nAsk the user for their favourite colour, then print \`I also like <colour>\`.\n\nFor example, if they type **blue**, print \`I also like blue\`.\n`
+const TASK_SOLUTION = `colour = input("What is your favourite colour? ")\nprint("I also like", colour)\n`
 
-/** Create a brand-new book (one example challenge) in a fresh book source VFS. */
+/** Create a brand-new book (one worked example + one task) in a fresh source VFS. */
 export async function createNewBook(
   bookName: string,
   folderHandle: FileSystemDirectoryHandle | null = null,
@@ -124,17 +127,20 @@ export async function createNewBook(
     name: bookName,
     id: crypto.randomUUID(),
     children: [
+      { id: crypto.randomUUID(), name: 'Example', guide: 'ex01.md', py: 'ex01.py', isExample: true },
       {
-        id: crypto.randomUUID(),
-        name: 'Example',
-        guide: 'ex01.md',
-        py: 'ex01.py',
-        isExample: true,
+        id: crypto.randomUUID(), name: 'Task', guide: 'ex02.md', py: 'ex02.py',
+        tests: [{ in: 'blue', out: '.*I also like blue' }],
+        additionalFiles: [],
+        sol: { file: 'solutions/ex02.py', showSolution: false },
       },
     ],
   }
-  await writeBookFile(srcFsId, 'ex01.py', NEW_BOOK_PY)
-  await writeBookFile(srcFsId, 'ex01.md', NEW_BOOK_GUIDE)
+  await writeBookFile(srcFsId, 'ex01.py', EXAMPLE_PY)
+  await writeBookFile(srcFsId, 'ex01.md', EXAMPLE_GUIDE)
+  await writeBookFile(srcFsId, 'ex02.py', TASK_STARTER)
+  await writeBookFile(srcFsId, 'ex02.md', TASK_GUIDE)
+  await writeBookFile(srcFsId, 'solutions/ex02.py', TASK_SOLUTION)
   await writeManifest(srcFsId, manifest)
   return session
 }

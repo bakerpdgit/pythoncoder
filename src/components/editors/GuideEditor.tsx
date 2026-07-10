@@ -114,7 +114,7 @@ export function GuideEditor({ initialMarkdown, onSave }: Props) {
   }
 
   return (
-    <div className="flex flex-col border border-slate-700 rounded-md overflow-hidden bg-slate-950/40">
+    <div className="flex flex-col flex-1 min-h-0 border border-slate-700 rounded-md overflow-hidden bg-slate-950/40">
       <div className="flex items-center justify-between px-1.5 py-1 border-b border-slate-700 bg-slate-900">
         <span className="text-[10px] uppercase tracking-wider text-slate-500 pl-1">Instructions</span>
         <div className="flex items-center gap-0.5 text-[11px]">
@@ -128,7 +128,7 @@ export function GuideEditor({ initialMarkdown, onSave }: Props) {
       {mode === 'wysiwyg' ? (
         <>
           {editor && <Toolbar editor={editor} />}
-          <div className="guide-editor-scroll overflow-y-auto max-h-[60vh] px-2 py-2">
+          <div className="guide-editor-scroll flex-1 min-h-0 overflow-y-auto px-2 py-2">
             <EditorContent editor={editor} />
           </div>
         </>
@@ -138,7 +138,7 @@ export function GuideEditor({ initialMarkdown, onSave }: Props) {
           onChange={e => onSourceChange(e.target.value)}
           spellCheck={false}
           aria-label="Guide markdown source"
-          className="w-full min-h-[40vh] max-h-[60vh] bg-slate-950 text-slate-200 font-mono text-xs p-2 focus:outline-none resize-y" />
+          className="w-full flex-1 min-h-0 bg-slate-950 text-slate-200 font-mono text-xs p-2 focus:outline-none resize-none" />
       )}
     </div>
   )

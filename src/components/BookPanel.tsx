@@ -190,6 +190,12 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
     void loadManifest(navState.currentBookUrl)
   }, [navState.currentBookUrl, loadManifest, editMode, editManifest])
 
+  // Only the guide *path* (not the whole manifest) should trigger a re-fetch —
+  // otherwise unrelated edits (e.g. toggling a file's visibility) reload the
+  // guide and flicker the WYSIWYG editor.
+  const activeGuidePath = manifest && navState.activeChallengeId
+    ? findChallenge(manifest, navState.activeChallengeId)?.guide : undefined
+
   useEffect(() => {
     if (!navState.activeChallengeId || !manifest) {
       setGuideMarkdown('')
@@ -209,7 +215,8 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
 
     const fsName = getChallengeFsName(navState.activeChallengeId)
     void listFilesystems().then(list => setChallengeHasFs(list.some(f => f.name === fsName)))
-  }, [navState.activeChallengeId, navState.currentBookUrl, manifest])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navState.activeChallengeId, navState.currentBookUrl, activeGuidePath])
 
   // Generate turtle preview SVG when a challenge with `![preview](turtlepreview)` loads
   useEffect(() => {
@@ -513,7 +520,7 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
           status={testStatus}
           onClose={onClearTestResult}
         />
-        <div className="flex-1 overflow-y-auto min-h-0">
+        <div className={`flex-1 min-h-0 flex flex-col ${editMode && navState.activeChallengeId && !guideLoading ? 'overflow-hidden' : 'overflow-y-auto'}`}>
           {loading && (
             <div className="flex items-center justify-center py-8 text-slate-500">
               <svg className="w-4 h-4 animate-spin mr-2" fill="none" viewBox="0 0 24 24">
@@ -529,7 +536,7 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
 
           {/* Challenge instructions */}
           {!loading && !error && navState.activeChallengeId && (
-            <div className="p-3">
+            <div className={editMode && activeChallenge?.guide && !guideLoading ? 'p-2 flex-1 min-h-0 flex flex-col' : 'p-3'}>
               {guideLoading ? (
                 <div className="text-slate-500 flex items-center gap-1">
                   <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">

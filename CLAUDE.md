@@ -28,6 +28,18 @@ npm run preview
 ```
 Vite's own preview server serving `dist/` on `http://localhost:3000`.
 
+## Testing / verifying changes
+
+- When driving the app with Playwright to verify a change, **also capture the browser
+  console** (`page.on('console', …)` for `error`/`warning` and `page.on('pageerror', …)`)
+  and confirm no new errors appear. Don't rely on screenshots alone.
+- `@monaco-editor/react` throws a harmless `Canceled` rejection when a Monaco editor model
+  is disposed mid-operation. It is suppressed in `main.tsx` (unhandledrejection/error
+  listeners), and the code editor keeps Monaco mounted (overlaying a placeholder rather than
+  unmounting) to avoid churning it. If you see `Canceled` in Playwright's `pageerror`, it is
+  this known-benign case (Playwright reports it pre-suppression) — verify it is absent in a
+  real browser's console before treating it as a regression.
+
 ## Architecture
 
 This is a **Vite 5 + React 18 + TypeScript** application. Source lives in `src/`, production output goes to `dist/`.

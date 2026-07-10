@@ -179,9 +179,9 @@ export default function App() {
   const [bookEditSession, setBookEditSession] = useState<BookEditSession | null>(null)
   const [editManifest, setEditManifest] = useState<BookManifest | null>(null)
   const [transientTicks, setTransientTicks] = useState<Set<string>>(new Set())
-  const [teacherColWidth, setTeacherColWidth] = useState(300)   // px width of teacher tools column
   const [editorTab, setEditorTab] = useState<'starter' | 'solution'>('starter')  // code editor tab in edit mode
   const [showBookJsonEditor, setShowBookJsonEditor] = useState(false)
+  const [isVerifyingSolutions, setIsVerifyingSolutions] = useState(false)
   const solutionPathRef = useRef<string | null>(null)          // active challenge's sol.file path
   const captureRunRef = useRef(false)                          // a "capture test case" run is in progress
   const captureInputsRef = useRef<string[]>([])                // inputs consumed during a capture run
@@ -561,8 +561,6 @@ export default function App() {
         setCenterVerticalSplit(Math.max(20, Math.min(85, ((e.clientY - rect.top) / rect.height) * 100)))
       } else if (drag.type === 'col-structure') {
         setStructureColWidth(Math.max(240, Math.min(720, drag.startVal + (drag.startX - e.clientX))))
-      } else if (drag.type === 'col-teacher') {
-        setTeacherColWidth(Math.max(240, Math.min(520, drag.startVal + (drag.startX - e.clientX))))
       }
     }
     const onMouseUp = () => { resizeDragRef.current = null; document.body.style.cursor = ''; document.body.style.userSelect = '' }
@@ -1640,6 +1638,7 @@ export default function App() {
   const openResourceUrl = async (rawUrl: string) => {
     const url = rawUrl.trim()
     if (!url) return
+    hideTeacherToolsPanel()
     try {
       if (isBookUrl(url)) {
         await handleBookOpen(url)
@@ -1722,6 +1721,12 @@ export default function App() {
 
   const revealTeacherToolsPanel = () => {
     setVisiblePanels(prev => prev.teacherTools ? prev : { ...prev, teacherTools: true })
+  }
+
+  // Hide Teacher Tools when a student-facing source is opened; the teacher can
+  // re-enable it from the Panels menu to resume authoring.
+  const hideTeacherToolsPanel = () => {
+    setVisiblePanels(prev => prev.teacherTools ? { ...prev, teacherTools: false } : prev)
   }
 
   // Enter edit mode for a freshly created/opened book source session.
@@ -1848,9 +1853,60 @@ export default function App() {
     }
   }
 
-  const handleVerifyAllSolutions = () => {
-    // Wired in a later phase (whole-book solution verification).
-    setCodeStatus('Verify-all-solutions is coming soon.')
+  // Run a set of tests against code+files in a throwaway tester worker.
+  const runTestsInWorker = (code: string, files: Array<{ path: string; content: ArrayBuffer }>, tests: BookTestCase[]): Promise<TesterRunOutput[]> =>
+    new Promise(resolve => {
+      const worker = new TesterWorker()
+      worker.onmessage = (e: MessageEvent) => {
+        const d = e.data
+        if (d.type === 'done') { worker.terminate(); resolve(d.results as TesterRunOutput[]) }
+        else if (d.type === 'error') { worker.terminate(); resolve([]) }
+      }
+      worker.postMessage({ type: 'run_tests', code, files, tests })
+    })
+
+  // Read a challenge's additional files from the book source into tester file specs.
+  const readChallengeFiles = async (challenge: BookChallenge): Promise<Array<{ path: string; content: ArrayBuffer }>> => {
+    if (!bookEditSession) return []
+    const out: Array<{ path: string; content: ArrayBuffer }> = []
+    for (const af of challenge.additionalFiles ?? []) {
+      const name = flatName(af.filename)
+      const entry = await getEntryByPath(bookEditSession.srcFsId, '/' + name)
+      if (entry?.content) out.push({ path: '/' + name, content: entry.content })
+    }
+    return out
+  }
+
+  // Verify all solutions: run each challenge's reference solution against its own
+  // tests. Flags challenges with tests but no solution, and solutions that fail.
+  const handleVerifyAllSolutions = async () => {
+    if (!bookEditSession || !editManifest || isVerifyingSolutions) return
+    setIsVerifyingSolutions(true)
+    try {
+      const challenges = bookEdit.getChallenges(editManifest)
+      const lines: string[] = []
+      const passing = new Set(transientTicks)
+      for (const c of challenges) {
+        const tests = c.tests ?? []
+        if (tests.length === 0) { lines.push(`•  ${c.name} — no tests`); continue }
+        if (!c.sol?.file) { lines.push(`✗  ${c.name} — NO SOLUTION provided`); passing.delete(c.id); continue }
+        const solCode = await bookEdit.readBookFile(bookEditSession.srcFsId, c.sol.file)
+        const files = await readChallengeFiles(c)
+        const runOutputs = await runTestsInWorker(solCode, files, tests)
+        const result = evaluateAll(tests, runOutputs, solCode)
+        if (result.allPassed) { lines.push(`✓  ${c.name} — all ${tests.length} passed`); passing.add(c.id) }
+        else {
+          const p = result.results.filter(r => r.passed).length
+          lines.push(`✗  ${c.name} — ${p}/${tests.length} passed`); passing.delete(c.id)
+        }
+      }
+      setTransientTicks(passing)
+      await dialogs.alert({ title: 'Verify all solutions', message: lines.length ? lines.join('\n') : 'This book has no exercises yet.' })
+    } catch (e) {
+      setCodeStatus(`Verify failed: ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setIsVerifyingSolutions(false)
+    }
   }
 
   // ── Teacher Tools: exercise-list editing ──────────────────────────────────
@@ -1888,20 +1944,35 @@ export default function App() {
     void commitManifest(manifest)
   }
 
-  const handleToggleExample = (id: string) => {
+  const handleToggleExample = async (id: string) => {
     if (!editManifest) return
+    const target = bookEdit.getChallenges(editManifest).find(c => c.id === id)
+    if (!target) return
+    const wasExample = target.isExample === true || target.isExample === 'True'
+    // Converting a task → example discards its test cases (which examples ignore).
+    if (!wasExample && (target.tests?.length ?? 0) > 0) {
+      const ok = await dialogs.confirm({
+        title: 'Convert to example',
+        message: `"${target.name}" has ${target.tests!.length} test case${target.tests!.length === 1 ? '' : 's'}. Examples don't use tests, so they will be deleted. Continue?`,
+        confirmLabel: 'Delete tests & convert', danger: true,
+      })
+      if (!ok) return
+    }
     const manifest: BookManifest = {
       ...editManifest,
       children: editManifest.children.map(c => {
         if (isBookRef(c) || c.id !== id) return c
-        const isEx = c.isExample === true || c.isExample === 'True'
         const next = { ...c }
-        if (isEx) delete next.isExample
-        else next.isExample = true
+        if (wasExample) { delete next.isExample }         // example → task
+        else { next.isExample = true; next.tests = [] }   // task → example (drop tests)
         return next
       }),
     }
-    void commitManifest(manifest)
+    await commitManifest(manifest)
+    if (activeBookChallengeRef.current?.id === id) {
+      const updated = bookEdit.getChallenges(manifest).find(c => c.id === id) ?? null
+      setActiveBookChallenge(updated); activeBookChallengeRef.current = updated
+    }
   }
 
   const handleSaveGuide = (guidePath: string, markdown: string) => {
@@ -2177,6 +2248,7 @@ export default function App() {
   }
 
   const importLocalFiles = async (fileMap: Map<string, ArrayBuffer>, sourceName: string) => {
+    hideTeacherToolsPanel()
     const bookJsonBuf = fileMap.get('book.json')
     if (bookJsonBuf) {
       const stagingName = BOOK_SRC_PREFIX + sourceName
@@ -3511,42 +3583,41 @@ exec(code_obj, globals())
                 )}
               </div>
               <div className="flex-1 overflow-hidden relative">
-                {openFilePath === null ? (
-                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-slate-500 bg-slate-950">
+                {/* Monaco stays mounted even with no file open (placeholder overlays it)
+                    to avoid the editor-dispose "Canceled" churn on every navigation. */}
+                {!isEditorReady && openFilePath !== null && (
+                  <div className="absolute inset-0 flex items-center justify-center text-slate-500 text-sm z-10">Loading Monaco editor...</div>
+                )}
+                <Editor
+                  height="100%"
+                  language="python"
+                  theme={theme === 'light' ? 'as-tracer-light' : 'as-tracer-dark'}
+                  value={codeText}
+                  onChange={handleEditorChange}
+                  beforeMount={handleEditorBeforeMount}
+                  onMount={handleEditorMount}
+                  options={{
+                    glyphMargin: true,
+                    minimap: { enabled: false },
+                    lineNumbersMinChars: 4,
+                    scrollBeyondLastLine: false,
+                    smoothScrolling: true,
+                    tabSize: 4,
+                    insertSpaces: true,
+                    fontSize: editorFontSize,
+                    padding: { top: 14, bottom: 18 },
+                    renderLineHighlight: 'none',
+                    wordWrap: 'off',
+                    readOnly: isRunning,
+                  }}
+                />
+                {openFilePath === null && (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-slate-500 bg-slate-950 z-20">
                     <svg className="w-10 h-10 text-slate-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                     </svg>
                     <span className="text-sm">Open a file to start editing</span>
                   </div>
-                ) : (
-                  <>
-                    {!isEditorReady && (
-                      <div className="absolute inset-0 flex items-center justify-center text-slate-500 text-sm z-10">Loading Monaco editor...</div>
-                    )}
-                    <Editor
-                      height="100%"
-                      language="python"
-                      theme={theme === 'light' ? 'as-tracer-light' : 'as-tracer-dark'}
-                      value={codeText}
-                      onChange={handleEditorChange}
-                      beforeMount={handleEditorBeforeMount}
-                      onMount={handleEditorMount}
-                      options={{
-                        glyphMargin: true,
-                        minimap: { enabled: false },
-                        lineNumbersMinChars: 4,
-                        scrollBeyondLastLine: false,
-                        smoothScrolling: true,
-                        tabSize: 4,
-                        insertSpaces: true,
-                        fontSize: editorFontSize,
-                        padding: { top: 14, bottom: 18 },
-                        renderLineHighlight: 'none',
-                        wordWrap: 'off',
-                        readOnly: isRunning,
-                      }}
-                    />
-                  </>
                 )}
               </div>
             </div>
@@ -3638,12 +3709,25 @@ exec(code_obj, globals())
                 {/* Tests tab (book edit mode) */}
                 {isBookEditMode && activeBookChallenge && consoleTab === 'tests' && (
                   <div className="flex flex-col flex-1 min-h-0 overflow-hidden bg-slate-900/30">
-                    <TestEditor
-                      tests={activeBookChallenge.tests ?? []}
-                      onChange={handleTestsChange}
-                      onRunTests={() => void handleSubmit()}
-                      isRunning={isTestRunning}
-                    />
+                    {(activeBookChallenge.isExample === true || activeBookChallenge.isExample === 'True') ? (
+                      <div className="flex-1 flex flex-col items-center justify-center gap-3 p-6 text-center">
+                        <p className="text-slate-400 text-xs leading-relaxed max-w-xs">
+                          Tests are disabled because this exercise is marked as an <span className="text-slate-200 font-semibold">example</span>.
+                          Examples are just demonstrated, not tested.
+                        </p>
+                        <button type="button" onClick={() => void handleToggleExample(activeBookChallenge!.id)}
+                          className="px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition-colors">
+                          Convert to task
+                        </button>
+                      </div>
+                    ) : (
+                      <TestEditor
+                        tests={activeBookChallenge.tests ?? []}
+                        onChange={handleTestsChange}
+                        onRunTests={() => void handleSubmit()}
+                        isRunning={isTestRunning}
+                      />
+                    )}
                   </div>
                 )}
                 {/* Console content — kept mounted (preserves terminal buffer); hidden when Inputs/Tests tab is active */}
@@ -3725,66 +3809,62 @@ exec(code_obj, globals())
           </>
         )}
 
-        {/* TEACHER TOOLS column — full height, sits just before the book panel */}
-        {visiblePanels.teacherTools && (
-          <>
-            <div className="resize-handle-col"
-              onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'col-teacher', startX: e.clientX, startY: e.clientY, startVal: teacherColWidth }; document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none' }}>
-              <div className="resize-bar" style={{ width: '3px', height: '48px' }} />
-            </div>
-            <div className="flex-shrink-0 bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden"
-              style={{ width: teacherColWidth }}>
-              <TeacherToolsPanel
-                isEditing={isBookEditMode}
-                bookName={bookName}
-                folderConnected={!!bookEditSession?.folderHandle}
-                onNewBook={() => void handleNewBook()}
-                onOpenZip={handleOpenBookZip}
-                onConnectFolder={() => void handleConnectBookFolder()}
-                onExportZip={() => void handleExportBookZip()}
-                onReloadFolder={() => void handleReloadBookFolder()}
-                onCloseBook={handleCloseBook}
-                onOpenJsonEditor={handleOpenBookJsonEditor}
-                onVerifyAll={handleVerifyAllSolutions}
-              />
-            </div>
-          </>
-        )}
-
-        {/* Resize handle: center ↔ book panel */}
-        {hasBookPanel && !bookPanelCollapsed && (visiblePanels.code || hasRightCol || (viewMode === 'minimal' && visiblePanels.diagram) || visiblePanels.teacherTools) && (
+        {/* Resize handle: center ↔ right (teacher tools + book) column */}
+        {(hasBookPanel || visiblePanels.teacherTools) && !bookPanelCollapsed && (visiblePanels.code || hasRightCol || (viewMode === 'minimal' && visiblePanels.diagram)) && (
           <div className="resize-handle-col"
             onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'col-bookpanel', startX: e.clientX, startY: e.clientY, startVal: bookPanelWidth }; document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none' }}>
             <div className="resize-bar" style={{ width: '3px', height: '48px' }} />
           </div>
         )}
 
-        {/* BOOK PANEL — full height, right edge */}
-        {hasBookPanel && (
-          <div className="flex-shrink-0 bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden"
-            style={{ width: bookPanelCollapsed ? 32 : bookPanelWidth }}>
-            <BookPanel
-              navState={bookNavState}
-              onNavStateChange={handleBookNavStateChange}
-              onEnterChallenge={(bookUrl, challenge, forceReset) => void handleEnterChallenge(bookUrl, challenge, forceReset)}
-              onClose={handleCloseBook}
-              testResult={testResult}
-              isTestRunning={isTestRunning}
-              testStatus={testRunnerStatus}
-              onClearTestResult={() => setTestResult(null)}
-              completedChallenges={completedChallenges}
-              isCollapsed={bookPanelCollapsed}
-              onToggleCollapse={() => setBookPanelCollapsed(o => !o)}
-              editMode={isBookEditMode}
-              editManifest={editManifest}
-              transientTicks={transientTicks}
-              onAddExercise={(afterId) => void handleAddExercise(afterId)}
-              onDeleteExercise={(id) => void handleDeleteExercise(id)}
-              onMoveExercise={(id, dir) => void handleMoveExercise(id, dir)}
-              onRenameExercise={handleRenameExercise}
-              onToggleExample={handleToggleExample}
-              onSaveGuide={handleSaveGuide}
-            />
+        {/* RIGHT COLUMN — Teacher Tools (top) stacked above the Book navigator */}
+        {(hasBookPanel || visiblePanels.teacherTools) && (
+          <div className="flex-shrink-0 flex flex-col gap-[3px] min-h-0"
+            style={{ width: (bookPanelCollapsed && hasBookPanel) ? 32 : bookPanelWidth }}>
+            {visiblePanels.teacherTools && !(bookPanelCollapsed && hasBookPanel) && (
+              <div className="flex-shrink-0 bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden max-h-[60%]">
+                <TeacherToolsPanel
+                  isEditing={isBookEditMode}
+                  bookName={bookName}
+                  folderConnected={!!bookEditSession?.folderHandle}
+                  isVerifying={isVerifyingSolutions}
+                  onNewBook={() => void handleNewBook()}
+                  onOpenZip={handleOpenBookZip}
+                  onConnectFolder={() => void handleConnectBookFolder()}
+                  onExportZip={() => void handleExportBookZip()}
+                  onReloadFolder={() => void handleReloadBookFolder()}
+                  onCloseBook={handleCloseBook}
+                  onOpenJsonEditor={handleOpenBookJsonEditor}
+                  onVerifyAll={() => void handleVerifyAllSolutions()}
+                />
+              </div>
+            )}
+            {hasBookPanel && (
+              <div className="flex-1 min-h-0 bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden">
+                <BookPanel
+                  navState={bookNavState}
+                  onNavStateChange={handleBookNavStateChange}
+                  onEnterChallenge={(bookUrl, challenge, forceReset) => void handleEnterChallenge(bookUrl, challenge, forceReset)}
+                  onClose={handleCloseBook}
+                  testResult={testResult}
+                  isTestRunning={isTestRunning}
+                  testStatus={testRunnerStatus}
+                  onClearTestResult={() => setTestResult(null)}
+                  completedChallenges={completedChallenges}
+                  isCollapsed={bookPanelCollapsed}
+                  onToggleCollapse={() => setBookPanelCollapsed(o => !o)}
+                  editMode={isBookEditMode}
+                  editManifest={editManifest}
+                  transientTicks={transientTicks}
+                  onAddExercise={(afterId) => void handleAddExercise(afterId)}
+                  onDeleteExercise={(id) => void handleDeleteExercise(id)}
+                  onMoveExercise={(id, dir) => void handleMoveExercise(id, dir)}
+                  onRenameExercise={handleRenameExercise}
+                  onToggleExample={(id) => void handleToggleExample(id)}
+                  onSaveGuide={handleSaveGuide}
+                />
+              </div>
+            )}
           </div>
         )}
       </div>
