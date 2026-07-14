@@ -53,13 +53,13 @@ export function TeacherToolsPanel({
             <p className="text-slate-500 text-[11px] leading-relaxed mb-1">
               Author a learning book: exercises, tests, guides and files. Nothing here is visible to students.
             </p>
-            <BigButton title="New book" desc="Start a fresh book with one example exercise."
+            <BigButton title="New learning book" desc="Start a fresh book with one example exercise."
               onClick={onNewBook}
               icon={<path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />} />
-            <BigButton title="Open a ZIP" desc="Edit an existing learning book from a .zip on your computer."
+            <BigButton title="Edit a ZIP Learning Book" desc="Edit an existing learning book from a .zip on your computer."
               onClick={onOpenZip}
               icon={<path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8l1 12a2 2 0 002 2h8a2 2 0 002-2l1-12M10 12h4" />} />
-            <BigButton title="Connect a local folder" desc="Two-way sync: edits save straight back to the folder on disk."
+            <BigButton title="Edit a local folder learning book" desc="Two-way sync: edits save straight back to the folder on disk."
               onClick={onConnectFolder}
               icon={<path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2zM12 11v6m-3-3l3 3 3-3" />} />
           </>
