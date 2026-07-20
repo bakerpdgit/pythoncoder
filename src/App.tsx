@@ -39,6 +39,7 @@ import { getExplanation, getDefinitionKey } from './data/explanations'
 import { ThemeToggleButton } from './components/ui/ThemeToggleButton'
 import { RuntimeSettingsMenu } from './components/ui/RuntimeSettingsMenu'
 import { PanelVisibilityMenu } from './components/ui/PanelVisibilityMenu'
+import { LearningMenu } from './components/ui/LearningMenu'
 import { DiagramFontControls } from './components/ui/DiagramFontControls'
 import { IconButton } from './components/ui/IconButton'
 import { SettingsDialog } from './components/ui/SettingsDialog'
@@ -62,7 +63,9 @@ import type {
   OverallTestResult, TesterRunOutput, ViewMode, Breakpoint,
 } from './types'
 import { evaluateAll } from './utils/testMatcher'
+import { normalizeTestInputs } from './utils/testInputs'
 import { startVersionPolling } from './utils/versionCheck'
+import { githubRepositoryBookUrl } from './utils/bookSource'
 import { useDialogs } from './components/dialogs/DialogProvider'
 import {
   readDirectoryToMap, writeFileToFolderHandle, mkdirInFolderHandle,
@@ -105,6 +108,8 @@ const PYTHON_KEYWORDS = new Set([
   'if', 'import', 'in', 'is', 'lambda', 'nonlocal', 'not', 'or', 'pass', 'raise',
   'return', 'try', 'while', 'with', 'yield',
 ])
+
+type WorkerRunMode = 'trace' | 'run' | 'debug'
 
 // Build Monaco glyph decorations for the current breakpoints. Shared between the
 // [breakpoints] effect and editor (re)mount so glyphs survive an editor remount
@@ -196,6 +201,7 @@ export default function App() {
   const [htmlPreview, setHtmlPreview] = useState<{ fsId: string; path: string; name: string; url: string } | null>(null)
   const [diagramFontSize, setDiagramFontSize] = useState(DIAGRAM_FONT_DEFAULT)
   const [isPanelMenuOpen, setIsPanelMenuOpen] = useState(false)
+  const [isLearningMenuOpen, setIsLearningMenuOpen] = useState(false)
   const [isRuntimeMenuOpen, setIsRuntimeMenuOpen] = useState(false)
   const [isQuickSettingsOpen, setIsQuickSettingsOpen] = useState(false)
   const [fixedInputsText, setFixedInputsText] = useState<string>('')
@@ -215,7 +221,7 @@ export default function App() {
   const bpMenuRef = useRef<HTMLDivElement | null>(null)
   const [isBpToolMenuOpen, setIsBpToolMenuOpen] = useState(false)
   const bpToolMenuRef = useRef<HTMLDivElement | null>(null)
-  const [runModeChoice, setRunModeChoice] = useState<'trace' | 'run' | 'break'>('trace')
+  const [runModeChoice, setRunModeChoice] = useState<WorkerRunMode>('debug')
   const [isRunDropdownOpen, setIsRunDropdownOpen] = useState(false)
   const [editorFontSize, setEditorFontSize] = useState(() => getStoredEditorFontSize())
   const [consoleFontSize, setConsoleFontSize] = useState(() => getStoredConsoleFontSize())
@@ -244,8 +250,11 @@ export default function App() {
   const [updateAvailable, setUpdateAvailable] = useState(false)
 
   const workerRef = useRef<Worker | null>(null)
+  const prewarmedTraceWorkerRef = useRef<Worker | null>(null)
   const testerWorkerRef = useRef<Worker | null>(null)
+  const prewarmedTesterWorkerRef = useRef<Worker | null>(null)
   const activeBookChallengeRef = useRef<BookChallenge | null>(null)
+  const challengeLoadIdRef = useRef(0)
   const sabRef = useRef<SabRef | null>(null)
   const consoleTermRef = useRef<ConsoleTerminalHandle | null>(null)
   const inputModeRef = useRef(appSettings.inputMode)
@@ -266,6 +275,7 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const teacherZipInputRef = useRef<HTMLInputElement | null>(null)
   const panelMenuRef = useRef<HTMLDivElement | null>(null)
+  const learningMenuRef = useRef<HTMLDivElement | null>(null)
   const runtimeMenuRef = useRef<HTMLDivElement | null>(null)
   const quickSettingsRef = useRef<HTMLDivElement | null>(null)
   const fixedInputsQueueRef = useRef<string[]>([])
@@ -301,9 +311,42 @@ export default function App() {
   const rightColRef = useRef<HTMLDivElement | null>(null)
   const inspectorRef = useRef<HTMLDivElement | null>(null)
   const mainThreadMountedPathsRef = useRef<string[]>([])
-  const workerRunModeRef = useRef<'trace' | 'run' | 'break'>('trace')
+  const workerRunModeRef = useRef<WorkerRunMode>('debug')
+  const workerStartModeRef = useRef<WorkerRunMode>('debug')
   const turtleSvgHistoryRef = useRef<string[]>([])
   const turtleScrubLockedRef = useRef(false)
+
+  const prepareTraceWorker = () => {
+    if (!hasSab || workerRef.current || prewarmedTraceWorkerRef.current) return
+    const worker = new TracerWorker()
+    prewarmedTraceWorkerRef.current = worker
+    const discardWarmWorker = () => {
+      if (prewarmedTraceWorkerRef.current !== worker) return
+      worker.terminate()
+      prewarmedTraceWorkerRef.current = null
+    }
+    worker.onmessage = (event: MessageEvent) => {
+      if (event.data?.type === 'warm-error') discardWarmWorker()
+    }
+    worker.onerror = discardWarmWorker
+    worker.postMessage({ type: 'prewarm' })
+  }
+
+  const prepareTesterWorker = () => {
+    if (!activeBookChallengeRef.current?.tests?.length || testerWorkerRef.current || prewarmedTesterWorkerRef.current) return
+    const worker = new TesterWorker()
+    prewarmedTesterWorkerRef.current = worker
+    const discardWarmWorker = () => {
+      if (prewarmedTesterWorkerRef.current !== worker) return
+      worker.terminate()
+      prewarmedTesterWorkerRef.current = null
+    }
+    worker.onmessage = (event: MessageEvent) => {
+      if (event.data?.type === 'warm-error') discardWarmWorker()
+    }
+    worker.onerror = discardWarmWorker
+    worker.postMessage({ type: 'prewarm' })
+  }
 
   const deferredCodeText = useDeferredValue(codeText)
   const hasCode = codeText.trim().length > 0
@@ -382,7 +425,25 @@ export default function App() {
       testerWorkerRef.current.terminate()
       testerWorkerRef.current = null
     }
+    prewarmedTesterWorkerRef.current?.terminate()
+    prewarmedTesterWorkerRef.current = null
   }, [bookNavState?.activeChallengeId, bookNavState?.currentBookUrl])
+
+  // Task challenges get their own background-warmed marker runtime. Keeping it
+  // separate from the debugger prevents submissions from disturbing a run.
+  useEffect(() => {
+    if (!activeBookChallenge?.tests?.length) {
+      prewarmedTesterWorkerRef.current?.terminate()
+      prewarmedTesterWorkerRef.current = null
+      return
+    }
+    prepareTesterWorker()
+    return () => {
+      prewarmedTesterWorkerRef.current?.terminate()
+      prewarmedTesterWorkerRef.current = null
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeBookChallenge?.id, activeBookChallenge?.tests?.length])
 
   useEffect(() => {
     setIsCrossOriginIsolated(window.crossOriginIsolated === true)
@@ -427,6 +488,35 @@ export default function App() {
       }
     })()
   }, [])
+
+  // Compile Pyodide in a background worker as soon as browser isolation is
+  // available. The warmed worker is claimed by the next Debug, Trace, or Run.
+  useEffect(() => {
+    if (!hasSab) return
+    prepareTraceWorker()
+    return () => {
+      prewarmedTraceWorkerRef.current?.terminate()
+      prewarmedTraceWorkerRef.current = null
+      workerRef.current?.terminate()
+      workerRef.current = null
+    }
+    // `hasSab` changes only once during feature detection.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasSab])
+
+  // If code or the user's preference selects main-thread execution, warm that
+  // cached runtime too. This does not compete with the default trace worker.
+  useEffect(() => {
+    if (selectedRuntime === 'trace-worker') {
+      if (!isRunning) prepareTraceWorker()
+      return
+    }
+    if (isRunning) return
+    prewarmedTraceWorkerRef.current?.terminate()
+    prewarmedTraceWorkerRef.current = null
+    void loadMainThreadPyodide().catch(() => { /* reported if an actual run needs it */ })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedRuntime, isRunning])
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -521,18 +611,18 @@ export default function App() {
   }, [bpMenu, isBpToolMenuOpen])
 
   useEffect(() => {
-    if (!isPanelMenuOpen && !isRuntimeMenuOpen && !isQuickSettingsOpen) return
+    if (!isPanelMenuOpen && !isLearningMenuOpen && !isRuntimeMenuOpen && !isQuickSettingsOpen) return
     const handlePointerDown = (event: MouseEvent) => {
-      if (panelMenuRef.current?.contains(event.target as Node) || runtimeMenuRef.current?.contains(event.target as Node) || quickSettingsRef.current?.contains(event.target as Node)) return
-      setIsPanelMenuOpen(false); setIsRuntimeMenuOpen(false); setIsQuickSettingsOpen(false)
+      if (panelMenuRef.current?.contains(event.target as Node) || learningMenuRef.current?.contains(event.target as Node) || runtimeMenuRef.current?.contains(event.target as Node) || quickSettingsRef.current?.contains(event.target as Node)) return
+      setIsPanelMenuOpen(false); setIsLearningMenuOpen(false); setIsRuntimeMenuOpen(false); setIsQuickSettingsOpen(false)
     }
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') { setIsPanelMenuOpen(false); setIsRuntimeMenuOpen(false); setIsQuickSettingsOpen(false) }
+      if (event.key === 'Escape') { setIsPanelMenuOpen(false); setIsLearningMenuOpen(false); setIsRuntimeMenuOpen(false); setIsQuickSettingsOpen(false) }
     }
     document.addEventListener('mousedown', handlePointerDown)
     document.addEventListener('keydown', handleKeyDown)
     return () => { document.removeEventListener('mousedown', handlePointerDown); document.removeEventListener('keydown', handleKeyDown) }
-  }, [isPanelMenuOpen, isRuntimeMenuOpen, isQuickSettingsOpen])
+  }, [isPanelMenuOpen, isLearningMenuOpen, isRuntimeMenuOpen, isQuickSettingsOpen])
 
   useEffect(() => {
     const onMouseMove = (e: MouseEvent) => {
@@ -1662,7 +1752,17 @@ export default function App() {
     }
   }
 
+  const handleLearningTutorialOpen = (githubUrl: string) => {
+    setIsLearningMenuOpen(false)
+    try {
+      void openResourceUrl(githubRepositoryBookUrl(githubUrl))
+    } catch (e) {
+      setCodeStatus(`Failed to open tutorial: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
   const handleBookNavStateChange = (state: BookNavState) => {
+    if (!state.activeChallengeId) challengeLoadIdRef.current += 1
     setBookNavState(state)
     persistBookNavState(state)
     if (!state.activeChallengeId) {
@@ -1674,8 +1774,10 @@ export default function App() {
   }
 
   const handleEnterChallenge = async (bookUrl: string, challenge: BookChallenge, forceReset = false) => {
+    const loadId = ++challengeLoadIdRef.current
     try {
       await saveCurrentToVFS()
+      if (loadId !== challengeLoadIdRef.current) return
       clearEditorForSwitch()
       setEditorTab('starter')
       solutionPathRef.current = challenge.sol?.file ?? null
@@ -1683,12 +1785,14 @@ export default function App() {
       activeBookChallengeRef.current = challenge
       setTestResult(null)
       const { fsId, pyFilename, hiddenPaths } = await getOrCreateChallengeFs(bookUrl, challenge, forceReset)
+      if (loadId !== challengeLoadIdRef.current) return
       setActiveFilesystemId(fsId)
       setChallengeHiddenPaths(hiddenPaths)
       setCurrentWorkingDir('/')
       setVfsReloadTrigger(t => t + 1)
       if (pyFilename) {
         const entry = await getEntryByPath(fsId, `/${pyFilename}`)
+        if (loadId !== challengeLoadIdRef.current) return
         if (entry?.content) {
           const text = new TextDecoder().decode(entry.content)
           savedCodeRef.current = text
@@ -1696,11 +1800,14 @@ export default function App() {
         }
       }
     } catch (e) {
-      setCodeStatus(`Failed to load challenge: ${e instanceof Error ? e.message : String(e)}`)
+      if (loadId === challengeLoadIdRef.current) {
+        setCodeStatus(`Failed to load challenge: ${e instanceof Error ? e.message : String(e)}`)
+      }
     }
   }
 
   const handleCloseBook = () => {
+    challengeLoadIdRef.current += 1
     setBookNavState(null)
     persistBookNavState(null)
     setChallengeHiddenPaths([])
@@ -2180,11 +2287,18 @@ export default function App() {
 
     setTestResult(null)
     setIsTestRunning(true)
-    setTestRunnerStatus('Loading Python runtime…')
+    setTestRunnerStatus('Preparing test runner…')
 
     const runOutputs: TesterRunOutput[] = []
-    const worker = new TesterWorker()
+    const worker = prewarmedTesterWorkerRef.current ?? new TesterWorker()
+    prewarmedTesterWorkerRef.current = null
     testerWorkerRef.current = worker
+
+    const releaseWorker = () => {
+      worker.terminate()
+      if (testerWorkerRef.current === worker) testerWorkerRef.current = null
+      window.setTimeout(prepareTesterWorker, 0)
+    }
 
     worker.onmessage = (e: MessageEvent) => {
       const data = e.data
@@ -2208,8 +2322,7 @@ export default function App() {
           }
         }
         setIsTestRunning(false)
-        testerWorkerRef.current = null
-        worker.terminate()
+        releaseWorker()
       } else if (data.type === 'error') {
         const errorMsg = `Test runner error: ${data.error as string}`
         setTestResult({
@@ -2218,7 +2331,7 @@ export default function App() {
             caseIndex: i,
             passed: false,
             reveal: tc.reveal !== false,
-            inputs: Array.isArray(tc.in) ? tc.in : tc.in !== undefined && tc.in !== '' ? [String(tc.in)] : [],
+            inputs: normalizeTestInputs(tc.in),
             out: tc.out ?? '',
             output: undefined,
             error: errorMsg,
@@ -2226,9 +2339,28 @@ export default function App() {
           })),
         })
         setIsTestRunning(false)
-        testerWorkerRef.current = null
-        worker.terminate()
+        releaseWorker()
       }
+    }
+
+    worker.onerror = (event: ErrorEvent) => {
+      if (testerWorkerRef.current !== worker) return
+      const errorMsg = `Test runner failed to start: ${event.message || 'Unknown worker error'}`
+      setTestResult({
+        allPassed: false,
+        results: capturedTests.map((tc, i) => ({
+          caseIndex: i,
+          passed: false,
+          reveal: tc.reveal !== false,
+          inputs: normalizeTestInputs(tc.in),
+          out: tc.out ?? '',
+          output: undefined,
+          error: errorMsg,
+          reqResults: [],
+        })),
+      })
+      setIsTestRunning(false)
+      releaseWorker()
     }
 
     worker.postMessage({ type: 'run_tests', code: capturedCode, files: vfsFiles, tests: capturedTests })
@@ -2334,11 +2466,15 @@ export default function App() {
       setActiveRuntime('')
     }
     resetMainThreadPyodide()
+    prewarmedTraceWorkerRef.current?.terminate()
+    prewarmedTraceWorkerRef.current = null
+    if (selectedRuntime === 'trace-worker') prepareTraceWorker()
+    else void loadMainThreadPyodide().catch(() => { /* reported by the next run */ })
     setMainThreadStatus('Pyodide reset. Ready.')
     appendOutput('\n[INFO] Pyodide environment reset. Files are preserved.')
   }
 
-  const startTraceWorker = async (modeOverride?: 'trace' | 'run' | 'break') => {
+  const startTraceWorker = async (modeOverride?: WorkerRunMode) => {
     if (!hasSab || !hasCode) return
     const choice = modeOverride ?? runModeChoice
     // Auto-refocus the Console when a run starts from the Tests tab.
@@ -2359,6 +2495,7 @@ export default function App() {
     const isSvgTurtleRun = (choice === 'run') && hasTurtleForMode && appSettings.turtleMode === 'basthon-svg'
 
     workerRunModeRef.current = choice
+    workerStartModeRef.current = choice
     // Capture runs stay in the editor (no fullscreen console) so the teacher can
     // immediately review the captured test.
     if (choice === 'run' && !captureRunRef.current) {
@@ -2369,15 +2506,30 @@ export default function App() {
     resetExecutionState()
     resetTurtleHistory()
     setIsRunning(true); setActiveRuntime('trace-worker')
-    setCodeStatus(choice === 'run' ? 'Worker runtime starting...' : 'Trace-worker runtime starting...')
-    setMainThreadStatus('Trace-worker runtime is active.')
+    setCodeStatus(
+      choice === 'run' ? 'Worker runtime starting...' :
+      choice === 'debug' ? 'Debug runtime starting...' :
+      'Trace runtime starting...'
+    )
+    setMainThreadStatus(choice === 'debug' ? 'Debug worker runtime is active.' : 'Trace-worker runtime is active.')
 
     const sab = new SharedArrayBuffer(1024 * 4)
     sabRef.current = { sab, int32: new Int32Array(sab), uint8: new Uint8Array(sab) }
     sabRef.current.int32[750] = -1  // sentinel: -1 = watches not yet written by main thread
 
-    const worker = new TracerWorker()
+    // Claim the background-warmed worker when available. If the user clicked
+    // before warm-up completed, the queued init message simply shares the same
+    // Pyodide-loading promise inside the worker.
+    const worker = prewarmedTraceWorkerRef.current ?? new TracerWorker()
+    prewarmedTraceWorkerRef.current = null
     workerRef.current = worker
+
+    const releaseWorker = () => {
+      worker.terminate()
+      if (workerRef.current === worker) workerRef.current = null
+      sabRef.current = null
+      window.setTimeout(prepareTraceWorker, 0)
+    }
 
     worker.onmessage = (e: MessageEvent) => {
       const data = e.data
@@ -2386,7 +2538,7 @@ export default function App() {
         const mode = workerRunModeRef.current
         if (mode === 'run') {
           sendTraceCommand(TRACE_CMD_CONTINUE)
-        } else if (mode === 'break') {
+        } else if (mode === 'debug') {
           // The worker only reports isBreakpoint when an enabled breakpoint's
           // condition (if any) held, so trust its verdict rather than re-checking.
           if (data.isBreakpoint) {
@@ -2424,21 +2576,23 @@ export default function App() {
         appendOutput('\n[ERROR] ' + data.error)
         setInputRequest(null); setInputValue(''); setIsRunning(false); setActiveRuntime('')
         setCodeStatus('Worker runtime failed.')
-        if (workerRunModeRef.current === 'run') {
+        if (workerStartModeRef.current === 'run') {
           const inSvgMode = svgTurtleLayoutSnapshotRef.current !== null
           setPendingRestore(() => inSvgMode
             ? () => { restoreSvgTurtlePresentationMode(); closeScrubberAndClear() }
             : restoreConsolePresentationMode)
         }
-        workerRunModeRef.current = 'trace'
-        workerRef.current = null; sabRef.current = null
+        workerRunModeRef.current = 'debug'
+        workerStartModeRef.current = 'debug'
+        releaseWorker()
       } else if (data.type === 'done') {
         if (data.files?.length) {
           void syncFilesFromPyodide(capturedFsId, data.files).then(() => setVfsReloadTrigger(t => t + 1))
         }
         if (data.turtleSvg) { setTurtleSvg(data.turtleSvg); setDiagramView('turtle'); addToTurtleHistory(data.turtleSvg) }
-        const wasRunMode = workerRunModeRef.current === 'run'
-        const label = wasRunMode ? '[RUN FINISHED]' : '[TRACE RUN FINISHED]'
+        const startedMode = workerStartModeRef.current
+        const wasRunMode = startedMode === 'run'
+        const label = wasRunMode ? '[RUN FINISHED]' : startedMode === 'debug' ? '[DEBUG FINISHED]' : '[TRACE FINISHED]'
         appendOutput(`\n${label}`)
         setInputRequest(null); setInputValue(''); setIsRunning(false); setActiveRuntime('')
         // A "capture test case" run just finished: build a test from the recorded inputs.
@@ -2455,15 +2609,20 @@ export default function App() {
           }
         }
         setCurrentLine(-1)
-        setCodeStatus(wasRunMode ? 'Worker runtime finished.' : 'Trace-worker runtime finished.')
+        setCodeStatus(
+          wasRunMode ? 'Worker runtime finished.' :
+          startedMode === 'debug' ? 'Debug runtime finished.' :
+          'Trace runtime finished.'
+        )
         if (wasRunMode) {
           const inSvgMode = svgTurtleLayoutSnapshotRef.current !== null
           setPendingRestore(() => inSvgMode
             ? () => { restoreSvgTurtlePresentationMode(); closeScrubberAndClear() }
             : restoreConsolePresentationMode)
         }
-        workerRunModeRef.current = 'trace'
-        workerRef.current = null; sabRef.current = null
+        workerRunModeRef.current = 'debug'
+        workerStartModeRef.current = 'debug'
+        releaseWorker()
       } else if (data.type === 'turtle_update') {
         const svg = data.svg || ''
         setTurtleSvg(svg)
@@ -2471,8 +2630,31 @@ export default function App() {
       }
     }
 
+    worker.onerror = (event: ErrorEvent) => {
+      if (workerRef.current !== worker) return
+      appendOutput(`\n[ERROR] Worker failed to start: ${event.message || 'Unknown worker error'}`)
+      setInputRequest(null); setInputValue(''); setIsRunning(false); setActiveRuntime('')
+      setCodeStatus('Worker runtime failed.')
+      workerRunModeRef.current = 'debug'
+      workerStartModeRef.current = 'debug'
+      releaseWorker()
+    }
+
     const svgTurtleBootstrap = hasTurtleForMode && appSettings.turtleMode === 'basthon-svg' ? SVG_TURTLE_WORKER_SETUP : ''
-    worker.postMessage({ type: 'init', sab: sabRef.current.sab, code: codeText, files: vfsFiles, cwd: capturedCwd, svgTurtleBootstrap, watches: watchesRef.current })
+    const initialBreakpoints = choice === 'run' ? [] : [...breakpointsRef.current.entries()]
+      .filter(([, breakpoint]) => breakpoint.enabled)
+      .map(([line, breakpoint]) => ({ line, condition: breakpoint.condition.trim() }))
+    worker.postMessage({
+      type: 'init',
+      sab: sabRef.current.sab,
+      code: codeText,
+      files: vfsFiles,
+      cwd: capturedCwd,
+      svgTurtleBootstrap,
+      watches: watchesRef.current,
+      breakpoints: initialBreakpoints,
+      pauseOnFirstLine: choice === 'trace',
+    })
   }
 
   const startMainThreadRun = async () => {
@@ -2710,13 +2892,15 @@ exec(code_obj, globals())
     if (workerRef.current) {
       workerRef.current.terminate(); workerRef.current = null; sabRef.current = null
       setCodeStatus('Worker runtime stopped.')
-      if (workerRunModeRef.current === 'run') {
+      if (workerStartModeRef.current === 'run') {
         const inSvgMode = svgTurtleLayoutSnapshotRef.current !== null
         setPendingRestore(() => inSvgMode
           ? () => { restoreSvgTurtlePresentationMode(); closeScrubberAndClear() }
           : restoreConsolePresentationMode)
       }
-      workerRunModeRef.current = 'trace'
+      workerRunModeRef.current = 'debug'
+      workerStartModeRef.current = 'debug'
+      window.setTimeout(prepareTraceWorker, 0)
     } else if (activeRuntime === 'main-thread') {
       if (isPygameRunActive || isTurtleCanvasRunActive) {
         mainThreadStopRequestedRef.current = true
@@ -2900,7 +3084,7 @@ exec(code_obj, globals())
   return (
     <div className="h-screen w-screen flex flex-col overflow-hidden text-sm">
       {/* Header */}
-      <div className="bg-slate-800 border-b border-slate-700 flex justify-between items-center px-6 py-1.5 shadow-md z-10">
+      <div className="relative z-40 bg-slate-800 border-b border-slate-700 flex justify-between items-center px-6 py-1.5 shadow-md">
         <div className="flex items-center gap-3">
           <svg className="w-8 h-8 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
@@ -2909,8 +3093,11 @@ exec(code_obj, globals())
         </div>
 
         <div className="flex items-center gap-3">
+          <LearningMenu menuRef={learningMenuRef} isOpen={isLearningMenuOpen}
+            onToggleOpen={() => { setIsPanelMenuOpen(false); setIsRuntimeMenuOpen(false); setIsQuickSettingsOpen(false); setIsLearningMenuOpen(o => !o) }}
+            onOpenTutorial={handleLearningTutorialOpen} />
           <PanelVisibilityMenu menuRef={panelMenuRef} isOpen={isPanelMenuOpen}
-            onToggleOpen={() => { setIsRuntimeMenuOpen(false); setIsPanelMenuOpen(o => !o) }}
+            onToggleOpen={() => { setIsLearningMenuOpen(false); setIsRuntimeMenuOpen(false); setIsQuickSettingsOpen(false); setIsPanelMenuOpen(o => !o) }}
             panelOptions={PANEL_OPTIONS} visiblePanels={visiblePanels} onTogglePanel={togglePanelVisibility}
             buttonHoverClass="hover:border-emerald-400" checkboxAccent="#34d399" disabled={isPygameRunActive || isConsolePresentationMode || isTurtleCanvasRunActive}
             onRestoreDefaults={handleRestoreDefaults}
@@ -2921,13 +3108,13 @@ exec(code_obj, globals())
             viewMode={viewMode}
             onSelectViewMode={handleSelectViewMode} />
           <RuntimeSettingsMenu menuRef={runtimeMenuRef} isOpen={isRuntimeMenuOpen}
-            onToggleOpen={() => { setIsPanelMenuOpen(false); setIsRuntimeMenuOpen(o => !o) }}
+            onToggleOpen={() => { setIsLearningMenuOpen(false); setIsPanelMenuOpen(false); setIsQuickSettingsOpen(false); setIsRuntimeMenuOpen(o => !o) }}
             runtimePreference={runtimePreference} selectedRuntime={selectedRuntime}
             onSelectRuntime={key => { setRuntimePreference(key); setIsRuntimeMenuOpen(false) }}
             isPygameLocked={isPygameLocked || isTurtleLocked} hasSab={hasSab} disabled={isRunning} />
           <div ref={quickSettingsRef} className="relative">
             <button type="button" title="Settings"
-              onClick={() => { setIsPanelMenuOpen(false); setIsRuntimeMenuOpen(false); setIsQuickSettingsOpen(o => !o) }}
+              onClick={() => { setIsLearningMenuOpen(false); setIsPanelMenuOpen(false); setIsRuntimeMenuOpen(false); setIsQuickSettingsOpen(o => !o) }}
               className={`rounded border p-1.5 transition-colors ${isQuickSettingsOpen ? 'border-slate-400 text-slate-200' : 'border-slate-600 text-slate-400 hover:border-slate-400 hover:text-slate-200'}`}>
               <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065zM15 12a3 3 0 11-6 0 3 3 0 016 0z" />
@@ -2975,7 +3162,7 @@ exec(code_obj, globals())
                                                'bg-violet-600 hover:bg-violet-500'
                   }`}
                 >
-                  {runModeChoice === 'trace' ? 'Trace' : runModeChoice === 'run' ? 'Run' : 'Break Run'}
+                  {runModeChoice === 'trace' ? 'Trace' : runModeChoice === 'run' ? 'Run' : 'Debug'}
                 </button>
                 <button
                   type="button"
@@ -2995,21 +3182,19 @@ exec(code_obj, globals())
                 {isRunDropdownOpen && (
                   <div className="absolute right-0 top-full mt-1 z-50 w-52 rounded-lg border border-slate-600 bg-slate-800 shadow-xl py-1">
                     {([
-                      { key: 'trace' as const, label: 'Trace', desc: 'Step through each line', color: 'text-emerald-300' },
+                      { key: 'debug' as const, label: 'Debug', desc: 'Run here and pause at enabled breakpoints', color: 'text-violet-300' },
                       { key: 'run'   as const, label: 'Run',   desc: 'Run without stopping',  color: 'text-sky-300' },
-                      { key: 'break' as const, label: 'Break', desc: 'Run until first breakpoint', color: 'text-violet-300', disabled: breakpoints.size === 0 },
-                    ] as Array<{ key: 'trace' | 'run' | 'break'; label: string; desc: string; color: string; disabled?: boolean }>).map(({ key, label, desc, color, disabled }) => (
+                      { key: 'trace' as const, label: 'Trace', desc: 'Pause on the first line, then step through', color: 'text-emerald-300' },
+                    ] as Array<{ key: WorkerRunMode; label: string; desc: string; color: string }>).map(({ key, label, desc, color }) => (
                       <button
                         key={key}
                         type="button"
-                        disabled={disabled}
                         onClick={() => { setRunModeChoice(key); setIsRunDropdownOpen(false); void startTraceWorker(key) }}
-                        className={`w-full px-3 py-2.5 text-left transition-colors ${disabled ? 'opacity-40 cursor-not-allowed' : 'hover:bg-slate-700'}`}
+                        className="w-full px-3 py-2.5 text-left transition-colors hover:bg-slate-700"
                       >
                         <div className={`font-semibold text-sm flex items-center gap-1.5 ${runModeChoice === key ? color : 'text-slate-200'}`}>
                           {runModeChoice === key && <span className="text-[10px]">✓</span>}
                           {label}
-                          {disabled && <span className="ml-auto text-[9px] font-normal text-slate-500">no breakpoints</span>}
                         </div>
                         <div className="text-[11px] text-slate-500 mt-0.5">{desc}</div>
                       </button>
@@ -3093,7 +3278,7 @@ exec(code_obj, globals())
           ) : (activeRuntime === 'trace-worker' && (isConsolePresentationMode || currentLine <= 0)) ? (
             <div className="flex items-center overflow-hidden rounded border border-sky-500/70 bg-sky-900/30 text-sm font-semibold text-sky-100">
               <div className="px-4 py-2">
-                {workerRunModeRef.current === 'break' ? 'Running to breakpoint…' : 'Worker running'}
+                {workerRunModeRef.current === 'debug' ? 'Debugging…' : 'Worker running'}
               </div>
               <button type="button" onClick={forceStop}
                 className="self-stretch border-l border-sky-500/70 bg-red-700 px-3 text-xs font-bold uppercase tracking-wider text-white transition-colors hover:bg-red-600">

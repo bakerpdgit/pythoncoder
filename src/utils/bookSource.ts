@@ -22,6 +22,16 @@ export function normalizeGitHubUrl(url: string): string {
   return url
 }
 
+/** Build the root book.json URL for a public GitHub repository. */
+export function githubRepositoryBookUrl(repositoryUrl: string): string {
+  const url = new URL(repositoryUrl)
+  if (url.hostname.toLowerCase() !== 'github.com') throw new Error('Tutorial link must point to github.com')
+  const [owner, rawRepo, ...rest] = url.pathname.split('/').filter(Boolean)
+  if (!owner || !rawRepo || rest.length > 0) throw new Error('Tutorial link must point to a GitHub repository')
+  const repo = rawRepo.replace(/\.git$/i, '')
+  return `https://raw.githubusercontent.com/${owner}/${repo}/HEAD/book.json`
+}
+
 function toJsDelivrUrl(url: string): string | null {
   if (url.includes('cdn.jsdelivr.net')) return null
   const raw = url.match(/^https?:\/\/raw\.githubusercontent\.com\/([^/]+)\/([^/]+)\/([^/]+)\/(.+)$/)

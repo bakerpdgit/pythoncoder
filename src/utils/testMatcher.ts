@@ -1,4 +1,5 @@
 import type { BookTestCase, BookTestOutputReq, TesterRunOutput, TestReqResult, TestCaseResult, OverallTestResult } from '../types'
+import { normalizeTestInputs } from './testInputs'
 
 // ── Normalisation helpers ──────────────────────────────────────────────────
 
@@ -163,11 +164,7 @@ export function evaluateTestCase(
   sourceCode: string,
 ): TestCaseResult {
   const reveal = testCase.reveal !== false
-  const inputs: Array<string | number> = Array.isArray(testCase.in)
-    ? testCase.in
-    : testCase.in !== undefined && testCase.in !== ''
-      ? [String(testCase.in)]
-      : []
+  const inputs = normalizeTestInputs(testCase.in)
   const out = testCase.out ?? ''
   const { output, error, statementResults, fileContents, turtleSvg = '', solutionTurtleSvgs = {} } = runOut
 

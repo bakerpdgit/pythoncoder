@@ -1,7 +1,53 @@
 /// <reference lib="webworker" />
 
 
-const PYODIDE_URL = 'https://cdn.jsdelivr.net/pyodide/v0.29.3/full/pyodide.js'
+const PYODIDE_BASE_URL = 'https://cdn.jsdelivr.net/pyodide/v0.29.3/full'
+const PYODIDE_URL = `${PYODIDE_BASE_URL}/pyodide.js`
+
+// Loading and compiling Pyodide is by far the most expensive part of starting a
+// trace. Keep it behind a shared promise so the main thread can ask this worker
+// to warm the runtime before the user presses Debug, Trace, or Run.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let pyodidePromise: Promise<any> | null = null
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const ensurePyodide = (): Promise<any> => {
+  if (pyodidePromise) return pyodidePromise
+
+  pyodidePromise = (async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    if (typeof (self as any).loadPyodide !== 'function') {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(self as any).importScripts(PYODIDE_URL)
+      } catch {
+        // Module worker context (Vite dev mode): importScripts unavailable, fall
+        // back to a dynamic import of the same pinned Pyodide distribution.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const mod = await (import(/* @vite-ignore */ PYODIDE_URL) as Promise<any>)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        if (!(self as any).loadPyodide && mod?.loadPyodide) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ;(self as any).loadPyodide = mod.loadPyodide
+        }
+      }
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    if (typeof (self as any).loadPyodide !== 'function') {
+      throw new Error('The Pyodide loader did not initialise in the worker.')
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return (self as any).loadPyodide({
+      indexURL: `${PYODIDE_BASE_URL}/`,
+      stdout: (text: string) => self.postMessage({ type: 'print', text }),
+      stderr: (text: string) => self.postMessage({ type: 'error', error: text }),
+    })
+  })()
+
+  return pyodidePromise
+}
 
 const SETUP_CODE = `
 import ast
@@ -61,9 +107,11 @@ for node in ast.walk(tree):
         })
 
 frame_depths = {}
-pending_action = None
 # Maps enabled breakpoint line numbers -> condition string ("" = unconditional).
-current_breakpoints = {}
+current_breakpoints = dict(initial_breakpoints)
+# Trace pauses on the first executable line. Debug and Run begin in continue
+# mode, avoiding an otherwise unnecessary state snapshot and JS round-trip.
+pending_action = None if pause_on_first_line else {"type": "continue"}
 # Set by should_pause when the current pause is a genuine (condition-satisfied)
 # breakpoint hit, so the JS side can distinguish it from step/initial pauses.
 breakpoint_hit = False
@@ -370,39 +418,29 @@ sys.settrace(trace_calls)
 `
 
 self.onmessage = async function (e: MessageEvent) {
+  if (e.data.type === 'prewarm') {
+    try {
+      await ensurePyodide()
+      self.postMessage({ type: 'runtime-ready' })
+    } catch (err) {
+      self.postMessage({ type: 'warm-error', error: String(err) })
+    }
+    return
+  }
   if (e.data.type !== 'init') return
 
   const sab: SharedArrayBuffer = e.data.sab
   const int32View = new Int32Array(sab)
   const uint8View = new Uint8Array(sab)
 
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    ;(self as any).importScripts(PYODIDE_URL)
-  } catch {
-    // Module worker context (Vite dev mode): importScripts unavailable, fall back to dynamic import
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const mod = await (import(/* @vite-ignore */ PYODIDE_URL) as Promise<any>)
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      if (!(self as any).loadPyodide && mod?.loadPyodide) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ;(self as any).loadPyodide = mod.loadPyodide
-      }
-    } catch (dynErr) {
-      self.postMessage({
-        type: 'error',
-        error: 'Failed to load Pyodide in the worker. ' + (dynErr instanceof Error ? dynErr.message : String(dynErr)),
-      })
-      return
-    }
-  }
-
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const pyodide = await (self as any).loadPyodide({
-    stdout: (text: string) => self.postMessage({ type: 'print', text }),
-    stderr: (text: string) => self.postMessage({ type: 'error', error: text }),
-  })
+  let pyodide: any
+  try {
+    pyodide = await ensurePyodide()
+  } catch (err) {
+    self.postMessage({ type: 'error', error: 'Failed to load Pyodide in the worker. ' + String(err) })
+    return
+  }
 
   const useSvgTurtle = Boolean(e.data.svgTurtleBootstrap)
 
@@ -413,8 +451,8 @@ self.onmessage = async function (e: MessageEvent) {
     }
     let watchValues: Record<string, unknown> = {}
     try { if (watchValsStr && watchValsStr !== '{}') watchValues = JSON.parse(watchValsStr) } catch { /* ignore */ }
-    self.postMessage({ type: 'trace', line, func, cls, state: stateStr, turtleSvg, watchValues, isBreakpoint })
     Atomics.store(int32View, 0, 1)
+    self.postMessage({ type: 'trace', line, func, cls, state: stateStr, turtleSvg, watchValues, isBreakpoint })
     Atomics.wait(int32View, 0, 1)
     const cmd = Atomics.load(int32View, 1)
     // Rebuild the breakpoint map: enabled line numbers (int32[500]=count,
@@ -449,8 +487,8 @@ self.onmessage = async function (e: MessageEvent) {
   })
 
   pyodide.globals.set('js_input_callback', (promptText: string) => {
-    self.postMessage({ type: 'input', prompt: promptText })
     Atomics.store(int32View, 0, 2)
+    self.postMessage({ type: 'input', prompt: promptText })
     Atomics.wait(int32View, 0, 2)
     const len = Math.max(0, Atomics.load(int32View, 2))
     const decoder = new TextDecoder()
@@ -514,6 +552,12 @@ self.onmessage = async function (e: MessageEvent) {
     if (useSvgTurtle) {
       await pyodide.runPythonAsync(e.data.svgTurtleBootstrap as string)
     }
+    const initialBreakpoints = new Map<number, string>()
+    for (const breakpoint of (e.data.breakpoints ?? []) as Array<{ line: number; condition: string }>) {
+      initialBreakpoints.set(breakpoint.line, breakpoint.condition)
+    }
+    pyodide.globals.set('initial_breakpoints', pyodide.toPy(initialBreakpoints))
+    pyodide.globals.set('pause_on_first_line', Boolean(e.data.pauseOnFirstLine))
     pyodide.globals.set('user_code_str', userCode)
     await pyodide.runPythonAsync(SETUP_CODE)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

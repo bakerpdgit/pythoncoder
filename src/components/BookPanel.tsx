@@ -9,6 +9,7 @@ import { listFilesystems, getEntryByPath, getAllFiles } from '../utils/virtualFS
 import { TestResultsBar } from './TestResultsBar'
 import { useDialogs } from './dialogs/DialogProvider'
 import TesterWorker from '../workers/tester.worker.ts?worker'
+import { normalizeTestInputs } from '../utils/testInputs'
 
 interface Props {
   navState: BookNavState
@@ -132,6 +133,78 @@ function makeResponsiveSvg(svg: string): string {
     .replace(/(<svg[^>]*?)\sheight="\d+(?:\.\d+)?"/, '$1')
 }
 
+interface ChallengeNavTarget {
+  bookUrl: string
+  breadcrumb: BreadcrumbEntry[]
+  challenge: BookChallenge
+}
+
+async function findEdgeChallenge(
+  bookUrl: string,
+  breadcrumb: BreadcrumbEntry[],
+  delta: -1 | 1,
+): Promise<ChallengeNavTarget | null> {
+  const manifest = await fetchBookManifest(bookUrl)
+  const children = delta === 1 ? manifest.children : [...manifest.children].reverse()
+
+  for (const child of children) {
+    if (!isBookRef(child)) return { bookUrl, breadcrumb, challenge: child }
+
+    const childUrl = resolveBookUrl(bookUrl, child.bookLink)
+    const target = await findEdgeChallenge(
+      childUrl,
+      [...breadcrumb, { name: child.name, bookUrl }],
+      delta,
+    )
+    if (target) return target
+  }
+
+  return null
+}
+
+async function findChallengeOutsideCurrentBook(
+  navState: BookNavState,
+  delta: -1 | 1,
+): Promise<ChallengeNavTarget | null> {
+  let currentBookUrl = navState.currentBookUrl
+  let breadcrumb = navState.breadcrumb
+
+  while (breadcrumb.length > 0) {
+    const parentUrl = breadcrumb[breadcrumb.length - 1].bookUrl
+    const parentBreadcrumb = breadcrumb.slice(0, -1)
+    const parentManifest = await fetchBookManifest(parentUrl)
+    const currentIndex = parentManifest.children.findIndex(child =>
+      isBookRef(child) && resolveBookUrl(parentUrl, child.bookLink) === currentBookUrl,
+    )
+
+    if (currentIndex !== -1) {
+      for (
+        let siblingIndex = currentIndex + delta;
+        siblingIndex >= 0 && siblingIndex < parentManifest.children.length;
+        siblingIndex += delta
+      ) {
+        const sibling = parentManifest.children[siblingIndex]
+        if (!isBookRef(sibling)) {
+          return { bookUrl: parentUrl, breadcrumb: parentBreadcrumb, challenge: sibling }
+        }
+
+        const siblingUrl = resolveBookUrl(parentUrl, sibling.bookLink)
+        const target = await findEdgeChallenge(
+          siblingUrl,
+          [...parentBreadcrumb, { name: sibling.name, bookUrl: parentUrl }],
+          delta,
+        )
+        if (target) return target
+      }
+    }
+
+    currentBookUrl = parentUrl
+    breadcrumb = parentBreadcrumb
+  }
+
+  return null
+}
+
 function CompletedTick() {
   return (
     <svg className="w-3 h-3 text-emerald-400 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
@@ -155,6 +228,11 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
   const [bookFontSize, setBookFontSize] = useState<number>(getStoredBookFontSize)
   const [previewSvg, setPreviewSvg] = useState<string | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
+  const [boundaryTargets, setBoundaryTargets] = useState<{
+    key: string
+    previous: ChallengeNavTarget | null
+    next: ChallengeNavTarget | null
+  } | null>(null)
   const previewWorkerRef = useRef<Worker | null>(null)
 
   useEffect(() => {
@@ -244,11 +322,7 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
       const tReq = reqs.find(r => r.typ === 't' && r.filename)
       if (tReq?.filename) {
         solutionFilename = tReq.filename
-        firstInputs = Array.isArray(tc.in)
-          ? tc.in
-          : tc.in !== undefined && tc.in !== ''
-            ? [tc.in as string]
-            : []
+        firstInputs = normalizeTestInputs(tc.in)
         break
       }
     }
@@ -350,6 +424,16 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
     onEnterChallenge(navState.currentBookUrl, challenge)
   }, [navState, onNavStateChange, onEnterChallenge])
 
+  const enterChallengeTarget = useCallback((target: ChallengeNavTarget) => {
+    onNavStateChange({
+      ...navState,
+      currentBookUrl: target.bookUrl,
+      breadcrumb: target.breadcrumb,
+      activeChallengeId: target.challenge.id,
+    })
+    onEnterChallenge(target.bookUrl, target.challenge)
+  }, [navState, onNavStateChange, onEnterChallenge])
+
   const handleDeleteExercise = useCallback(async (challenge: BookChallenge) => {
     if (!(await dialogs.confirm({
       title: 'Delete exercise',
@@ -362,8 +446,16 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
   const handlePrevNext = useCallback((delta: -1 | 1) => {
     if (!manifest || !navState.activeChallengeId) return
     const adj = getAdjacentChallenge(manifest, navState.activeChallengeId, delta)
-    if (adj) enterChallenge(adj)
-  }, [manifest, navState.activeChallengeId, enterChallenge])
+    if (adj) {
+      enterChallenge(adj)
+      return
+    }
+
+    const key = `${navState.currentBookUrl}::${navState.activeChallengeId}`
+    if (boundaryTargets?.key !== key) return
+    const target = delta === -1 ? boundaryTargets.previous : boundaryTargets.next
+    if (target) enterChallengeTarget(target)
+  }, [manifest, navState, boundaryTargets, enterChallenge, enterChallengeTarget])
 
   const handleReset = useCallback(async () => {
     setShowDotMenu(false)
@@ -396,6 +488,39 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
     ? getAdjacentChallenge(manifest, navState.activeChallengeId, -1) : null
   const nextChallenge = manifest && navState.activeChallengeId
     ? getAdjacentChallenge(manifest, navState.activeChallengeId, 1) : null
+
+  const boundaryKey = navState.activeChallengeId
+    ? `${navState.currentBookUrl}::${navState.activeChallengeId}` : ''
+  const resolvedBoundaryTargets = boundaryTargets?.key === boundaryKey ? boundaryTargets : null
+  const previousTarget = prevChallenge
+    ? { bookUrl: navState.currentBookUrl, breadcrumb: navState.breadcrumb, challenge: prevChallenge }
+    : resolvedBoundaryTargets?.previous ?? null
+  const nextTarget = nextChallenge
+    ? { bookUrl: navState.currentBookUrl, breadcrumb: navState.breadcrumb, challenge: nextChallenge }
+    : resolvedBoundaryTargets?.next ?? null
+
+  useEffect(() => {
+    if (!manifest || !navState.activeChallengeId || editMode) {
+      setBoundaryTargets(null)
+      return
+    }
+
+    const key = `${navState.currentBookUrl}::${navState.activeChallengeId}`
+    const hasPreviousInBook = !!getAdjacentChallenge(manifest, navState.activeChallengeId, -1)
+    const hasNextInBook = !!getAdjacentChallenge(manifest, navState.activeChallengeId, 1)
+    let cancelled = false
+
+    Promise.all([
+      hasPreviousInBook ? Promise.resolve(null) : findChallengeOutsideCurrentBook(navState, -1),
+      hasNextInBook ? Promise.resolve(null) : findChallengeOutsideCurrentBook(navState, 1),
+    ]).then(([previous, next]) => {
+      if (!cancelled) setBoundaryTargets({ key, previous, next })
+    }).catch(() => {
+      if (!cancelled) setBoundaryTargets({ key, previous: null, next: null })
+    })
+
+    return () => { cancelled = true }
+  }, [manifest, navState, editMode])
 
   if (isCollapsed) {
     return (
@@ -457,18 +582,20 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
         {/* Prev / next (challenges only) */}
         {navState.activeChallengeId && (
           <>
-            <button type="button" onClick={() => handlePrevNext(-1)} disabled={!prevChallenge}
-              title={prevChallenge ? `Previous: ${prevChallenge.name}` : 'No previous challenge'}
+            <button type="button" onClick={() => handlePrevNext(-1)} disabled={!previousTarget}
+              aria-label="Previous exercise"
+              title={previousTarget ? `Previous exercise: ${previousTarget.challenge.name}` : 'No previous exercise'}
               className="text-slate-400 hover:text-slate-200 disabled:opacity-30 disabled:cursor-not-allowed p-0.5 flex-shrink-0">
               <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7 7-7m-7 7h18" />
               </svg>
             </button>
-            <button type="button" onClick={() => handlePrevNext(1)} disabled={!nextChallenge}
-              title={nextChallenge ? `Next: ${nextChallenge.name}` : 'No next challenge'}
+            <button type="button" onClick={() => handlePrevNext(1)} disabled={!nextTarget}
+              aria-label="Next exercise"
+              title={nextTarget ? `Next exercise: ${nextTarget.challenge.name}` : 'No next exercise'}
               className="text-slate-400 hover:text-slate-200 disabled:opacity-30 disabled:cursor-not-allowed p-0.5 flex-shrink-0">
               <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 5l7 7-7 7M5 5l7 7-7 7" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14 5l7 7-7 7m7-7H3" />
               </svg>
             </button>
             {/* Options menu */}

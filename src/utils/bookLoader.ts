@@ -107,6 +107,19 @@ function findExistingChallengeFs(fsList: Array<{ id: string; name: string }>, ch
   return fsList.find(f => f.name === prefix || f.name.startsWith(prefix + ':'))
 }
 
+async function challengeFsIsComplete(fsId: string, challenge: BookChallenge): Promise<boolean> {
+  const expectedPaths = [
+    challenge.py,
+    ...(challenge.additionalFiles ?? []).map(file => file.filename),
+  ].filter((path): path is string => !!path).map(path => `/${normPath(path)}`)
+
+  for (const path of expectedPaths) {
+    const entry = await getEntryByPath(fsId, path)
+    if (entry?.type !== 'file' || entry.content === undefined) return false
+  }
+  return true
+}
+
 export async function getOrCreateChallengeFs(
   bookUrl: string,
   challenge: BookChallenge,
@@ -118,11 +131,16 @@ export async function getOrCreateChallengeFs(
   if (!forceReset) {
     const existing = findExistingChallengeFs(fsList, challenge.id)
     if (existing) {
-      return {
-        fsId: existing.id,
-        pyFilename: challenge.py ? normPath(challenge.py) : null,
-        hiddenPaths: getHiddenPathsForFs(existing.id),
+      if (await challengeFsIsComplete(existing.id, challenge)) {
+        return {
+          fsId: existing.id,
+          pyFilename: challenge.py ? normPath(challenge.py) : null,
+          hiddenPaths: getHiddenPathsForFs(existing.id),
+        }
       }
+      // A transient fetch failure in an older run could leave a named but empty
+      // challenge filesystem behind. Do not let that poisoned cache persist.
+      await deleteFilesystem(existing.id)
     }
   } else {
     const existing = findExistingChallengeFs(fsList, challenge.id)
@@ -133,23 +151,32 @@ export async function getOrCreateChallengeFs(
   const baseUrl = bookUrl.endsWith('/') ? bookUrl : bookUrl.slice(0, bookUrl.lastIndexOf('/') + 1)
   const hiddenPaths: string[] = []
 
-  if (challenge.py) {
-    const rel = normPath(challenge.py)
-    await fetchFileIntoFs(fsId, baseUrl, rel, 'text/x-python')
+  try {
+    if (challenge.py) {
+      const rel = normPath(challenge.py)
+      if (!(await fetchFileIntoFs(fsId, baseUrl, rel, 'text/x-python'))) {
+        throw new Error(`Could not load the exercise file "${rel}"`)
+      }
+    }
+
+    for (const af of (challenge.additionalFiles ?? []) as BookAdditionalFile[]) {
+      const rel = normPath(af.filename)
+      const mime = guessMimeType(rel)
+      const ok = await fetchFileIntoFs(fsId, baseUrl, rel, mime)
+      if (!ok) throw new Error(`Could not load the exercise file "${rel}"`)
+      if (!af.visible) hiddenPaths.push(`/${rel}`)
+    }
+
+    const map = getStoredHidden()
+    map[fsId] = hiddenPaths
+    saveStoredHidden(map)
+
+    return { fsId, pyFilename: challenge.py ? normPath(challenge.py) : null, hiddenPaths }
+  } catch (error) {
+    // Failed loads must not be reused as valid but empty challenge workspaces.
+    await deleteFilesystem(fsId).catch(() => undefined)
+    throw error
   }
-
-  for (const af of (challenge.additionalFiles ?? []) as BookAdditionalFile[]) {
-    const rel = normPath(af.filename)
-    const mime = guessMimeType(rel)
-    const ok = await fetchFileIntoFs(fsId, baseUrl, rel, mime)
-    if (ok && !af.visible) hiddenPaths.push(`/${rel}`)
-  }
-
-  const map = getStoredHidden()
-  map[fsId] = hiddenPaths
-  saveStoredHidden(map)
-
-  return { fsId, pyFilename: challenge.py ? normPath(challenge.py) : null, hiddenPaths }
 }
 
 export async function fetchGuideContent(bookUrl: string, guide: string): Promise<string> {

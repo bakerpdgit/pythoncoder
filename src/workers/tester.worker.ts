@@ -1,8 +1,10 @@
 /// <reference lib="webworker" />
 
 import { SVG_TURTLE_WORKER_SETUP } from '../utils/mainThread'
+import { normalizeTestInputs } from '../utils/testInputs'
 
-const PYODIDE_URL = 'https://cdn.jsdelivr.net/pyodide/v0.29.3/full/pyodide.js'
+const PYODIDE_BASE_URL = 'https://cdn.jsdelivr.net/pyodide/v0.29.3/full'
+const PYODIDE_URL = `${PYODIDE_BASE_URL}/pyodide.js`
 
 const RUNNER_SETUP = `
 import sys
@@ -59,28 +61,54 @@ def _read_file(filename):
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let pyodide: any = null
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let pyodidePromise: Promise<any> | null = null
+
+// Loading/compiling the runtime is shared by background warm-up and the first
+// real submission, so a quick submit while warming never starts a second load.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function ensurePyodide(): Promise<any> {
+  if (pyodide) return pyodide
+  if (!pyodidePromise) {
+    pyodidePromise = (async () => {
+    // Classic worker (production): importScripts works. Module worker (Vite dev): fall back to dynamic import.
+      if (typeof (self as any).loadPyodide !== 'function') {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ;(self as any).importScripts(PYODIDE_URL)
+        } catch {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const mod = await (import(/* @vite-ignore */ PYODIDE_URL) as Promise<any>)
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          if (!(self as any).loadPyodide && mod?.loadPyodide) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            ;(self as any).loadPyodide = mod.loadPyodide
+          }
+        }
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if (typeof (self as any).loadPyodide !== 'function') {
+        throw new Error('The Pyodide loader did not initialise in the test worker.')
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const runtime = await (self as any).loadPyodide({
+        indexURL: `${PYODIDE_BASE_URL}/`,
+      })
+      runtime.runPython(RUNNER_SETUP)
+      pyodide = runtime
+      return runtime
+    })()
+  }
+  try {
+    return await pyodidePromise
+  } catch (error) {
+    pyodidePromise = null
+    throw error
+  }
+}
 
 async function initPyodide(code: string): Promise<void> {
-  if (!pyodide) {
-    // Classic worker (production): importScripts works. Module worker (Vite dev): fall back to dynamic import.
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      ;(self as any).importScripts(PYODIDE_URL)
-    } catch {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const mod = await (import(/* @vite-ignore */ PYODIDE_URL) as Promise<any>)
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      if (!(self as any).loadPyodide && mod?.loadPyodide) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ;(self as any).loadPyodide = mod.loadPyodide
-      }
-    }
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    pyodide = await (self as any).loadPyodide({
-      indexURL: 'https://cdn.jsdelivr.net/pyodide/v0.29.3/full/',
-    })
-    pyodide.runPython(RUNNER_SETUP)
-  }
+  await ensurePyodide()
   try { await pyodide.loadPackagesFromImports(code) } catch { /* ignore */ }
 }
 
@@ -113,6 +141,16 @@ function runCodeAndCaptureSvg(srcCode: string, inputs: Array<string | number>): 
 }
 
 self.onmessage = async (e: MessageEvent) => {
+  if (e.data.type === 'prewarm') {
+    try {
+      await ensurePyodide()
+      self.postMessage({ type: 'runtime-ready' })
+    } catch (err) {
+      self.postMessage({ type: 'warm-error', error: String(err) })
+    }
+    return
+  }
+
   if (e.data.type === 'preview_turtle') {
     const { solutionCode, inputs, files } = e.data as {
       solutionCode: string
@@ -143,7 +181,7 @@ self.onmessage = async (e: MessageEvent) => {
   }
 
   try {
-    self.postMessage({ type: 'status', message: 'Loading Python runtime…' })
+    self.postMessage({ type: 'status', message: pyodide ? 'Preparing tests…' : 'Finishing Python runtime startup…' })
     await initPyodide(code)
 
     const hasTurtleTests = tests.some(t =>
@@ -176,11 +214,7 @@ self.onmessage = async (e: MessageEvent) => {
         pyodide.runPython(SVG_TURTLE_WORKER_SETUP)
       }
 
-      const inputs: Array<string | number> = Array.isArray(test.in)
-        ? test.in
-        : test.in !== undefined && test.in !== ''
-          ? [test.in as string]
-          : []
+      const inputs = normalizeTestInputs(test.in)
 
       pyodide.globals.set('_tc_code', code)
       pyodide.globals.set('_tc_inputs', pyodide.toPy(inputs))

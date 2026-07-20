@@ -3,7 +3,7 @@ import { fetchResourceBuffer, MIN_PLAUSIBLE_ZIP_BYTES } from './bookSource'
 
 const DB_NAME = 'pythoncoder-vfs'
 
-const DEFAULT_MAIN_PY_CONTENT = `# main.py\n# Write your Python code here, then click Trace Run or Run.\n\nprint("Hello, World!")\n`
+const DEFAULT_MAIN_PY_CONTENT = `# main.py\n# Write your Python code here, then click Debug or Run.\n\nprint("Hello, World!")\n`
 const DB_VERSION = 1
 
 let dbPromise: Promise<IDBDatabase> | null = null

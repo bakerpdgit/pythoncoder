@@ -44,7 +44,7 @@ function TestCaseRow({ tc, index }: { tc: TestCaseResult; index: number }) {
     <>
       <tr className={`border-t border-slate-700 ${tc.passed ? '' : 'bg-red-950/20'}`}>
         <td className="px-2 py-1.5 text-slate-400 text-center">{index + 1}</td>
-        <td className="px-2 py-1.5 font-mono text-[10px] text-slate-300 max-w-[80px] truncate">
+        <td className="px-2 py-1.5 font-mono text-[10px] text-slate-300 max-w-[80px] whitespace-pre-line break-words">
           {tc.reveal ? formatInputs(tc.inputs) : <span className="text-slate-600 italic">hidden</span>}
         </td>
         <td className="px-2 py-1.5 font-mono text-[10px] text-slate-300 max-w-[100px] truncate">
@@ -83,6 +83,16 @@ function TestCaseRow({ tc, index }: { tc: TestCaseResult; index: number }) {
         <tr className="border-t border-slate-700/50 test-error-row">
           <td colSpan={4} className="px-3 py-1 text-[10px] test-error-text font-mono">
             {tc.error.split('\n').slice(-3).join('\n')}
+          </td>
+        </tr>
+      )}
+      {!tc.passed && tc.reveal && tc.output !== undefined && (
+        <tr className="border-t border-slate-700/50 bg-slate-900/40">
+          <td colSpan={4} className="px-3 py-1.5 text-[10px]">
+            <span className="text-slate-500">Actual output:</span>
+            <pre className="mt-0.5 max-h-24 overflow-auto whitespace-pre-wrap font-mono text-slate-300">
+              {tc.output || '(no output)'}
+            </pre>
           </td>
         </tr>
       )}

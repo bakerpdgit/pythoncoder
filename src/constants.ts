@@ -26,7 +26,7 @@ export const RUNTIME_OPTIONS = [
   {
     key: 'trace-worker',
     label: 'Trace Worker',
-    description: 'Breakpoints, step controls, and live inspectors.',
+    description: 'Debugging, breakpoints, step controls, and live inspectors.',
   },
   {
     key: 'main-thread',

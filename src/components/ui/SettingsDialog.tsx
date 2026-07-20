@@ -16,7 +16,7 @@ const TURTLE_OPTIONS: { value: TurtleMode; label: string; desc: string }[] = [
   {
     value: 'basthon-svg',
     label: 'SVG (Raspberry Pi / Basthon)',
-    desc: 'Records drawing commands as SVG. Works in both Trace Run and Run modes. Step-by-step trace shows the drawing build up live. No interactive keyboard support.',
+    desc: 'Records drawing commands as SVG. Works in Debug, Trace, and Run modes. Step-by-step tracing shows the drawing build up live. No interactive keyboard support.',
   },
 ]
 
