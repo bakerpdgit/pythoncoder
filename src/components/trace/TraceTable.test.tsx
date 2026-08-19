@@ -1,11 +1,12 @@
 import '@testing-library/jest-dom/vitest'
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { InspectorNode } from '../../types'
 import type { TraceSession } from '../../types/traceTable'
 import { triggerDownload } from '../../utils/download'
 import { projectTraceTable, type TraceTableProjection, type TraceTableProjectionRow } from '../../utils/traceTableProjection'
+import { resetTraceTablePreferencesForNewSession } from '../../utils/traceTablePreferences'
 import { TraceTable } from './TraceTable'
 
 vi.mock('../../utils/traceTableProjection', () => ({
@@ -158,7 +159,7 @@ describe('TraceTable', () => {
     const { unmount } = render(<TraceTable session={session} />)
 
     await user.click(screen.getByRole('button', { name: 'Columns (2)' }))
-    await user.click(screen.getByRole('button', { name: 'Move x left' }))
+    await user.click(screen.getByRole('button', { name: 'Move x up' }))
     const xHeader = screen.getByRole('textbox', { name: 'Column header for x' })
     await user.clear(xHeader)
     await user.type(xHeader, 'Current x')
@@ -169,8 +170,8 @@ describe('TraceTable', () => {
       columnOrder: ['variable:first', 'variable:second'], showLine: false, includeAnnotations: true,
     })
     const table = screen.getByRole('table', { name: 'Trace event history' })
-    const headers = within(table).getAllByRole('columnheader').map(header => header.textContent)
-    expect(headers).toEqual(['Step', 'Current x', 'y'])
+    const headers = within(table).getAllByRole('columnheader').map(header => header.getAttribute('aria-label') ?? header.textContent)
+    expect(headers).toEqual(['Step', 'Current x', 'y', 'Add variable column'])
 
     unmount()
     render(<TraceTable session={session} />)
@@ -187,11 +188,6 @@ describe('TraceTable', () => {
 
     await user.click(screen.getByRole('button', { name: 'Columns (2)' }))
     await user.click(screen.getByRole('checkbox', { name: /Call #.*stable invocation number/i }))
-    await user.click(screen.getByRole('button', { name: 'Move Call # left' }))
-    await user.click(screen.getByRole('button', { name: 'Move Call # left' }))
-    const callHeader = screen.getByRole('textbox', { name: 'Column header for Call #' })
-    await user.clear(callHeader)
-    await user.type(callHeader, 'Invocation')
     await user.click(screen.getByRole('button', { name: 'Apply columns' }))
 
     expect(project).toHaveBeenLastCalledWith(session, {
@@ -199,8 +195,8 @@ describe('TraceTable', () => {
       columnOrder: ['meta:call-number', 'variable:second', 'variable:first'], showLine: false, includeAnnotations: true,
     })
     const table = screen.getByRole('table', { name: 'Trace event history' })
-    expect(within(table).getAllByRole('columnheader').map(header => header.textContent))
-      .toEqual(['Step', 'Invocation', 'y', 'x'])
+    expect(within(table).getAllByRole('columnheader').map(header => header.getAttribute('aria-label') ?? header.textContent))
+      .toEqual(['Step', 'Call #', 'y', 'x', 'Add variable column'])
     expect(within(table).getByRole('cell', { name: '—' })).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Columns (3)' }))
     expect(screen.getByRole('radio', { name: /Automatic/ })).toBeChecked()
@@ -219,6 +215,25 @@ describe('TraceTable', () => {
 
     render(<TraceTable session={session} />)
     expect(screen.getByRole('button', { name: 'Every line' })).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('reloads automatic discovery order immediately for a new same-source trace session', async () => {
+    const user = userEvent.setup()
+    const { rerender } = render(<TraceTable session={session} />)
+    await user.click(screen.getByRole('button', { name: 'Columns (2)' }))
+    await user.click(screen.getByRole('button', { name: 'Move x up' }))
+    await user.click(screen.getByRole('button', { name: 'Apply columns' }))
+    expect(project).toHaveBeenLastCalledWith(session, expect.objectContaining({ variableIds: ['first', 'second'] }))
+
+    resetTraceTablePreferencesForNewSession(session.source)
+    const nextSession = { ...session, id: 'next-table-session' }
+    rerender(<TraceTable session={nextSession} />)
+
+    await waitFor(() => expect(project).toHaveBeenLastCalledWith(nextSession, expect.objectContaining({
+      variableIds: ['second', 'first'],
+      columnOrder: ['variable:second', 'variable:first'],
+    })))
+    expect(screen.getByRole('columnheader', { name: 'y' })).toBeInTheDocument()
   })
 
   it('filters by function and call, toggles context, and exports only visible rows', async () => {
@@ -388,6 +403,184 @@ describe('TraceTable', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('Python execution failed.')
   })
 
+  it('drags variable headers horizontally while keeping special columns pinned and non-removable', async () => {
+    const user = userEvent.setup()
+    render(<TraceTable session={session} />)
+    await user.click(screen.getByRole('button', { name: 'Columns (2)' }))
+    await user.click(screen.getByRole('checkbox', { name: /Call #.*stable invocation number/i }))
+    await user.click(screen.getByRole('button', { name: 'Apply columns' }))
+
+    const table = screen.getByRole('table', { name: 'Trace event history' })
+    const callHeader = within(table).getByRole('columnheader', { name: 'Call #' })
+    const xHeader = within(table).getByRole('columnheader', { name: 'x' })
+    const yHeader = within(table).getByRole('columnheader', { name: 'y' })
+    expect(callHeader).toHaveAttribute('data-pinned', 'true')
+    expect(callHeader).toHaveAttribute('draggable', 'false')
+    expect(screen.queryByRole('button', { name: 'Remove Call #' })).not.toBeInTheDocument()
+
+    const dataTransfer = {
+      effectAllowed: '',
+      setData: vi.fn(),
+      getData: vi.fn(() => 'first'),
+    }
+    fireEvent.dragStart(xHeader, { dataTransfer })
+    fireEvent.dragOver(yHeader, { dataTransfer })
+    fireEvent.drop(yHeader, { dataTransfer })
+
+    expect(project).toHaveBeenLastCalledWith(session, expect.objectContaining({
+      variableIds: ['first', 'second'],
+      columnOrder: ['meta:call-number', 'variable:first', 'variable:second'],
+    }))
+    expect(within(table).getAllByRole('columnheader').map(header => header.getAttribute('aria-label') ?? header.textContent))
+      .toEqual(['Step', 'Call #', 'x', 'y', 'Add variable column'])
+  })
+
+  it('removes a variable and quick-adds an introspected variable with an editable persisted heading', async () => {
+    const user = userEvent.setup()
+    const { unmount } = render(<TraceTable session={session} />)
+    await user.click(screen.getByRole('button', { name: 'Remove y' }))
+    expect(screen.queryByRole('columnheader', { name: 'y' })).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Add variable column' }))
+    let dialog = screen.getByRole('dialog', { name: 'Add a trace column' })
+    let expression = within(dialog).getByLabelText('Discovered variable expression')
+    let heading = within(dialog).getByLabelText('Column header')
+    await waitFor(() => expect(expression).toHaveFocus())
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('dialog', { name: 'Add a trace column' })).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add variable column' })).toHaveFocus())
+    await user.click(screen.getByRole('button', { name: 'Add variable column' }))
+    dialog = screen.getByRole('dialog', { name: 'Add a trace column' })
+    expression = within(dialog).getByLabelText('Discovered variable expression')
+    heading = within(dialog).getByLabelText('Column header')
+    await user.clear(expression)
+    await user.type(expression, 'not_a_variable')
+    await user.click(within(dialog).getByRole('button', { name: 'Add column' }))
+    expect(within(dialog).getByRole('alert')).toHaveTextContent('Choose one of the available user variables.')
+
+    await user.clear(expression)
+    await user.type(expression, 'y')
+    await user.clear(heading)
+    await user.type(heading, 'Why')
+    await user.click(within(dialog).getByRole('button', { name: 'Add column' }))
+    expect(screen.getByRole('columnheader', { name: 'Why' })).toBeInTheDocument()
+    expect(project).toHaveBeenLastCalledWith(session, expect.objectContaining({
+      variableIds: ['first', 'second'],
+      columnOrder: ['variable:first', 'variable:second'],
+    }))
+
+    unmount()
+    render(<TraceTable session={session} />)
+    expect(screen.getByRole('columnheader', { name: 'Why' })).toBeInTheDocument()
+  })
+
+  it('expands nested InspectorNode values by persisted display depth while retaining summary titles', async () => {
+    const user = userEvent.setup()
+    const nested: InspectorNode = {
+      kind: 'sequence', type: 'list', length: 1,
+      items: [{ label: '0', value: {
+        kind: 'sequence', type: 'list', length: 1,
+        items: [{ label: '0', value: value(7) }],
+      } }],
+    }
+    project.mockReturnValue({
+      columns: [{ variableId: 'first', label: 'x' }],
+      metadataColumns: [],
+      displayColumns: [{ kind: 'variable', key: 'variable:first', variableId: 'first', label: 'x' }],
+      rows: [{
+        id: 'nested', kind: 'line', sequence: 1, sequences: [1], line: 1,
+        metadata: { functionName: '<module>', callDepth: 0, callId: 1, callNumber: null },
+        annotations: [], teachingNote: null,
+        cells: {
+          first: { variableId: 'first', callId: null, sequence: 1, state: { status: 'value', value: nested }, value: nested, outcome: 'value', write: { variableId: 'first', callId: null, kind: 'assignment', changed: true, outcome: 'value', value: nested } },
+        },
+      }],
+    })
+    const { unmount } = render(<TraceTable session={session} />)
+    const valueCell = screen.getByRole('cell', { name: 'list • 1 items' })
+    expect(valueCell).toHaveAttribute('title', 'list • 1 items')
+
+    await user.click(screen.getByRole('button', { name: 'Expand x' }))
+    expect(valueCell).toHaveTextContent('list [list • 1 items]')
+    expect(screen.getByRole('button', { name: 'Expand x' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Contract x' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Expand x' }))
+    expect(valueCell).toHaveTextContent('list [list [7]]')
+    expect(screen.queryByRole('button', { name: 'Expand x' })).not.toBeInTheDocument()
+
+    unmount()
+    render(<TraceTable session={session} />)
+    expect(screen.getByRole('cell', { name: 'list [list [7]]' })).toHaveAttribute('title', 'list • 1 items')
+  })
+
+  it('resizes variable columns with an accessible keyboard or drag handle and persists the width', async () => {
+    const user = userEvent.setup()
+    const { unmount } = render(<TraceTable session={session} />)
+    const handle = screen.getByRole('separator', { name: 'Resize x column' })
+    expect(handle).toHaveAttribute('aria-valuemin', '96')
+    expect(handle).toHaveAttribute('aria-valuemax', '480')
+    await user.click(handle)
+    await user.keyboard('{ArrowRight}')
+    const resizedHandle = screen.getByRole('separator', { name: 'Resize x column' })
+    expect(resizedHandle).toHaveAttribute('aria-valuenow', '176')
+
+    fireEvent.mouseDown(resizedHandle, { clientX: 100 })
+    fireEvent.mouseMove(window, { clientX: 150 })
+    fireEvent.mouseUp(window, { clientX: 150 })
+    expect(screen.getByRole('separator', { name: 'Resize x column' })).toHaveAttribute('aria-valuenow', '226')
+
+    unmount()
+    render(<TraceTable session={session} />)
+    expect(screen.getByRole('separator', { name: 'Resize x column' })).toHaveAttribute('aria-valuenow', '226')
+  })
+
+  it('tail-follows and renders the newest row in an active trace without mounting the full history', async () => {
+    project.mockImplementation(currentSession => projectionWithRows(makeRows(currentSession.events.length)))
+    const activeSession = {
+      ...session,
+      status: 'recording' as const,
+      events: Array.from({ length: 450 }, (_, index) => ({ ...session.events[0], sequence: index + 1 })),
+    }
+    const { rerender } = render(<TraceTable session={activeSession} />)
+    const results = screen.getByLabelText('Trace table results')
+    Object.defineProperties(results, {
+      scrollHeight: { configurable: true, value: 5_000 },
+      clientHeight: { configurable: true, value: 500 },
+      scrollTop: { configurable: true, writable: true, value: 0 },
+    })
+
+    expect(screen.getAllByRole('rowheader')).toHaveLength(200)
+    expect(screen.getByRole('rowheader', { name: 'Step 450' })).toBeInTheDocument()
+    expect(screen.queryByRole('rowheader', { name: 'Step 1' })).not.toBeInTheDocument()
+    rerender(<TraceTable session={{
+      ...activeSession,
+      events: [...activeSession.events, { ...session.events[0], sequence: 451 }],
+    }} />)
+    await waitFor(() => expect(results.scrollTop).toBe(5_000))
+    expect(screen.getByRole('rowheader', { name: 'Step 451' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Follow newest' })).toHaveAttribute('aria-pressed', 'true')
+
+    results.scrollTop = 100
+    fireEvent.scroll(results)
+    expect(screen.getByRole('button', { name: 'Follow newest' })).toHaveAttribute('aria-pressed', 'false')
+    expect(screen.getByRole('rowheader', { name: 'Step 451' })).toBeInTheDocument()
+    expect(screen.queryByRole('rowheader', { name: 'Step 1' })).not.toBeInTheDocument()
+
+    const extendedSession = {
+      ...activeSession,
+      events: Array.from({ length: 600 }, (_, index) => ({ ...session.events[0], sequence: index + 1 })),
+    }
+    rerender(<TraceTable session={extendedSession} />)
+    expect(screen.getByRole('rowheader', { name: 'Step 451' })).toBeInTheDocument()
+    expect(screen.queryByRole('rowheader', { name: 'Step 600' })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Follow newest' }))
+    expect(screen.getByRole('rowheader', { name: 'Step 600' })).toBeInTheDocument()
+    rerender(<TraceTable session={{ ...extendedSession, status: 'completed' }} />)
+    expect(screen.getByRole('rowheader', { name: 'Step 600' })).toBeInTheDocument()
+    expect(screen.queryByRole('rowheader', { name: 'Step 1' })).not.toBeInTheDocument()
+  })
+
   it('presents a retention limit as an explicit non-error terminal status', () => {
     const message = 'Trace event limit of 10,000 reached; execution stopped with all recorded history retained.'
     render(<TraceTable session={{
@@ -468,7 +661,7 @@ describe('TraceTable', () => {
     }
     const { rerender } = render(<TraceTable session={runningSession} />)
 
-    await user.click(screen.getByRole('button', { name: 'Show 200 more rows' }))
+    await user.click(screen.getByRole('button', { name: 'Show 200 earlier rows' }))
     expect(screen.getAllByRole('rowheader')).toHaveLength(400)
 
     rerender(<TraceTable session={{
@@ -480,7 +673,7 @@ describe('TraceTable', () => {
     }} />)
 
     expect(screen.getAllByRole('rowheader')).toHaveLength(400)
-    expect(screen.getByText('Showing 400 of 600 matching rows.')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Show 200 more rows' })).toBeInTheDocument()
+    expect(screen.getByText('Showing latest 400 of 600 matching rows.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Show 200 earlier rows' })).toBeInTheDocument()
   }, 10_000)
 })

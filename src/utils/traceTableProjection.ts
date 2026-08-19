@@ -327,7 +327,55 @@ function updateTeachingNote(row: TraceTableProjectionRow): void {
 
 function appendAnnotations(row: TraceTableProjectionRow, annotations: TraceTableRowAnnotation[]): void {
   row.annotations.push(...annotations)
+  for (const annotation of annotations) {
+    if (!row.sequences.includes(annotation.sequence)) row.sequences.push(annotation.sequence)
+  }
+  row.sequences.sort((left, right) => left - right)
   updateTeachingNote(row)
+}
+
+interface PendingReturnAnnotation {
+  annotation: TraceTableRowAnnotation
+  /** Invocation which should next receive control; null means no caller. */
+  targetCallId: TraceCallId | null
+}
+
+/**
+ * Return events describe a transition rather than a new source-line row. Keep
+ * their context until a projected event actually runs in the caller. Recursive
+ * immediate returns forward inner annotations outward in execution order.
+ */
+function annotationsForProjectedEvent(
+  event: TraceExecutionEvent,
+  metadata: TraceTableProjectionRowMetadata,
+  pendingReturns: PendingReturnAnnotation[],
+): TraceTableRowAnnotation[] {
+  const ownAnnotations = annotationsForEvent(event, metadata)
+  if (event.kind === 'call-returned') {
+    const parentCallId = event.callStack.at(-2) ?? null
+    for (let index = pendingReturns.length - 1; index >= 0; index -= 1) {
+      if (pendingReturns[index].targetCallId !== event.callId) continue
+      if (parentCallId === null) pendingReturns.splice(index, 1)
+      else pendingReturns[index].targetCallId = parentCallId
+    }
+    if (parentCallId !== null) {
+      for (const annotation of ownAnnotations) {
+        if (annotation.kind === 'call-returned') pendingReturns.push({ annotation, targetCallId: parentCallId })
+      }
+    }
+    return ownAnnotations.filter(annotation => annotation.kind !== 'call-returned')
+  }
+
+  const released: TraceTableRowAnnotation[] = []
+  for (let index = 0; index < pendingReturns.length;) {
+    if (pendingReturns[index].targetCallId !== event.callId) {
+      index += 1
+      continue
+    }
+    released.push(pendingReturns[index].annotation)
+    pendingReturns.splice(index, 1)
+  }
+  return [...released, ...ownAnnotations]
 }
 
 function sameCallStack(left: TraceCallId[] | undefined, right: TraceCallId[]): boolean {
@@ -417,12 +465,13 @@ function projectEveryLine(
 ): TraceTableProjectionRow[] {
   const bindings = new Map<string, TraceBindingState>()
   const rows: TraceTableProjectionRow[] = []
+  const pendingReturns: PendingReturnAnnotation[] = []
 
   for (const event of session.events) {
     applyEventDeltas(bindings, event)
     const selectedWrites = event.writes.filter(write => selected.has(write.variableId))
     const metadata = rowMetadata(session, event, context)
-    const annotations = includeAnnotations ? annotationsForEvent(event, metadata) : []
+    const annotations = includeAnnotations ? annotationsForProjectedEvent(event, metadata, pendingReturns) : []
     // Every-line mode continues to mean one row per completed source line.
     // Lifecycle events only join it when they carry a selected parameter/write,
     // preserving the pre-metadata Step/Line semantics.
@@ -455,22 +504,25 @@ function projectCompact(
   const rows: TraceTableProjectionRow[] = []
   let current: TraceTableProjectionRow | undefined
   let previousCallStack: TraceCallId[] | undefined
+  const pendingReturns: PendingReturnAnnotation[] = []
 
   for (const event of session.events) {
     applyEventDeltas(bindings, event)
     const metadata = rowMetadata(session, event, context)
-    const annotations = includeAnnotations ? annotationsForEvent(event, metadata) : []
+    const annotations = includeAnnotations ? annotationsForProjectedEvent(event, metadata, pendingReturns) : []
+    const selectedWrites = event.writes.filter(write => selected.has(write.variableId))
 
     const lifecycleTransition = event.kind !== 'line-completed'
     const callStackTransition = previousCallStack !== undefined && !sameCallStack(previousCallStack, event.callStack)
     const regionBoundary = Boolean(event.loopIteration || lifecycleTransition || callStackTransition)
     if (regionBoundary) current = undefined
 
-    if ((includeMetadata || annotations.length > 0) && !current) {
+    const mayCreateLifecycleRow = event.kind !== 'call-returned' || selectedWrites.length > 0
+    if (mayCreateLifecycleRow && (includeMetadata || annotations.length > 0) && !current) {
       current = compactRow(session, event, context, 0)
       rows.push(current)
     }
-    if ((includeMetadata || annotations.length > 0) && current) appendSequence(current, event.sequence)
+    if (mayCreateLifecycleRow && (includeMetadata || annotations.length > 0) && current) appendSequence(current, event.sequence)
     if (current && annotations.length > 0) appendAnnotations(current, annotations)
 
     let selectedWritesPlaced = 0

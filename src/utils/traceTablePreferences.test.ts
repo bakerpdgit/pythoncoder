@@ -6,6 +6,7 @@ import {
   getStoredTraceTablePreferences,
   persistTraceTablePreferences,
   refreshTraceTableCachedLabels,
+  resetTraceTablePreferencesForNewSession,
   resolveTraceTableColumnOrder,
   resolveTraceTableColumnIds,
   resolveTraceTableColumnLabel,
@@ -49,14 +50,14 @@ describe('trace table preferences', () => {
 
     localStorage.setItem(traceTablePreferenceStorageKey(source), JSON.stringify({
       rowMode: 'wrong', columnMode: 'custom', variableIds: [' x ', 'x', 3, '', 'y'],
-      aliases: { x: '  X value ', y: '', bad: 7 },
+      aliases: { x: '  X value ', y: '', bad: 7, 'meta:function': 'Routine' },
       cachedDefaultLabels: { y: ' Prior y ', null: null },
     }))
     expect(getStoredTraceTablePreferences(source)).toEqual({
       rowMode: 'compact', columnMode: 'custom', variableIds: ['x', 'y'],
       metaColumnIds: [],
       columnOrder: ['variable:x', 'variable:y'],
-      aliases: { x: 'X value' }, cachedDefaultLabels: { y: 'Prior y' },
+      aliases: { x: 'X value' }, columnWidths: {}, displayDepths: {}, cachedDefaultLabels: { y: 'Prior y' },
     })
   })
 
@@ -75,7 +76,7 @@ describe('trace table preferences', () => {
       .toEqual(['unseen', 'known'])
   })
 
-  it('migrates legacy preferences and preserves a mixed custom column order', () => {
+  it('migrates legacy preferences, pins metadata, and drops the retired Function column', () => {
     const legacy = {
       rowMode: 'compact', columnMode: 'custom', variableIds: ['x', 'unseen'],
       aliases: {}, cachedDefaultLabels: {},
@@ -91,10 +92,10 @@ describe('trace table preferences', () => {
       columnOrder: ['variable:x', 'meta:function', 'variable:y', 'meta:call-depth'],
     }
     expect(resolveTraceTableColumnOrder(mixed, { x: variable('x', 1), y: variable('y', 2) }))
-      .toEqual(['variable:x', 'meta:function', 'variable:y', 'meta:call-depth'])
+      .toEqual(['meta:call-depth', 'variable:x', 'variable:y'])
   })
 
-  it('keeps metadata in place and appends newly discovered variables in auto mode', () => {
+  it('pins metadata left and appends newly discovered variables in auto mode', () => {
     const preferences: TraceTablePreferences = {
       ...DEFAULT_TRACE_TABLE_PREFERENCES,
       columnOrder: [traceTableVariableColumnKey('x'), 'meta:call-number'],
@@ -102,7 +103,25 @@ describe('trace table preferences', () => {
     expect(resolveTraceTableColumnOrder(preferences, {
       x: variable('x', 1),
       y: variable('y', 2),
-    })).toEqual(['variable:x', 'meta:call-number', 'variable:y'])
+    })).toEqual(['meta:call-number', 'variable:x', 'variable:y'])
+  })
+
+  it('normalises persisted column widths and nested display depths', () => {
+    persistTraceTablePreferences(source, {
+      ...DEFAULT_TRACE_TABLE_PREFERENCES,
+      columnWidths: {
+        'meta:call-depth': 40,
+        'meta:function': 200,
+        'variable:x': 900,
+        'variable:y': 150.6,
+      },
+      displayDepths: { x: -2, y: 2.6, z: 20 },
+    })
+
+    expect(getStoredTraceTablePreferences(source)).toEqual(expect.objectContaining({
+      columnWidths: { 'meta:call-depth': 96, 'variable:x': 480, 'variable:y': 151 },
+      displayDepths: { x: 0, y: 3, z: 6 },
+    }))
   })
 
   it('uses aliases first and preserves cached friendly labels across undiscovered runs', () => {
@@ -125,5 +144,35 @@ describe('trace table preferences', () => {
 
     expect(getStoredTraceTablePreferences(source)).toEqual(DEFAULT_TRACE_TABLE_PREFERENCES)
     expect(getStoredTraceTablePreferences({ filesystemId: 'class-a', path: 'other.py' }).variableIds).toEqual(['x'])
+  })
+
+  it('resets each new session to automatic variables while retaining pinned metadata choices', () => {
+    persistTraceTablePreferences(source, {
+      ...DEFAULT_TRACE_TABLE_PREFERENCES,
+      rowMode: 'every-line',
+      columnMode: 'custom',
+      variableIds: ['x'],
+      metaColumnIds: ['meta:call-number'],
+      columnOrder: ['variable:x', 'meta:call-number'],
+      aliases: { 'variable:x': 'Value', 'meta:call-number': 'Call' },
+      columnWidths: { 'variable:x': 250, 'meta:call-number': 110 },
+      displayDepths: { x: 4 },
+      cachedDefaultLabels: { x: 'Old x' },
+    })
+
+    const reset = resetTraceTablePreferencesForNewSession(source)
+
+    expect(reset).toEqual({
+      rowMode: 'every-line',
+      columnMode: 'auto',
+      variableIds: [],
+      metaColumnIds: ['meta:call-number'],
+      columnOrder: ['meta:call-number'],
+      aliases: { 'meta:call-number': 'Call' },
+      columnWidths: { 'meta:call-number': 110 },
+      displayDepths: {},
+      cachedDefaultLabels: {},
+    })
+    expect(getStoredTraceTablePreferences(source)).toEqual(reset)
   })
 })

@@ -38,6 +38,10 @@ export interface TraceTablePreferences {
   /** Mixed left-to-right ordering of metadata and source-variable columns. */
   columnOrder: TraceTableColumnKey[]
   aliases: Record<TraceVariableId, string>
+  /** User-sized table columns in CSS pixels. Values are normalised to 96–480. */
+  columnWidths: Partial<Record<TraceTableColumnKey, number>>
+  /** Nested container levels displayed for each variable (0 shows a summary). */
+  displayDepths: Record<TraceVariableId, number>
   /** Last known friendly labels, used when a selected variable is not rediscovered yet. */
   cachedDefaultLabels: Record<TraceVariableId, string>
 }

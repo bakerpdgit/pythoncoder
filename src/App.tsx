@@ -65,6 +65,7 @@ import type {
 } from './types'
 import { evaluateAll } from './utils/testMatcher'
 import { createTraceSession, maybeAppendTraceCheckpoint, mergeTraceBatch } from './utils/traceLog'
+import { resetTraceTablePreferencesForNewSession } from './utils/traceTablePreferences'
 import {
   adaptTraceWorkerBatch, finalizeTraceWorkerEnd, finalizeTraceWorkerLimitReached, finalizeTraceWorkerStop, finishTraceSessionSafely,
 } from './utils/traceWorkerAdapter'
@@ -77,6 +78,9 @@ import { normalizeTestInputs } from './utils/testInputs'
 import { startVersionPolling } from './utils/versionCheck'
 import { githubRepositoryBookUrl } from './utils/bookSource'
 import { isRuntimeSourceLocked, RuntimeStartGuard } from './utils/runtimeStartGuard'
+import {
+  beginTraceInputTabHandoff, completeTraceInputTabHandoff, type ConsolePanelTab,
+} from './utils/traceInputTab'
 import { useDialogs } from './components/dialogs/DialogProvider'
 import {
   readDirectoryToMap, writeFileToFolderHandle, mkdirInFolderHandle,
@@ -231,7 +235,7 @@ export default function App() {
   const [isQuickSettingsOpen, setIsQuickSettingsOpen] = useState(false)
   const [fixedInputsText, setFixedInputsText] = useState<string>('')
   // Active tab of the console panel. Trace Table appears after a Trace session starts.
-  const [consoleTab, setConsoleTab] = useState<'console' | 'inputs' | 'tests' | 'trace-table'>('console')
+  const [consoleTab, setConsoleTab] = useState<ConsolePanelTab>('console')
   const [popupInputValue, setPopupInputValue] = useState('')
   const [diagramView, setDiagramView] = useState<DiagramView>('outline')
   const [outlineExpandedIds, setOutlineExpandedIds] = useState<Set<string>>(() => new Set())
@@ -291,6 +295,9 @@ export default function App() {
     code: codeText,
   }
   const traceSessionRef = useRef<TraceSession | null>(null)
+  const consoleTabRef = useRef<ConsolePanelTab>('console')
+  // Only return to the Trace Table when input itself moved the user away from it.
+  const returnToTraceTableAfterInputRef = useRef(false)
   const traceStopAckHandlerRef = useRef<((message: TraceWorkerStopAckMessage | null) => void) | null>(null)
   const traceStopTimeoutRef = useRef<number | null>(null)
   const prewarmedTraceWorkerRef = useRef<Worker | null>(null)
@@ -715,6 +722,11 @@ export default function App() {
   useEffect(() => {
     if (outputRef.current) outputRef.current.scrollTop = outputRef.current.scrollHeight
   }, [outputLog])
+
+  useEffect(() => { consoleTabRef.current = consoleTab }, [consoleTab])
+  useEffect(() => {
+    if (!isRunning) returnToTraceTableAfterInputRef.current = false
+  }, [isRunning])
 
   useEffect(() => {
     if (inputRequest === null) return
@@ -2628,6 +2640,7 @@ export default function App() {
     const choice = modeOverride ?? runModeChoice
     let vfsFiles: Awaited<ReturnType<typeof getAllFiles>>
     try {
+      returnToTraceTableAfterInputRef.current = false
       // Auto-refocus the Console when a run starts from the Tests tab.
       if (consoleTab === 'tests') setConsoleTab('console')
       if (pendingRestore) pendingRestore()
@@ -2670,6 +2683,7 @@ export default function App() {
       : ''
 
     if (traceTableSessionId) {
+      resetTraceTablePreferencesForNewSession({ path: capturedSourcePath, filesystemId: capturedFsId })
       storeTraceSession(createTraceSession({
         id: traceTableSessionId,
         source: { path: capturedSourcePath, filesystemId: capturedFsId },
@@ -2815,6 +2829,12 @@ export default function App() {
           appendOutput((data.prompt ?? '') + next)
           setTimeout(() => handleInputSubmit(next), 0)
         } else {
+          const handoff = beginTraceInputTabHandoff(
+            consoleTabRef.current,
+            workerStartModeRef.current === 'trace',
+          )
+          returnToTraceTableAfterInputRef.current = handoff.returnToTraceTable
+          if (handoff.nextTab !== consoleTabRef.current) setConsoleTab(handoff.nextTab)
           setInputRequest({ id: Date.now(), prompt: data.prompt ?? '' })
         }
       } else if (data.type === 'print') {
@@ -3165,6 +3185,12 @@ exec(code_obj, globals())
       Atomics.store(int32, 0, 0); Atomics.notify(int32, 0, 1)
       if (workerStartModeRef.current === 'trace') setTraceSessionActivity('recording')
       setInputRequest(null); setInputValue('')
+      const returnTab = completeTraceInputTabHandoff(
+        returnToTraceTableAfterInputRef.current,
+        traceSessionRef.current !== null,
+      )
+      returnToTraceTableAfterInputRef.current = false
+      if (returnTab) setConsoleTab(returnTab)
     }
   }
 
