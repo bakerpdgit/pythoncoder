@@ -5,17 +5,38 @@ import type {
   TraceExecutionEvent,
   TraceSession,
   TraceSourceLocation,
+  TraceTableColumnKey,
+  TraceTableMetaColumnId,
   TraceVariableId,
   TraceWriteMarker,
 } from '../types/traceTable'
 import { traceBindingKey } from './traceLog'
+import {
+  isTraceTableMetaColumnId,
+  traceTableVariableColumnKey,
+  traceTableVariableIdFromColumnKey,
+} from './traceTablePreferences'
 
 export interface TraceTableProjectionOptions {
   /** Ordered source-variable columns selected by the user. */
   variableIds: TraceVariableId[]
+  /** Ordered execution-context columns selected by the user. */
+  metaColumnIds?: TraceTableMetaColumnId[]
+  /** Authoritative mixed order when supplied; Step/Line remain fixed before it. */
+  columnOrder?: TraceTableColumnKey[]
   /** When true, guarantee a sparse row for every completed source line. */
   showLine: boolean
 }
+
+
+export interface TraceTableProjectionMetadataColumn {
+  id: TraceTableMetaColumnId
+  label: string
+}
+
+export type TraceTableProjectionDisplayColumn =
+  | { kind: 'variable'; key: TraceTableColumnKey; variableId: TraceVariableId; label: string }
+  | { kind: 'metadata'; key: TraceTableMetaColumnId; metadataId: TraceTableMetaColumnId; label: string }
 
 export interface TraceTableProjectionColumn {
   variableId: TraceVariableId
@@ -36,8 +57,14 @@ export interface TraceTableProjectionCell {
 }
 
 export interface TraceTableProjectionRowMetadata {
-  /** Reserved for later row annotations without changing the projection shape. */
-  [key: string]: unknown
+  /** Qualified when the activation catalogue is available. */
+  functionName: string
+  /** Module is depth 0, its direct callees are depth 1. */
+  callDepth: number
+  /** Monotonic identity of this invocation, distinct across recursive calls. */
+  callId: TraceCallId
+  /** One-based user-call ordinal; the module activation has no call number. */
+  callNumber: number | null
 }
 
 export interface TraceTableProjectionRow {
@@ -56,11 +83,65 @@ export interface TraceTableProjectionRow {
 
 export interface TraceTableProjection {
   columns: TraceTableProjectionColumn[]
+  metadataColumns: TraceTableProjectionMetadataColumn[]
+  /** Configurable columns in their exact left-to-right order. */
+  displayColumns: TraceTableProjectionDisplayColumn[]
   rows: TraceTableProjectionRow[]
 }
 
 function selectedIdsInOrder(variableIds: TraceVariableId[]): TraceVariableId[] {
   return [...new Set(variableIds)]
+}
+
+const META_COLUMN_LABELS: Record<TraceTableMetaColumnId, string> = {
+  'meta:function': 'Function',
+  'meta:call-depth': 'Call depth',
+  'meta:call-number': 'Call #',
+}
+
+function selectedMetaIdsInOrder(metaColumnIds: TraceTableMetaColumnId[] = []): TraceTableMetaColumnId[] {
+  return [...new Set(metaColumnIds)].filter(id => id in META_COLUMN_LABELS)
+}
+
+interface ProjectionMetadataContext {
+  callNumbers: ReadonlyMap<TraceCallId, number>
+}
+
+function metadataContext(session: TraceSession): ProjectionMetadataContext {
+  const moduleCallIds = new Set(session.events.flatMap(event => event.callStack.slice(0, 1)))
+  const firstEventSequence = new Map<TraceCallId, number>()
+  for (const event of session.events) {
+    if (!firstEventSequence.has(event.callId)) firstEventSequence.set(event.callId, event.sequence)
+  }
+  const userCallIds = new Set<TraceCallId>()
+  for (const activation of Object.values(session.calls)) {
+    if (activation.parentId !== null && activation.depth > 0) userCallIds.add(activation.id)
+  }
+  for (const event of session.events) {
+    for (const callId of event.callStack) if (!moduleCallIds.has(callId)) userCallIds.add(callId)
+  }
+  const ordered = [...userCallIds].sort((left, right) => {
+    const leftActivation = session.calls[left]
+    const rightActivation = session.calls[right]
+    const leftSequence = leftActivation?.startedAtSequence ?? firstEventSequence.get(left) ?? Number.MAX_SAFE_INTEGER
+    const rightSequence = rightActivation?.startedAtSequence ?? firstEventSequence.get(right) ?? Number.MAX_SAFE_INTEGER
+    return leftSequence - rightSequence || left - right
+  })
+  return { callNumbers: new Map(ordered.map((callId, index) => [callId, index + 1])) }
+}
+
+function rowMetadata(
+  session: TraceSession,
+  event: TraceExecutionEvent,
+  context: ProjectionMetadataContext,
+): TraceTableProjectionRowMetadata {
+  const activation = session.calls[event.callId]
+  return {
+    functionName: activation?.qualifiedName ?? event.functionName,
+    callDepth: activation?.depth ?? Math.max(0, event.callStack.length - 1),
+    callId: event.callId,
+    callNumber: context.callNumbers.get(event.callId) ?? null,
+  }
 }
 
 function sameCallStack(left: TraceCallId[] | undefined, right: TraceCallId[]): boolean {
@@ -99,6 +180,7 @@ function applyEventDeltas(bindings: Map<string, TraceBindingState>, event: Trace
 function eventRow(
   session: TraceSession,
   event: TraceExecutionEvent,
+  context: ProjectionMetadataContext,
   continuationWriteIndex?: number,
 ): TraceTableProjectionRow {
   const rowKind = event.kind === 'line-completed' ? 'line' : 'event'
@@ -110,13 +192,14 @@ function eventRow(
     line: event.location.line,
     location: event.location,
     cells: {},
-    metadata: {},
+    metadata: rowMetadata(session, event, context),
   }
 }
 
 function compactRow(
   session: TraceSession,
   event: TraceExecutionEvent,
+  context: ProjectionMetadataContext,
   writeIndex: number,
 ): TraceTableProjectionRow {
   return {
@@ -124,7 +207,7 @@ function compactRow(
     sequence: event.sequence,
     sequences: [],
     cells: {},
-    metadata: {},
+    metadata: rowMetadata(session, event, context),
   }
 }
 
@@ -135,6 +218,7 @@ function appendSequence(row: TraceTableProjectionRow, sequence: number): void {
 function projectEveryLine(
   session: TraceSession,
   selected: ReadonlySet<TraceVariableId>,
+  context: ProjectionMetadataContext,
 ): TraceTableProjectionRow[] {
   const bindings = new Map<string, TraceBindingState>()
   const rows: TraceTableProjectionRow[] = []
@@ -142,13 +226,16 @@ function projectEveryLine(
   for (const event of session.events) {
     applyEventDeltas(bindings, event)
     const selectedWrites = event.writes.filter(write => selected.has(write.variableId))
+    // Every-line mode continues to mean one row per completed source line.
+    // Lifecycle events only join it when they carry a selected parameter/write,
+    // preserving the pre-metadata Step/Line semantics.
     if (event.kind !== 'line-completed' && selectedWrites.length === 0) continue
 
-    let row = eventRow(session, event)
+    let row = eventRow(session, event, context)
     selectedWrites.forEach((write, writeIndex) => {
       if (row.cells[write.variableId]) {
         rows.push(row)
-        row = eventRow(session, event, writeIndex)
+        row = eventRow(session, event, context, writeIndex)
       }
       row.cells[write.variableId] = cellFor(event, write, bindings)
     })
@@ -161,6 +248,8 @@ function projectEveryLine(
 function projectCompact(
   session: TraceSession,
   selected: ReadonlySet<TraceVariableId>,
+  includeMetadata: boolean,
+  context: ProjectionMetadataContext,
 ): TraceTableProjectionRow[] {
   const bindings = new Map<string, TraceBindingState>()
   const rows: TraceTableProjectionRow[] = []
@@ -172,12 +261,19 @@ function projectCompact(
 
     const lifecycleTransition = event.kind !== 'line-completed'
     const callStackTransition = previousCallStack !== undefined && !sameCallStack(previousCallStack, event.callStack)
-    if (event.loopIteration || lifecycleTransition || callStackTransition) current = undefined
+    const regionBoundary = Boolean(event.loopIteration || lifecycleTransition || callStackTransition)
+    if (regionBoundary) current = undefined
+
+    if (includeMetadata && !current) {
+      current = compactRow(session, event, context, 0)
+      rows.push(current)
+    }
+    if (includeMetadata && current) appendSequence(current, event.sequence)
 
     event.writes.forEach((write, writeIndex) => {
       if (!selected.has(write.variableId)) return
       if (!current || current.cells[write.variableId]) {
-        current = compactRow(session, event, writeIndex)
+        current = compactRow(session, event, context, writeIndex)
         rows.push(current)
       }
       current.cells[write.variableId] = cellFor(event, write, bindings)
@@ -198,17 +294,46 @@ export function projectTraceTable(
   session: TraceSession,
   options: TraceTableProjectionOptions,
 ): TraceTableProjection {
-  const variableIds = selectedIdsInOrder(options.variableIds)
+  const fallbackColumnOrder: TraceTableColumnKey[] = [
+    ...selectedIdsInOrder(options.variableIds).map(traceTableVariableColumnKey),
+    ...selectedMetaIdsInOrder(options.metaColumnIds),
+  ]
+  const columnOrder = [...new Set(options.columnOrder ?? fallbackColumnOrder)].filter(key =>
+    isTraceTableMetaColumnId(key) || traceTableVariableIdFromColumnKey(key) !== null,
+  )
+  const variableIds = selectedIdsInOrder(columnOrder.flatMap(key => {
+    const id = traceTableVariableIdFromColumnKey(key)
+    return id === null ? [] : [id]
+  }))
+  const metaColumnIds = selectedMetaIdsInOrder(columnOrder.filter(isTraceTableMetaColumnId))
   const selected = new Set(variableIds)
   const columns = variableIds.map(variableId => ({
     variableId,
     label: session.variables[variableId]?.defaultLabel ?? variableId,
   }))
+  const metadataColumns = metaColumnIds.map(id => ({ id, label: META_COLUMN_LABELS[id] }))
+  const displayColumns: TraceTableProjectionDisplayColumn[] = []
+  for (const key of columnOrder) {
+    if (isTraceTableMetaColumnId(key)) {
+      displayColumns.push({ kind: 'metadata', key, metadataId: key, label: META_COLUMN_LABELS[key] })
+      continue
+    }
+    const variableId = traceTableVariableIdFromColumnKey(key)
+    if (variableId !== null) displayColumns.push({
+      kind: 'variable',
+      key,
+      variableId,
+      label: session.variables[variableId]?.defaultLabel ?? variableId,
+    })
+  }
+  const context = metadataContext(session)
 
   return {
     columns,
+    metadataColumns,
+    displayColumns,
     rows: options.showLine
-      ? projectEveryLine(session, selected)
-      : projectCompact(session, selected),
+      ? projectEveryLine(session, selected, context)
+      : projectCompact(session, selected, metaColumnIds.length > 0, context),
   }
 }

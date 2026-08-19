@@ -72,9 +72,13 @@ describe('TraceTableColumnDesigner', () => {
     expect(dialog).toHaveAttribute('aria-modal', 'true')
     expect(dialog).toHaveAccessibleDescription(/left-to-right order/i)
 
-    const search = screen.getByRole('searchbox', { name: 'Search available variables' })
+    const search = screen.getByRole('searchbox', { name: 'Search available columns' })
     expect(search).toHaveFocus()
-    const available = screen.getByRole('region', { name: 'Available variables' })
+    const available = screen.getByRole('region', { name: 'Available columns' })
+    expect(within(available).getByText('Call information')).toBeInTheDocument()
+    expect(within(available).getByRole('checkbox', { name: /Function.*executing for this row/i })).toBeInTheDocument()
+    expect(within(available).getByRole('checkbox', { name: /Call depth.*module is depth 0/i })).toBeInTheDocument()
+    expect(within(available).getByRole('checkbox', { name: /Call #.*recursive and repeated calls/i })).toBeInTheDocument()
     expect(within(available).getByText('Globals')).toBeInTheDocument()
     expect(within(available).getByText('Locals — factorial')).toBeInTheDocument()
     expect(within(available).getByText('Locals — Player.move · move')).toBeInTheDocument()
@@ -92,7 +96,7 @@ describe('TraceTableColumnDesigner', () => {
     const user = userEvent.setup()
     renderDesigner()
 
-    const available = screen.getByRole('region', { name: 'Available variables' })
+    const available = screen.getByRole('region', { name: 'Available columns' })
     const selected = screen.getByRole('region', { name: 'Selected columns' })
     await user.click(within(available).getByRole('checkbox', { name: /n.*local to factorial/i }))
     expect(within(selected).getByText('2 selected · left to right')).toBeInTheDocument()
@@ -102,11 +106,11 @@ describe('TraceTableColumnDesigner', () => {
     expect(within(selected).getByText('1 selected · left to right')).toBeInTheDocument()
 
     await user.click(within(available).getByRole('button', { name: 'Clear' }))
-    expect(within(selected).getByText('No columns selected. Choose variables from the available list.')).toBeInTheDocument()
+    expect(within(selected).getByText('No columns selected. Choose columns from the available list.')).toBeInTheDocument()
 
     await user.click(within(available).getByRole('button', { name: 'All' }))
-    expect(within(selected).getByText('4 selected · left to right')).toBeInTheDocument()
-    expect(within(available).getAllByRole('checkbox')).toHaveLength(4)
+    expect(within(selected).getByText('7 selected · left to right')).toBeInTheDocument()
+    expect(within(available).getAllByRole('checkbox')).toHaveLength(7)
     within(available).getAllByRole('checkbox').forEach(checkbox => expect(checkbox).toBeChecked())
   })
 
@@ -123,8 +127,88 @@ describe('TraceTableColumnDesigner', () => {
     expect(onApply).toHaveBeenCalledWith({
       autoSelect: false,
       variableIds: [factorialN.id, score.id],
-      aliases: { [factorialN.id]: 'Input value' },
+      metaColumnIds: [],
+      columnOrder: [`variable:${factorialN.id}`, `variable:${score.id}`],
+      aliases: { [`variable:${factorialN.id}`]: 'Input value' },
     })
+  })
+
+  it('selects, interleaves, aliases, and removes call metadata like other columns', async () => {
+    const user = userEvent.setup()
+    const { onApply } = renderDesigner({
+      selectedVariableIds: [score.id, factorialN.id],
+      selectedColumnOrder: [`variable:${score.id}`, `variable:${factorialN.id}`],
+    })
+    const available = screen.getByRole('region', { name: 'Available columns' })
+
+    await user.click(within(available).getByRole('checkbox', { name: /Function.*executing for this row/i }))
+    await user.click(within(available).getByRole('checkbox', { name: /Call depth.*module is depth 0/i }))
+    await user.click(within(available).getByRole('checkbox', { name: /Call #.*recursive and repeated calls/i }))
+    await user.click(screen.getByRole('button', { name: 'Move Function left' }))
+    await user.click(screen.getByRole('button', { name: 'Move Function left' }))
+    await user.click(screen.getByRole('button', { name: 'Move Call # left' }))
+    await user.click(screen.getByRole('button', { name: 'Remove Call depth' }))
+
+    const callNumberHeader = screen.getByRole('textbox', { name: 'Column header for Call #' })
+    await user.clear(callNumberHeader)
+    await user.type(callNumberHeader, 'Invocation')
+    await user.click(screen.getByRole('button', { name: 'Apply columns' }))
+
+    expect(onApply).toHaveBeenCalledWith({
+      autoSelect: false,
+      variableIds: [score.id, factorialN.id],
+      metaColumnIds: ['meta:function', 'meta:call-number'],
+      columnOrder: [
+        'meta:function',
+        `variable:${score.id}`,
+        `variable:${factorialN.id}`,
+        'meta:call-number',
+      ],
+      aliases: { 'meta:call-number': 'Invocation' },
+    })
+  })
+
+  it('keeps automatic variable discovery active while metadata is selected and arranged', async () => {
+    const user = userEvent.setup()
+    const onApply = vi.fn()
+    const onClose = vi.fn()
+    const { rerender } = render(
+      <TraceTableColumnDesigner
+        open
+        availableVariables={[score]}
+        selectedVariableIds={[score.id]}
+        selectedColumnOrder={[`variable:${score.id}`]}
+        aliases={{}}
+        autoSelect
+        onApply={onApply}
+        onClose={onClose}
+      />,
+    )
+
+    await user.click(screen.getByRole('checkbox', { name: /Function.*executing for this row/i }))
+    await user.click(screen.getByRole('button', { name: 'Move Function left' }))
+    expect(screen.getByRole('radio', { name: /Automatic.*New runtime variables/i })).toBeChecked()
+
+    rerender(
+      <TraceTableColumnDesigner
+        open
+        availableVariables={[score, math]}
+        selectedVariableIds={[score.id, math.id]}
+        selectedColumnOrder={[`variable:${score.id}`, 'meta:function', `variable:${math.id}`]}
+        aliases={{}}
+        autoSelect
+        onApply={onApply}
+        onClose={onClose}
+      />,
+    )
+    expect(screen.getByRole('checkbox', { name: /math.*global scope/i })).toBeChecked()
+
+    await user.click(screen.getByRole('button', { name: 'Apply columns' }))
+    expect(onApply).toHaveBeenCalledWith(expect.objectContaining({
+      autoSelect: true,
+      metaColumnIds: ['meta:function'],
+      columnOrder: ['meta:function', `variable:${score.id}`, `variable:${math.id}`],
+    }))
   })
 
   it('toggles automatic selection and Reset restores all incoming settings', async () => {
@@ -137,7 +221,7 @@ describe('TraceTableColumnDesigner', () => {
     await user.type(screen.getByRole('textbox', { name: 'Column header for Score' }), 'Changed')
     await user.click(screen.getByRole('button', { name: 'Reset' }))
 
-    expect(screen.getByRole('radio', { name: /Custom.*Only variables/i })).toBeChecked()
+    expect(screen.getByRole('radio', { name: /Custom.*Only columns/i })).toBeChecked()
     expect(screen.getByRole('textbox', { name: 'Column header for Score' })).toHaveValue('Points')
     expect(screen.getByRole('checkbox', { name: /n.*local to factorial/i })).not.toBeChecked()
     expect(screen.getByText('1 selected · left to right')).toBeInTheDocument()
@@ -146,7 +230,9 @@ describe('TraceTableColumnDesigner', () => {
     expect(onApply).toHaveBeenCalledWith({
       autoSelect: false,
       variableIds: [score.id],
-      aliases: { [score.id]: 'Points' },
+      metaColumnIds: [],
+      columnOrder: [`variable:${score.id}`],
+      aliases: { [`variable:${score.id}`]: 'Points' },
     })
   })
 
@@ -230,7 +316,7 @@ describe('TraceTableColumnDesigner', () => {
     expect(within(selected).getByText('Unavailable this run')).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'All' }))
-    expect(within(selected).getByText('5 selected · left to right')).toBeInTheDocument()
+    expect(within(selected).getByText('8 selected · left to right')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Apply columns' }))
     expect(onApply.mock.calls[0][0].variableIds).toContain(missingId)
   })

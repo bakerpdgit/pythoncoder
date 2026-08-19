@@ -1,14 +1,16 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import type { TraceVariableDefinition } from '../types/traceTable'
+import type { TraceTablePreferences, TraceVariableDefinition } from '../types/traceTable'
 import {
   DEFAULT_TRACE_TABLE_PREFERENCES,
   clearStoredTraceTablePreferences,
   getStoredTraceTablePreferences,
   persistTraceTablePreferences,
   refreshTraceTableCachedLabels,
+  resolveTraceTableColumnOrder,
   resolveTraceTableColumnIds,
   resolveTraceTableColumnLabel,
   traceTablePreferenceStorageKey,
+  traceTableVariableColumnKey,
 } from './traceTablePreferences'
 
 const source = { filesystemId: 'class-a', path: 'main.py' }
@@ -26,11 +28,12 @@ describe('trace table preferences', () => {
   beforeEach(() => localStorage.clear())
 
   it('persists source choices without leaking them across filesystem/path pairs', () => {
-    const preferences = {
+    const preferences: TraceTablePreferences = {
       ...DEFAULT_TRACE_TABLE_PREFERENCES,
       rowMode: 'every-line' as const,
       columnMode: 'custom' as const,
       variableIds: ['global:score'],
+      columnOrder: ['variable:global:score'],
       aliases: { 'global:score': 'Points' },
     }
     persistTraceTablePreferences(source, preferences)
@@ -51,6 +54,8 @@ describe('trace table preferences', () => {
     }))
     expect(getStoredTraceTablePreferences(source)).toEqual({
       rowMode: 'compact', columnMode: 'custom', variableIds: ['x', 'y'],
+      metaColumnIds: [],
+      columnOrder: ['variable:x', 'variable:y'],
       aliases: { x: 'X value' }, cachedDefaultLabels: { y: 'Prior y' },
     })
   })
@@ -68,6 +73,36 @@ describe('trace table preferences', () => {
     }
     expect(resolveTraceTableColumnIds(preferences, { known: variable('known', 1), new: variable('new', 2) }))
       .toEqual(['unseen', 'known'])
+  })
+
+  it('migrates legacy preferences and preserves a mixed custom column order', () => {
+    const legacy = {
+      rowMode: 'compact', columnMode: 'custom', variableIds: ['x', 'unseen'],
+      aliases: {}, cachedDefaultLabels: {},
+    }
+    expect(resolveTraceTableColumnOrder(legacy as typeof DEFAULT_TRACE_TABLE_PREFERENCES, { x: variable('x', 1) }))
+      .toEqual(['variable:x', 'variable:unseen'])
+
+    const mixed: TraceTablePreferences = {
+      ...DEFAULT_TRACE_TABLE_PREFERENCES,
+      columnMode: 'custom' as const,
+      variableIds: ['x', 'y'],
+      metaColumnIds: ['meta:function', 'meta:call-depth'],
+      columnOrder: ['variable:x', 'meta:function', 'variable:y', 'meta:call-depth'],
+    }
+    expect(resolveTraceTableColumnOrder(mixed, { x: variable('x', 1), y: variable('y', 2) }))
+      .toEqual(['variable:x', 'meta:function', 'variable:y', 'meta:call-depth'])
+  })
+
+  it('keeps metadata in place and appends newly discovered variables in auto mode', () => {
+    const preferences: TraceTablePreferences = {
+      ...DEFAULT_TRACE_TABLE_PREFERENCES,
+      columnOrder: [traceTableVariableColumnKey('x'), 'meta:call-number'],
+    }
+    expect(resolveTraceTableColumnOrder(preferences, {
+      x: variable('x', 1),
+      y: variable('y', 2),
+    })).toEqual(['variable:x', 'meta:call-number', 'variable:y'])
   })
 
   it('uses aliases first and preserves cached friendly labels across undiscovered runs', () => {

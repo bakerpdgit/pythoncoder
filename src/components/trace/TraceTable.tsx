@@ -1,13 +1,20 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { InspectorNode } from '../../types'
-import type { TraceSession, TraceTablePreferences } from '../../types/traceTable'
-import { projectTraceTable, type TraceTableProjectionCell } from '../../utils/traceTableProjection'
+import type { TraceSession, TraceTableMetaColumnId, TraceTablePreferences } from '../../types/traceTable'
+import {
+  projectTraceTable,
+  type TraceTableProjectionCell,
+  type TraceTableProjectionRow,
+} from '../../utils/traceTableProjection'
 import {
   getStoredTraceTablePreferences,
   persistTraceTablePreferences,
   refreshTraceTableCachedLabels,
+  resolveTraceTableColumnOrder,
   resolveTraceTableColumnIds,
   resolveTraceTableColumnLabel,
+  resolveTraceTableMetaColumnIds,
+  resolveTraceTableMetaColumnLabel,
   traceTablePreferenceStorageKey,
 } from '../../utils/traceTablePreferences'
 import { TraceTableColumnDesigner, type TraceTableColumnDesignerResult } from './TraceTableColumnDesigner'
@@ -45,6 +52,12 @@ const formatTraceCell = (cell: TraceTableProjectionCell): string => {
   return formatInspectorSummary(cell.state.value)
 }
 
+const formatTraceMetadata = (row: TraceTableProjectionRow, columnId: TraceTableMetaColumnId): string => {
+  if (columnId === 'meta:function') return row.metadata.functionName
+  if (columnId === 'meta:call-depth') return String(row.metadata.callDepth)
+  return row.metadata.callNumber === null ? '—' : String(row.metadata.callNumber)
+}
+
 /** A compact, teaching-oriented history of writes captured in a trace session. */
 export const TraceTable = ({ session }: TraceTableProps) => {
   const preferenceKey = traceTablePreferenceStorageKey(session.source)
@@ -75,13 +88,26 @@ export const TraceTable = ({ session }: TraceTableProps) => {
     persistTraceTablePreferences(session.source, next)
   }
 
+  const displayedColumnOrder = useMemo(
+    () => resolveTraceTableColumnOrder(preferences, session.variables),
+    [preferences, session.variables],
+  )
   const displayedVariableIds = useMemo(
     () => resolveTraceTableColumnIds(preferences, session.variables),
     [preferences, session.variables],
   )
+  const displayedMetaColumnIds = useMemo(
+    () => resolveTraceTableMetaColumnIds(preferences, session.variables),
+    [preferences, session.variables],
+  )
   const projection = useMemo(
-    () => projectTraceTable(session, { variableIds: displayedVariableIds, showLine: preferences.rowMode === 'every-line' }),
-    [displayedVariableIds, preferences.rowMode, session],
+    () => projectTraceTable(session, {
+      variableIds: displayedVariableIds,
+      metaColumnIds: displayedMetaColumnIds,
+      columnOrder: displayedColumnOrder,
+      showLine: preferences.rowMode === 'every-line',
+    }),
+    [displayedColumnOrder, displayedMetaColumnIds, displayedVariableIds, preferences.rowMode, session],
   )
   const availableVariables = useMemo(
     () => Object.values(session.variables)
@@ -96,6 +122,8 @@ export const TraceTable = ({ session }: TraceTableProps) => {
       ...preferences,
       columnMode: result.autoSelect ? 'auto' : 'custom',
       variableIds: result.variableIds,
+      metaColumnIds: result.metaColumnIds,
+      columnOrder: result.columnOrder,
       aliases: result.aliases,
     }, session.variables))
     setIsDesignerOpen(false)
@@ -103,7 +131,7 @@ export const TraceTable = ({ session }: TraceTableProps) => {
 
   const eventCount = session.events.length
   const rowCount = projection.rows.length
-  const hasTableData = projection.columns.length > 0 && rowCount > 0
+  const hasTableData = projection.displayColumns.length > 0 && rowCount > 0
 
   return (
     <section className="flex h-full min-h-0 flex-col rounded-lg border border-slate-700 bg-slate-900/60" aria-labelledby="trace-table-title">
@@ -120,7 +148,7 @@ export const TraceTable = ({ session }: TraceTableProps) => {
         <div className="flex flex-wrap items-center justify-end gap-2">
           <button type="button" onClick={() => setIsDesignerOpen(true)}
             className="rounded-md border border-slate-600 px-2.5 py-1 text-xs font-medium text-slate-200 hover:border-sky-500 hover:text-sky-100">
-            Columns ({projection.columns.length})
+            Columns ({projection.displayColumns.length})
           </button>
           <div className="inline-flex rounded-md border border-slate-700 bg-slate-950/40 p-0.5" role="group" aria-label="Trace table row layout">
             <button
@@ -157,9 +185,11 @@ export const TraceTable = ({ session }: TraceTableProps) => {
                 <th scope="col" className="sticky top-0 z-10 border-b border-r border-slate-700 bg-slate-900 px-3 py-2 font-semibold text-slate-300">
                   {preferences.rowMode === 'every-line' ? 'Line' : 'Step'}
                 </th>
-                {projection.columns.map(column => (
-                  <th key={column.variableId} scope="col" className="sticky top-0 z-10 border-b border-slate-700 bg-slate-900 px-3 py-2 font-semibold text-slate-300">
-                    {labelFor(column.variableId)}
+                {projection.displayColumns.map(column => (
+                  <th key={column.key} scope="col" className="sticky top-0 z-10 border-b border-slate-700 bg-slate-900 px-3 py-2 font-semibold text-slate-300">
+                    {column.kind === 'metadata'
+                      ? resolveTraceTableMetaColumnLabel(preferences, column.metadataId)
+                      : labelFor(column.variableId)}
                   </th>
                 ))}
               </tr>
@@ -170,7 +200,15 @@ export const TraceTable = ({ session }: TraceTableProps) => {
                   <th scope="row" className="whitespace-nowrap border-b border-r border-slate-700/60 px-3 py-2 font-medium text-slate-400">
                     {row.line === undefined ? `Event ${row.sequences.join(', ')}` : `Line ${row.line}`}
                   </th>
-                  {projection.columns.map(column => {
+                  {projection.displayColumns.map(column => {
+                    if (column.kind === 'metadata') {
+                      const value = formatTraceMetadata(row, column.metadataId)
+                      return (
+                        <td key={column.key} className="whitespace-nowrap border-b border-slate-700/60 px-3 py-2 font-medium text-sky-100">
+                          {value}
+                        </td>
+                      )
+                    }
                     const cell = row.cells[column.variableId]
                     const columnLabel = labelFor(column.variableId)
                     if (!cell || cell.state.status === 'out-of-scope') {
@@ -193,12 +231,12 @@ export const TraceTable = ({ session }: TraceTableProps) => {
       ) : (
         <div className="flex flex-1 items-center justify-center p-6 text-center text-sm text-slate-500" role="status">
           <div>
-            <p>{projection.columns.length === 0 && preferences.columnMode === 'custom'
+            <p>{projection.displayColumns.length === 0 && preferences.columnMode === 'custom'
               ? 'Choose columns to add variables to this trace table.'
               : eventCount === 0
                 ? 'Run code to capture trace events.'
                 : 'No variable writes were captured for this trace.'}</p>
-            {projection.columns.length === 0 && preferences.columnMode === 'custom' && (
+            {projection.displayColumns.length === 0 && preferences.columnMode === 'custom' && (
               <button type="button" onClick={() => setIsDesignerOpen(true)} className="mt-3 rounded-md border border-slate-600 px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-sky-500 hover:text-sky-100">
                 Choose columns
               </button>
@@ -210,6 +248,7 @@ export const TraceTable = ({ session }: TraceTableProps) => {
         open={isDesignerOpen}
         availableVariables={availableVariables}
         selectedVariableIds={displayedVariableIds}
+        selectedColumnOrder={displayedColumnOrder}
         aliases={preferences.aliases}
         fallbackLabels={preferences.cachedDefaultLabels}
         autoSelect={preferences.columnMode === 'auto'}

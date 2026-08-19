@@ -1,5 +1,7 @@
 import type {
   TraceSessionSource,
+  TraceTableColumnKey,
+  TraceTableMetaColumnId,
   TraceTablePreferences,
   TraceVariableDefinition,
   TraceVariableId,
@@ -12,9 +14,36 @@ export const DEFAULT_TRACE_TABLE_PREFERENCES: TraceTablePreferences = {
   rowMode: 'compact',
   columnMode: 'auto',
   variableIds: [],
+  metaColumnIds: [],
+  columnOrder: [],
   aliases: {},
   cachedDefaultLabels: {},
 }
+
+export interface TraceTableMetaColumnDefinition {
+  id: TraceTableMetaColumnId
+  defaultLabel: string
+}
+
+/** Stable metadata catalogue shared by the designer and renderer. */
+export const TRACE_TABLE_META_COLUMNS: readonly TraceTableMetaColumnDefinition[] = [
+  { id: 'meta:function', defaultLabel: 'Function' },
+  { id: 'meta:call-depth', defaultLabel: 'Call depth' },
+  { id: 'meta:call-number', defaultLabel: 'Call #' },
+]
+
+const TRACE_TABLE_META_COLUMN_IDS = new Set<TraceTableMetaColumnId>(
+  TRACE_TABLE_META_COLUMNS.map(column => column.id),
+)
+
+export const isTraceTableMetaColumnId = (value: string): value is TraceTableMetaColumnId =>
+  TRACE_TABLE_META_COLUMN_IDS.has(value as TraceTableMetaColumnId)
+
+export const traceTableVariableColumnKey = (variableId: TraceVariableId): TraceTableColumnKey =>
+  `variable:${variableId}`
+
+export const traceTableVariableIdFromColumnKey = (key: TraceTableColumnKey): TraceVariableId | null =>
+  key.startsWith('variable:') ? key.slice('variable:'.length) || null : null
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -31,6 +60,18 @@ const normaliseIdList = (value: unknown): TraceVariableId[] => {
     ids.push(id)
   }
   return ids
+}
+
+const normaliseMetaIdList = (value: unknown): TraceTableMetaColumnId[] =>
+  normaliseIdList(value).filter((id): id is TraceTableMetaColumnId =>
+    TRACE_TABLE_META_COLUMN_IDS.has(id as TraceTableMetaColumnId),
+  )
+
+const normaliseColumnOrder = (value: unknown): TraceTableColumnKey[] => {
+  const keys = normaliseIdList(value)
+  return keys.filter((key): key is TraceTableColumnKey =>
+    isTraceTableMetaColumnId(key) || (key.startsWith('variable:') && key.length > 'variable:'.length),
+  )
 }
 
 /** Only string-to-string maps are allowed through from persisted JSON. */
@@ -50,6 +91,8 @@ const normaliseLabelMap = (value: unknown): Record<TraceVariableId, string> => {
 const copyDefaultPreferences = (): TraceTablePreferences => ({
   ...DEFAULT_TRACE_TABLE_PREFERENCES,
   variableIds: [],
+  metaColumnIds: [],
+  columnOrder: [],
   aliases: {},
   cachedDefaultLabels: {},
 })
@@ -61,13 +104,50 @@ const copyDefaultPreferences = (): TraceTablePreferences => ({
  */
 export const normaliseTraceTablePreferences = (value: unknown): TraceTablePreferences => {
   if (!isRecord(value)) return copyDefaultPreferences()
+  const variableIds = normaliseIdList(value.variableIds)
+  const metaColumnIds = normaliseMetaIdList(value.metaColumnIds)
+  const persistedColumnOrder = normaliseColumnOrder(value.columnOrder)
   return {
     rowMode: value.rowMode === 'every-line' ? 'every-line' : 'compact',
     columnMode: value.columnMode === 'custom' ? 'custom' : 'auto',
-    variableIds: normaliseIdList(value.variableIds),
+    variableIds,
+    // v1 preference records predate metadata columns, so a missing field
+    // intentionally migrates to an empty selection.
+    metaColumnIds,
+    // Legacy records had only variableIds. If a transitional record contains
+    // separate metadata IDs, place those after its variables deterministically.
+    columnOrder: persistedColumnOrder.length > 0
+      ? persistedColumnOrder
+      : [...variableIds.map(traceTableVariableColumnKey), ...metaColumnIds],
     aliases: normaliseLabelMap(value.aliases),
     cachedDefaultLabels: normaliseLabelMap(value.cachedDefaultLabels),
   }
+}
+
+
+/**
+ * Resolve the complete configurable order. Auto mode keeps the stored mixed
+ * ordering, removes variables absent from this run, and appends discoveries.
+ * Custom mode deliberately retains unseen variables for a future run.
+ */
+export const resolveTraceTableColumnOrder = (
+  preferences: TraceTablePreferences,
+  variables: Record<TraceVariableId, TraceVariableDefinition>,
+): TraceTableColumnKey[] => {
+  const normalised = normaliseTraceTablePreferences(preferences)
+  const orderedVariables = orderedCurrentIds(variables)
+  if (normalised.columnMode === 'custom') return normalised.columnOrder
+
+  const current = new Set(orderedVariables)
+  const stored = normalised.columnOrder.filter(key => {
+    const variableId = traceTableVariableIdFromColumnKey(key)
+    return variableId === null || current.has(variableId)
+  })
+  const included = new Set(stored.map(traceTableVariableIdFromColumnKey).filter((id): id is string => id !== null))
+  return [
+    ...stored,
+    ...orderedVariables.filter(id => !included.has(id)).map(traceTableVariableColumnKey),
+  ]
 }
 
 /**
@@ -122,12 +202,15 @@ const orderedCurrentIds = (variables: Record<TraceVariableId, TraceVariableDefin
 export const resolveTraceTableColumnIds = (
   preferences: TraceTablePreferences,
   variables: Record<TraceVariableId, TraceVariableDefinition>,
-): TraceVariableId[] => {
-  const normalised = normaliseTraceTablePreferences(preferences)
-  return normalised.columnMode === 'auto'
-    ? orderedCurrentIds(variables)
-    : normalised.variableIds
-}
+): TraceVariableId[] => resolveTraceTableColumnOrder(preferences, variables).flatMap(key => {
+  const variableId = traceTableVariableIdFromColumnKey(key)
+  return variableId === null ? [] : [variableId]
+})
+
+export const resolveTraceTableMetaColumnIds = (
+  preferences: TraceTablePreferences,
+  variables: Record<TraceVariableId, TraceVariableDefinition>,
+): TraceTableMetaColumnId[] => resolveTraceTableColumnOrder(preferences, variables).filter(isTraceTableMetaColumnId)
 
 /** Alias wins, followed by the current label and then its cached prior label. */
 export const resolveTraceTableColumnLabel = (
@@ -136,10 +219,22 @@ export const resolveTraceTableColumnLabel = (
   variables: Record<TraceVariableId, TraceVariableDefinition>,
 ): string => {
   const normalised = normaliseTraceTablePreferences(preferences)
-  return normalised.aliases[variableId]
+  return normalised.aliases[traceTableVariableColumnKey(variableId)]
+    ?? normalised.aliases[variableId]
     ?? variables[variableId]?.defaultLabel
     ?? normalised.cachedDefaultLabels[variableId]
     ?? variableId
+}
+
+
+export const resolveTraceTableMetaColumnLabel = (
+  preferences: TraceTablePreferences,
+  metadataId: TraceTableMetaColumnId,
+): string => {
+  const normalised = normaliseTraceTablePreferences(preferences)
+  return normalised.aliases[metadataId]
+    ?? TRACE_TABLE_META_COLUMNS.find(column => column.id === metadataId)?.defaultLabel
+    ?? metadataId
 }
 
 /**
