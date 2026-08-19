@@ -417,3 +417,214 @@ describe('projectTraceTable execution metadata', () => {
     expect(result.rows[0].metadata).toMatchObject({ functionName: 'inner', callId: 3, callDepth: 2 })
   })
 })
+
+describe('projectTraceTable teaching annotations', () => {
+  const activation = (
+    id: number,
+    parentId: number | null,
+    qualifiedName: string,
+    depth: number,
+    startedAtSequence: number,
+  ): TraceCallActivation => ({
+    id,
+    parentId,
+    qualifiedName,
+    functionName: qualifiedName.split('.').at(-1) ?? qualifiedName,
+    depth,
+    startedAtSequence,
+  })
+
+  it('is opt-in and leaves the established row packing unchanged by default', () => {
+    const result = projectTraceTable(session([
+      event(0, { kind: 'input-completed', inputValue: 'Ada' }),
+      event(1, { bindingDeltas: [delta(x, 1)], writes: [write(x)] }),
+    ]), { variableIds: [x], showLine: false })
+
+    expect(result.rows).toHaveLength(1)
+    expect(result.rows[0]).toMatchObject({ kind: 'line', annotations: [], teachingNote: null })
+  })
+
+  it('marks loop boundaries without changing compact variable packing', () => {
+    const result = projectTraceTable(session([
+      event(0, { bindingDeltas: [delta(x, 1)], writes: [write(x)] }),
+      event(1, {
+        loopIteration: { loopId: 'for:2', iteration: 3, depth: 0 },
+        bindingDeltas: [delta(y, 2)],
+        writes: [write(y, { kind: 'loop-target' })],
+      }),
+    ]), { variableIds: [x, y], showLine: false, includeAnnotations: true })
+
+    expect(result.rows).toHaveLength(2)
+    expect(result.rows[0].cells[x]).toBeDefined()
+    expect(result.rows[1].cells[y]).toBeDefined()
+    expect(result.rows[1].annotations).toEqual([expect.objectContaining({
+      kind: 'loop-iteration',
+      sequence: 1,
+      label: 'For loop iteration 3.',
+      loopIteration: { loopId: 'for:2', iteration: 3, depth: 0 },
+    })])
+    expect(result.rows[1].teachingNote).toBe('For loop iteration 3.')
+  })
+
+  it('does not label a later compact assignment as part of the previous execution event', () => {
+    const result = projectTraceTable(session([
+      event(0, { bindingDeltas: [delta(x, 1)], writes: [write(x)] }),
+      event(1, { bindingDeltas: [delta(x, 1)], writes: [write(x)] }),
+    ]), {
+      variableIds: [x],
+      columnOrder: [`variable:${x}`, 'meta:function'],
+      showLine: false,
+      includeAnnotations: true,
+    })
+
+    expect(result.rows).toHaveLength(2)
+    expect(result.rows[1]).toMatchObject({ kind: 'line', annotations: [], teachingNote: null })
+  })
+
+  it('creates clearly identified lifecycle rows for call entry and return in every-line mode', () => {
+    const calls = [
+      activation(1, null, '<module>', 0, 0),
+      activation(2, 1, 'calculate', 1, 0),
+    ]
+    const result = projectTraceTable(session([
+      event(0, {
+        kind: 'call-entered',
+        callId: 2,
+        callStack: [1, 2],
+        functionName: 'calculate',
+      }),
+      event(1, {
+        kind: 'call-returned',
+        callId: 2,
+        callStack: [1, 2],
+        functionName: 'calculate',
+        returnValue: primitive(42),
+      }),
+    ], [], calls), {
+      variableIds: [],
+      showLine: true,
+      includeAnnotations: true,
+    })
+
+    expect(result.rows.map(row => row.kind)).toEqual(['event', 'event'])
+    expect(result.rows.map(row => row.teachingNote)).toEqual([
+      'Entered calculate (call #1).',
+      'Returned from calculate (call #1) with 42.',
+    ])
+    expect(result.rows[1].annotations[0]).toMatchObject({
+      kind: 'call-returned',
+      value: primitive(42),
+    })
+    expect(result.rows.every(row => Object.keys(row.cells).length === 0)).toBe(true)
+  })
+
+  it('describes raised exceptions, exception exits, and completed input', () => {
+    const failure = { type: 'ValueError', message: 'not a number' }
+    const result = projectTraceTable(session([
+      event(0, { kind: 'input-completed', inputValue: 'hello' }),
+      event(1, { kind: 'exception', functionName: 'parse', exception: failure }),
+      event(2, { kind: 'call-exception-exit', functionName: 'parse', exception: failure }),
+    ], []), { variableIds: [], showLine: true, includeAnnotations: true })
+
+    expect(result.rows.map(row => row.annotations[0].kind)).toEqual([
+      'input-completed',
+      'exception',
+      'call-exception-exit',
+    ])
+    expect(result.rows.map(row => row.teachingNote)).toEqual([
+      'Input received: "hello".',
+      'ValueError: not a number raised in parse.',
+      'Left parse after ValueError: not a number.',
+    ])
+    expect(result.rows[0].annotations[0].inputValue).toBe('hello')
+    expect(result.rows[1].annotations[0].exception).toEqual(failure)
+  })
+
+  it('distinguishes generator yield and resume lifecycle events', () => {
+    const result = projectTraceTable(session([
+      event(0, { kind: 'generator-yielded', functionName: 'numbers', returnValue: primitive(7) }),
+      event(1, { kind: 'generator-resumed', functionName: 'numbers' }),
+    ], []), { variableIds: [], showLine: false, includeAnnotations: true })
+
+    expect(result.rows.map(row => row.teachingNote)).toEqual([
+      'numbers yielded 7.',
+      'Resumed numbers.',
+    ])
+    expect(result.rows.map(row => row.annotations[0].kind)).toEqual([
+      'generator-yielded',
+      'generator-resumed',
+    ])
+  })
+
+  it.each([true, false])('labels same-event overflow rows as continuations when showLine is %s', showLine => {
+    const result = projectTraceTable(session([
+      event(0, {
+        bindingDeltas: [delta(x, 2)],
+        writes: [
+          write(x, { value: primitive(1) }),
+          write(x, { value: primitive(2) }),
+        ],
+      }),
+    ]), { variableIds: [x], showLine, includeAnnotations: true })
+
+    expect(result.rows).toHaveLength(2)
+    expect(result.rows[1]).toMatchObject({
+      kind: 'continuation',
+      teachingNote: 'Continued values from the same execution event.',
+      annotations: [expect.objectContaining({
+        kind: 'continuation',
+        sequence: 0,
+        continuationWriteIndex: 1,
+      })],
+    })
+    expect(result.rows.map(row => row.cells[x].value)).toEqual([primitive(1), primitive(2)])
+  })
+
+  it('retains compact continuation row identity when teaching context is hidden', () => {
+    const result = projectTraceTable(session([
+      event(0, {
+        bindingDeltas: [delta(x, 2)],
+        writes: [
+          write(x, { value: primitive(1) }),
+          write(x, { value: primitive(2) }),
+        ],
+      }),
+    ]), { variableIds: [x], showLine: false, includeAnnotations: false })
+
+    expect(result.rows[1]).toMatchObject({ kind: 'continuation', annotations: [], teachingNote: null })
+  })
+
+  it('keeps recursive return annotations attached to the unwinding invocation', () => {
+    const calls = [
+      activation(1, null, '<module>', 0, 0),
+      activation(2, 1, 'factorial', 1, 0),
+      activation(3, 2, 'factorial', 2, 1),
+    ]
+    const result = projectTraceTable(session([
+      event(0, { kind: 'call-entered', callId: 2, callStack: [1, 2], functionName: 'factorial' }),
+      event(1, { kind: 'call-entered', callId: 3, callStack: [1, 2, 3], functionName: 'factorial' }),
+      event(2, {
+        kind: 'call-returned',
+        callId: 3,
+        callStack: [1, 2, 3],
+        functionName: 'factorial',
+        returnValue: primitive(1),
+      }),
+      event(3, {
+        kind: 'call-returned',
+        callId: 2,
+        callStack: [1, 2],
+        functionName: 'factorial',
+        returnValue: primitive(2),
+      }),
+    ], [], calls), { variableIds: [], showLine: false, includeAnnotations: true })
+
+    const returns = result.rows.filter(row => row.annotations.some(annotation => annotation.kind === 'call-returned'))
+    expect(returns.map(row => row.metadata.callId)).toEqual([3, 2])
+    expect(returns.map(row => row.metadata.callNumber)).toEqual([2, 1])
+    expect(returns.map(row => row.teachingNote)).toEqual([
+      'Returned from factorial (call #2) with 1.',
+      'Returned from factorial (call #1) with 2.',
+    ])
+  })
+})
