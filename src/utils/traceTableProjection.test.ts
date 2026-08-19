@@ -311,12 +311,11 @@ describe('projectTraceTable execution metadata', () => {
 
     expect(result.displayColumns.map(column => column.key)).toEqual([
       `variable:${x}`,
-      'meta:function',
       `variable:${y}`,
       'meta:call-depth',
     ])
     expect(result.columns.map(column => column.variableId)).toEqual([x, y])
-    expect(result.metadataColumns.map(column => column.id)).toEqual(['meta:function', 'meta:call-depth'])
+    expect(result.metadataColumns.map(column => column.id)).toEqual(['meta:call-depth'])
   })
 
   it('numbers user invocations by start order through recursion and unwind', () => {
@@ -372,8 +371,8 @@ describe('projectTraceTable execution metadata', () => {
       showLine: false,
     })
 
-    expect(result.rows.map(row => row.sequences)).toEqual([[0, 1], [2, 3], [4], [5], [6]])
-    expect(result.rows.map(row => row.metadata.callNumber)).toEqual([null, 1, 2, 2, 1])
+    expect(result.rows.map(row => row.sequences)).toEqual([[0, 1], [2, 3], [4], [6]])
+    expect(result.rows.map(row => row.metadata.callNumber)).toEqual([null, 1, 2, 1])
   })
 
   it('falls back to event stacks when the call catalogue is unavailable', () => {
@@ -481,7 +480,7 @@ describe('projectTraceTable teaching annotations', () => {
     expect(result.rows[1]).toMatchObject({ kind: 'line', annotations: [], teachingNote: null })
   })
 
-  it('creates clearly identified lifecycle rows for call entry and return in every-line mode', () => {
+  it('keeps call entry rows but merges a return into the next caller row in every-line mode', () => {
     const calls = [
       activation(1, null, '<module>', 0, 0),
       activation(2, 1, 'calculate', 1, 0),
@@ -500,21 +499,29 @@ describe('projectTraceTable teaching annotations', () => {
         functionName: 'calculate',
         returnValue: primitive(42),
       }),
+      event(2, {
+        callId: 1,
+        callStack: [1],
+        functionName: '<module>',
+        location: { path: 'main.py', line: 9 },
+      }),
     ], [], calls), {
       variableIds: [],
       showLine: true,
       includeAnnotations: true,
     })
 
-    expect(result.rows.map(row => row.kind)).toEqual(['event', 'event'])
+    expect(result.rows.map(row => row.kind)).toEqual(['event', 'line'])
     expect(result.rows.map(row => row.teachingNote)).toEqual([
       'Entered calculate (call #1).',
       'Returned from calculate (call #1) with 42.',
     ])
     expect(result.rows[1].annotations[0]).toMatchObject({
       kind: 'call-returned',
+      sequence: 1,
       value: primitive(42),
     })
+    expect(result.rows[1]).toMatchObject({ sequence: 2, sequences: [1, 2], metadata: { callId: 1 } })
     expect(result.rows.every(row => Object.keys(row.cells).length === 0)).toBe(true)
   })
 
@@ -594,7 +601,7 @@ describe('projectTraceTable teaching annotations', () => {
     expect(result.rows[1]).toMatchObject({ kind: 'continuation', annotations: [], teachingNote: null })
   })
 
-  it('keeps recursive return annotations attached to the unwinding invocation', () => {
+  it.each([true, false])('merges ordered recursive returns onto the caller resume row when showLine is %s', showLine => {
     const calls = [
       activation(1, null, '<module>', 0, 0),
       activation(2, 1, 'factorial', 1, 0),
@@ -617,14 +624,104 @@ describe('projectTraceTable teaching annotations', () => {
         functionName: 'factorial',
         returnValue: primitive(2),
       }),
-    ], [], calls), { variableIds: [], showLine: false, includeAnnotations: true })
+      event(4, {
+        callId: 1,
+        callStack: [1],
+        functionName: '<module>',
+        location: { path: 'main.py', line: 12 },
+      }),
+    ], [], calls), { variableIds: [], showLine, includeAnnotations: true })
 
     const returns = result.rows.filter(row => row.annotations.some(annotation => annotation.kind === 'call-returned'))
-    expect(returns.map(row => row.metadata.callId)).toEqual([3, 2])
-    expect(returns.map(row => row.metadata.callNumber)).toEqual([2, 1])
-    expect(returns.map(row => row.teachingNote)).toEqual([
-      'Returned from factorial (call #2) with 1.',
-      'Returned from factorial (call #1) with 2.',
+    expect(returns).toHaveLength(1)
+    expect(returns[0]).toMatchObject({
+      sequence: 4,
+      sequences: [2, 3, 4],
+      metadata: { callId: 1, functionName: '<module>' },
+      teachingNote: 'Returned from factorial (call #2) with 1. Returned from factorial (call #1) with 2.',
+    })
+    expect(returns[0].annotations.map(annotation => ({ kind: annotation.kind, sequence: annotation.sequence }))).toEqual([
+      { kind: 'call-returned', sequence: 2 },
+      { kind: 'call-returned', sequence: 3 },
     ])
+  })
+
+  it.each([true, false])('does not create a blank row for a final module return when showLine is %s', showLine => {
+    const result = projectTraceTable(session([
+      event(0, { bindingDeltas: [delta(x, 1)], writes: [write(x)] }),
+      event(1, {
+        kind: 'call-returned',
+        callId: 1,
+        callStack: [1],
+        functionName: '<module>',
+        returnValue: primitive('None'),
+      }),
+    ]), {
+      variableIds: [x],
+      columnOrder: [`variable:${x}`, 'meta:function'],
+      showLine,
+      includeAnnotations: true,
+    })
+
+    expect(result.rows).toHaveLength(1)
+    expect(result.rows[0].annotations).toEqual([])
+    expect(result.rows[0].sequences).toEqual([0])
+  })
+
+  it.each([true, false])('keeps return events hidden when Context is off and showLine is %s', showLine => {
+    const result = projectTraceTable(session([
+      event(0, { kind: 'call-entered', callId: 2, callStack: [1, 2], functionName: 'f' }),
+      event(1, { kind: 'call-returned', callId: 2, callStack: [1, 2], functionName: 'f' }),
+      event(2, { callId: 1, callStack: [1], bindingDeltas: [delta(x, 1)], writes: [write(x)] }),
+    ]), { variableIds: [x], showLine, includeAnnotations: false })
+
+    expect(result.rows).toHaveLength(1)
+    expect(result.rows[0]).toMatchObject({ sequence: 2, sequences: [2], annotations: [], teachingNote: null })
+  })
+
+  it.each([true, false])('merges a return onto a sparse caller write when showLine is %s', showLine => {
+    const result = projectTraceTable(session([
+      event(0, { kind: 'call-returned', callId: 2, callStack: [1, 2], functionName: 'calculate', returnValue: primitive(7) }),
+      event(1, {
+        callId: 1,
+        callStack: [1],
+        bindingDeltas: [delta(x, 7)],
+        writes: [write(x)],
+      }),
+    ]), { variableIds: [x, y], showLine, includeAnnotations: true })
+
+    expect(result.rows).toHaveLength(1)
+    expect(Object.keys(result.rows[0].cells)).toEqual([x])
+    expect(result.rows[0]).toMatchObject({
+      sequence: 1,
+      sequences: [0, 1],
+      teachingNote: 'Returned from calculate (call #1) with 7.',
+    })
+  })
+
+  it('orders a pending inner return before the caller exception exit', () => {
+    const failure = { type: 'RuntimeError', message: 'outer failed' }
+    const result = projectTraceTable(session([
+      event(0, { kind: 'call-returned', callId: 3, callStack: [1, 2, 3], functionName: 'inner', returnValue: primitive(1) }),
+      event(1, { kind: 'call-exception-exit', callId: 2, callStack: [1, 2], functionName: 'outer', exception: failure }),
+    ], []), { variableIds: [], showLine: true, includeAnnotations: true })
+
+    expect(result.rows).toHaveLength(1)
+    expect(result.rows[0].annotations.map(annotation => annotation.kind)).toEqual(['call-returned', 'call-exception-exit'])
+    expect(result.rows[0].teachingNote).toBe('Returned from inner (call #1) with 1. Left outer (call #2) after RuntimeError: outer failed.')
+  })
+
+  it('orders a pending helper return before the generator lifecycle annotation', () => {
+    const result = projectTraceTable(session([
+      event(0, { kind: 'call-returned', callId: 3, callStack: [1, 2, 3], functionName: 'helper', returnValue: primitive(5) }),
+      event(1, { kind: 'generator-yielded', callId: 2, callStack: [1, 2], functionName: 'numbers', returnValue: primitive(5) }),
+      event(2, { kind: 'generator-resumed', callId: 2, callStack: [1, 2], functionName: 'numbers' }),
+    ], []), { variableIds: [], showLine: false, includeAnnotations: true })
+
+    expect(result.rows.map(row => row.annotations.map(annotation => annotation.kind))).toEqual([
+      ['call-returned', 'generator-yielded'],
+      ['generator-resumed'],
+    ])
+    expect(result.rows[0].teachingNote).toBe('Returned from helper (call #1) with 5. numbers yielded 5.')
   })
 })

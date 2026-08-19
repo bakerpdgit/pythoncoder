@@ -17,6 +17,8 @@ export const DEFAULT_TRACE_TABLE_PREFERENCES: TraceTablePreferences = {
   metaColumnIds: [],
   columnOrder: [],
   aliases: {},
+  columnWidths: {},
+  displayDepths: {},
   cachedDefaultLabels: {},
 }
 
@@ -27,7 +29,6 @@ export interface TraceTableMetaColumnDefinition {
 
 /** Stable metadata catalogue shared by the designer and renderer. */
 export const TRACE_TABLE_META_COLUMNS: readonly TraceTableMetaColumnDefinition[] = [
-  { id: 'meta:function', defaultLabel: 'Function' },
   { id: 'meta:call-depth', defaultLabel: 'Call depth' },
   { id: 'meta:call-number', defaultLabel: 'Call #' },
 ]
@@ -74,12 +75,36 @@ const normaliseColumnOrder = (value: unknown): TraceTableColumnKey[] => {
   )
 }
 
+const canonicalColumnOrder = (
+  variableIds: TraceVariableId[],
+  metaColumnIds: TraceTableMetaColumnId[],
+  persistedColumnOrder: TraceTableColumnKey[],
+): TraceTableColumnKey[] => {
+  const selectedMetadata = new Set<TraceTableMetaColumnId>([
+    ...metaColumnIds,
+    ...persistedColumnOrder.filter(isTraceTableMetaColumnId),
+  ])
+  const orderedMetadata = TRACE_TABLE_META_COLUMNS
+    .map(column => column.id)
+    .filter(id => selectedMetadata.has(id))
+  const orderedVariables = persistedColumnOrder
+    .flatMap(key => traceTableVariableIdFromColumnKey(key) ?? [])
+  const variables = uniqueIds([...orderedVariables, ...variableIds])
+  return [
+    ...orderedMetadata,
+    ...variables.map(traceTableVariableColumnKey),
+  ]
+}
+
+const uniqueIds = <Id extends string>(ids: Id[]): Id[] => [...new Set(ids)]
+
 /** Only string-to-string maps are allowed through from persisted JSON. */
 const normaliseLabelMap = (value: unknown): Record<TraceVariableId, string> => {
   if (!isRecord(value)) return {}
   const labels: Record<string, string> = {}
   for (const [rawId, rawLabel] of Object.entries(value)) {
     const id = rawId.trim()
+    if (id === 'meta:function') continue
     if (!id || typeof rawLabel !== 'string') continue
     const label = rawLabel.trim()
     // Empty aliases do not carry meaning and should not override a friendly default.
@@ -88,12 +113,37 @@ const normaliseLabelMap = (value: unknown): Record<TraceVariableId, string> => {
   return labels
 }
 
+const normaliseColumnWidths = (value: unknown): Partial<Record<TraceTableColumnKey, number>> => {
+  if (!isRecord(value)) return {}
+  const widths: Partial<Record<TraceTableColumnKey, number>> = {}
+  for (const [rawKey, rawWidth] of Object.entries(value)) {
+    const key = rawKey.trim()
+    if (typeof rawWidth !== 'number' || !Number.isFinite(rawWidth)) continue
+    if (!isTraceTableMetaColumnId(key) && !(key.startsWith('variable:') && key.length > 'variable:'.length)) continue
+    widths[key as TraceTableColumnKey] = Math.min(480, Math.max(96, Math.round(rawWidth)))
+  }
+  return widths
+}
+
+const normaliseDisplayDepths = (value: unknown): Record<TraceVariableId, number> => {
+  if (!isRecord(value)) return {}
+  const depths: Record<TraceVariableId, number> = {}
+  for (const [rawId, rawDepth] of Object.entries(value)) {
+    const id = rawId.trim()
+    if (!id || typeof rawDepth !== 'number' || !Number.isFinite(rawDepth)) continue
+    depths[id] = Math.min(6, Math.max(0, Math.round(rawDepth)))
+  }
+  return depths
+}
+
 const copyDefaultPreferences = (): TraceTablePreferences => ({
   ...DEFAULT_TRACE_TABLE_PREFERENCES,
   variableIds: [],
   metaColumnIds: [],
   columnOrder: [],
   aliases: {},
+  columnWidths: {},
+  displayDepths: {},
   cachedDefaultLabels: {},
 })
 
@@ -107,27 +157,29 @@ export const normaliseTraceTablePreferences = (value: unknown): TraceTablePrefer
   const variableIds = normaliseIdList(value.variableIds)
   const metaColumnIds = normaliseMetaIdList(value.metaColumnIds)
   const persistedColumnOrder = normaliseColumnOrder(value.columnOrder)
+  const columnOrder = canonicalColumnOrder(variableIds, metaColumnIds, persistedColumnOrder)
   return {
     rowMode: value.rowMode === 'every-line' ? 'every-line' : 'compact',
     columnMode: value.columnMode === 'custom' ? 'custom' : 'auto',
-    variableIds,
+    variableIds: columnOrder.flatMap(key => traceTableVariableIdFromColumnKey(key) ?? []),
     // v1 preference records predate metadata columns, so a missing field
     // intentionally migrates to an empty selection.
-    metaColumnIds,
-    // Legacy records had only variableIds. If a transitional record contains
-    // separate metadata IDs, place those after its variables deterministically.
-    columnOrder: persistedColumnOrder.length > 0
-      ? persistedColumnOrder
-      : [...variableIds.map(traceTableVariableColumnKey), ...metaColumnIds],
+    metaColumnIds: columnOrder.filter(isTraceTableMetaColumnId),
+    // Metadata is pinned before source variables. Legacy mixed orders are
+    // migrated while retaining the user's relative variable order.
+    columnOrder,
     aliases: normaliseLabelMap(value.aliases),
+    columnWidths: normaliseColumnWidths(value.columnWidths),
+    displayDepths: normaliseDisplayDepths(value.displayDepths),
     cachedDefaultLabels: normaliseLabelMap(value.cachedDefaultLabels),
   }
 }
 
 
 /**
- * Resolve the complete configurable order. Auto mode keeps the stored mixed
- * ordering, removes variables absent from this run, and appends discoveries.
+ * Resolve the complete configurable order. Metadata is always pinned on the
+ * left in catalogue order. Auto mode removes variables absent from this run
+ * and appends discoveries.
  * Custom mode deliberately retains unseen variables for a future run.
  */
 export const resolveTraceTableColumnOrder = (
@@ -136,15 +188,15 @@ export const resolveTraceTableColumnOrder = (
 ): TraceTableColumnKey[] => {
   const normalised = normaliseTraceTablePreferences(preferences)
   const orderedVariables = orderedCurrentIds(variables)
-  if (normalised.columnMode === 'custom') return normalised.columnOrder
+  const metadata = normalised.metaColumnIds
+  const storedVariables = normalised.columnOrder.filter(key => traceTableVariableIdFromColumnKey(key) !== null)
+  if (normalised.columnMode === 'custom') return [...metadata, ...storedVariables]
 
   const current = new Set(orderedVariables)
-  const stored = normalised.columnOrder.filter(key => {
-    const variableId = traceTableVariableIdFromColumnKey(key)
-    return variableId === null || current.has(variableId)
-  })
+  const stored = storedVariables.filter(key => current.has(traceTableVariableIdFromColumnKey(key) as TraceVariableId))
   const included = new Set(stored.map(traceTableVariableIdFromColumnKey).filter((id): id is string => id !== null))
   return [
+    ...metadata,
     ...stored,
     ...orderedVariables.filter(id => !included.has(id)).map(traceTableVariableColumnKey),
   ]
@@ -179,6 +231,36 @@ export const persistTraceTablePreferences = (
   } catch {
     // Storage is optional (private browsing, quota, and disabled storage are all safe fallbacks).
   }
+}
+
+/**
+ * Begin a run with automatic variable discovery while retaining the user's
+ * row layout and pinned call-information choices. Source code can have changed
+ * completely, so all variable-specific display configuration is discarded.
+ */
+export const resetTraceTablePreferencesForNewSession = (
+  source: Pick<TraceSessionSource, 'path' | 'filesystemId'>,
+): TraceTablePreferences => {
+  const current = getStoredTraceTablePreferences(source)
+  const selectedMetadata = new Set(current.metaColumnIds)
+  const aliases = Object.fromEntries(Object.entries(current.aliases).filter(([key]) =>
+    isTraceTableMetaColumnId(key) && selectedMetadata.has(key),
+  ))
+  const columnWidths = Object.fromEntries(Object.entries(current.columnWidths).filter(([key]) =>
+    isTraceTableMetaColumnId(key) && selectedMetadata.has(key),
+  )) as Partial<Record<TraceTableColumnKey, number>>
+  const reset = normaliseTraceTablePreferences({
+    ...current,
+    columnMode: 'auto',
+    variableIds: [],
+    columnOrder: current.metaColumnIds,
+    aliases,
+    columnWidths,
+    displayDepths: {},
+    cachedDefaultLabels: {},
+  })
+  persistTraceTablePreferences(source, reset)
+  return reset
 }
 
 /** Removes just one source's choices; other files and filesystems are untouched. */

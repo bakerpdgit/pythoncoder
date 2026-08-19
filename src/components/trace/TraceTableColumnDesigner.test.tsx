@@ -76,7 +76,7 @@ describe('TraceTableColumnDesigner', () => {
     expect(search).toHaveFocus()
     const available = screen.getByRole('region', { name: 'Available columns' })
     expect(within(available).getByText('Call information')).toBeInTheDocument()
-    expect(within(available).getByRole('checkbox', { name: /Function.*executing for this row/i })).toBeInTheDocument()
+    expect(within(available).queryByRole('checkbox', { name: /Function/i })).not.toBeInTheDocument()
     expect(within(available).getByRole('checkbox', { name: /Call depth.*module is depth 0/i })).toBeInTheDocument()
     expect(within(available).getByRole('checkbox', { name: /Call #.*recursive and repeated calls/i })).toBeInTheDocument()
     expect(within(available).getByText('Globals')).toBeInTheDocument()
@@ -97,20 +97,20 @@ describe('TraceTableColumnDesigner', () => {
     renderDesigner()
 
     const available = screen.getByRole('region', { name: 'Available columns' })
-    const selected = screen.getByRole('region', { name: 'Selected columns' })
+    const selected = screen.getByRole('region', { name: 'Selected variable columns' })
     await user.click(within(available).getByRole('checkbox', { name: /n.*local to factorial/i }))
-    expect(within(selected).getByText('2 selected · left to right')).toBeInTheDocument()
+    expect(within(selected).getByText('2 selected · top to bottom')).toBeInTheDocument()
 
     await user.click(within(selected).getByRole('button', { name: 'Remove Score' }))
     expect(within(available).getByRole('checkbox', { name: /score.*global scope/i })).not.toBeChecked()
-    expect(within(selected).getByText('1 selected · left to right')).toBeInTheDocument()
+    expect(within(selected).getByText('1 selected · top to bottom')).toBeInTheDocument()
 
     await user.click(within(available).getByRole('button', { name: 'Clear' }))
-    expect(within(selected).getByText('No columns selected. Choose columns from the available list.')).toBeInTheDocument()
+    expect(within(selected).getByText('No variable columns selected. Choose variables from the available list.')).toBeInTheDocument()
 
     await user.click(within(available).getByRole('button', { name: 'All' }))
-    expect(within(selected).getByText('7 selected · left to right')).toBeInTheDocument()
-    expect(within(available).getAllByRole('checkbox')).toHaveLength(7)
+    expect(within(selected).getByText('4 selected · top to bottom')).toBeInTheDocument()
+    expect(within(available).getAllByRole('checkbox')).toHaveLength(6)
     within(available).getAllByRole('checkbox').forEach(checkbox => expect(checkbox).toBeChecked())
   })
 
@@ -118,7 +118,7 @@ describe('TraceTableColumnDesigner', () => {
     const user = userEvent.setup()
     const { onApply } = renderDesigner({ selectedVariableIds: [score.id, factorialN.id] })
 
-    await user.click(screen.getByRole('button', { name: 'Move n left' }))
+    await user.click(screen.getByRole('button', { name: 'Move n up' }))
     const header = screen.getByRole('textbox', { name: 'Column header for n' })
     await user.clear(header)
     await user.type(header, 'Input value')
@@ -130,10 +130,12 @@ describe('TraceTableColumnDesigner', () => {
       metaColumnIds: [],
       columnOrder: [`variable:${factorialN.id}`, `variable:${score.id}`],
       aliases: { [`variable:${factorialN.id}`]: 'Input value' },
+      columnWidths: {},
+      displayDepths: {},
     })
   })
 
-  it('selects, interleaves, aliases, and removes call metadata like other columns', async () => {
+  it('keeps selected metadata pinned left and outside the ordered variable list', async () => {
     const user = userEvent.setup()
     const { onApply } = renderDesigner({
       selectedVariableIds: [score.id, factorialN.id],
@@ -141,30 +143,26 @@ describe('TraceTableColumnDesigner', () => {
     })
     const available = screen.getByRole('region', { name: 'Available columns' })
 
-    await user.click(within(available).getByRole('checkbox', { name: /Function.*executing for this row/i }))
     await user.click(within(available).getByRole('checkbox', { name: /Call depth.*module is depth 0/i }))
     await user.click(within(available).getByRole('checkbox', { name: /Call #.*recursive and repeated calls/i }))
-    await user.click(screen.getByRole('button', { name: 'Move Function left' }))
-    await user.click(screen.getByRole('button', { name: 'Move Function left' }))
-    await user.click(screen.getByRole('button', { name: 'Move Call # left' }))
-    await user.click(screen.getByRole('button', { name: 'Remove Call depth' }))
-
-    const callNumberHeader = screen.getByRole('textbox', { name: 'Column header for Call #' })
-    await user.clear(callNumberHeader)
-    await user.type(callNumberHeader, 'Invocation')
+    expect(screen.queryByRole('button', { name: /Move Call/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('textbox', { name: /Column header for Call/i })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Move n up' }))
     await user.click(screen.getByRole('button', { name: 'Apply columns' }))
 
     expect(onApply).toHaveBeenCalledWith({
       autoSelect: false,
-      variableIds: [score.id, factorialN.id],
-      metaColumnIds: ['meta:function', 'meta:call-number'],
+      variableIds: [factorialN.id, score.id],
+      metaColumnIds: ['meta:call-depth', 'meta:call-number'],
       columnOrder: [
-        'meta:function',
-        `variable:${score.id}`,
-        `variable:${factorialN.id}`,
+        'meta:call-depth',
         'meta:call-number',
+        `variable:${factorialN.id}`,
+        `variable:${score.id}`,
       ],
-      aliases: { 'meta:call-number': 'Invocation' },
+      aliases: {},
+      columnWidths: {},
+      displayDepths: {},
     })
   })
 
@@ -185,8 +183,7 @@ describe('TraceTableColumnDesigner', () => {
       />,
     )
 
-    await user.click(screen.getByRole('checkbox', { name: /Function.*executing for this row/i }))
-    await user.click(screen.getByRole('button', { name: 'Move Function left' }))
+    await user.click(screen.getByRole('checkbox', { name: /Call depth.*module is depth 0/i }))
     expect(screen.getByRole('radio', { name: /Automatic.*New runtime variables/i })).toBeChecked()
 
     rerender(
@@ -194,7 +191,7 @@ describe('TraceTableColumnDesigner', () => {
         open
         availableVariables={[score, math]}
         selectedVariableIds={[score.id, math.id]}
-        selectedColumnOrder={[`variable:${score.id}`, 'meta:function', `variable:${math.id}`]}
+        selectedColumnOrder={[`variable:${score.id}`, 'meta:call-depth', `variable:${math.id}`]}
         aliases={{}}
         autoSelect
         onApply={onApply}
@@ -206,14 +203,18 @@ describe('TraceTableColumnDesigner', () => {
     await user.click(screen.getByRole('button', { name: 'Apply columns' }))
     expect(onApply).toHaveBeenCalledWith(expect.objectContaining({
       autoSelect: true,
-      metaColumnIds: ['meta:function'],
-      columnOrder: ['meta:function', `variable:${score.id}`, `variable:${math.id}`],
+      metaColumnIds: ['meta:call-depth'],
+      columnOrder: ['meta:call-depth', `variable:${score.id}`, `variable:${math.id}`],
     }))
   })
 
   it('toggles automatic selection and Reset restores all incoming settings', async () => {
     const user = userEvent.setup()
-    const { onApply } = renderDesigner({ aliases: { [score.id]: 'Points' } })
+    const { onApply } = renderDesigner({
+      aliases: { [score.id]: 'Points' },
+      columnWidths: { [`variable:${score.id}`]: 240 },
+      displayDepths: { [score.id]: 3 },
+    })
 
     await user.click(screen.getByRole('radio', { name: /Automatic.*New runtime variables/i }))
     await user.click(screen.getByRole('checkbox', { name: /n.*local to factorial/i }))
@@ -224,7 +225,7 @@ describe('TraceTableColumnDesigner', () => {
     expect(screen.getByRole('radio', { name: /Custom.*Only columns/i })).toBeChecked()
     expect(screen.getByRole('textbox', { name: 'Column header for Score' })).toHaveValue('Points')
     expect(screen.getByRole('checkbox', { name: /n.*local to factorial/i })).not.toBeChecked()
-    expect(screen.getByText('1 selected · left to right')).toBeInTheDocument()
+    expect(screen.getByText('1 selected · top to bottom')).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Apply columns' }))
     expect(onApply).toHaveBeenCalledWith({
@@ -233,6 +234,8 @@ describe('TraceTableColumnDesigner', () => {
       metaColumnIds: [],
       columnOrder: [`variable:${score.id}`],
       aliases: { [`variable:${score.id}`]: 'Points' },
+      columnWidths: { [`variable:${score.id}`]: 240 },
+      displayDepths: { [score.id]: 3 },
     })
   })
 
@@ -268,7 +271,7 @@ describe('TraceTableColumnDesigner', () => {
     )
 
     expect(screen.getByRole('textbox', { name: 'Column header for Score' })).toHaveValue('Draft points')
-    expect(screen.getByText('2 selected · left to right')).toBeInTheDocument()
+    expect(screen.getByText('2 selected · top to bottom')).toBeInTheDocument()
     expect(screen.getByRole('checkbox', { name: /math.*global scope/i })).toBeChecked()
   })
 
@@ -311,12 +314,12 @@ describe('TraceTableColumnDesigner', () => {
     const missingId = 'local:old%20function:lost_value'
     const { onApply } = renderDesigner({ selectedVariableIds: [missingId] })
 
-    const selected = screen.getByRole('region', { name: 'Selected columns' })
+    const selected = screen.getByRole('region', { name: 'Selected variable columns' })
     expect(within(selected).getByText('lost value')).toBeInTheDocument()
     expect(within(selected).getByText('Unavailable this run')).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'All' }))
-    expect(within(selected).getByText('8 selected · left to right')).toBeInTheDocument()
+    expect(within(selected).getByText('5 selected · top to bottom')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Apply columns' }))
     expect(onApply.mock.calls[0][0].variableIds).toContain(missingId)
   })

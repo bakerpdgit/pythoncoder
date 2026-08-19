@@ -18,6 +18,8 @@ export interface TraceTableColumnDesignerResult {
   metaColumnIds: TraceTableMetaColumnId[]
   columnOrder: TraceTableColumnKey[]
   aliases: Record<string, string>
+  columnWidths: Partial<Record<TraceTableColumnKey, number>>
+  displayDepths: Record<TraceVariableId, number>
 }
 
 export interface TraceTableColumnDesignerProps {
@@ -27,6 +29,8 @@ export interface TraceTableColumnDesignerProps {
   /** Unified left-to-right order. Omit when loading pre-metadata preferences. */
   selectedColumnOrder?: TraceTableColumnKey[]
   aliases: Record<string, string>
+  columnWidths?: Partial<Record<TraceTableColumnKey, number>>
+  displayDepths?: Record<TraceVariableId, number>
   fallbackLabels?: Record<TraceVariableId, string>
   autoSelect: boolean
   onApply: (result: TraceTableColumnDesignerResult) => void
@@ -41,8 +45,7 @@ interface VariableGroup {
 
 const uniqueIds = <Id extends string>(ids: Id[]): Id[] => [...new Set(ids)]
 
-const metaColumnDetails: Record<TraceTableMetaColumnId, string> = {
-  'meta:function': 'The function executing for this row.',
+const metaColumnDetails: Partial<Record<TraceTableMetaColumnId, string>> = {
   'meta:call-depth': 'The nesting level in the call stack (the module is depth 0).',
   'meta:call-number': 'A stable invocation number that distinguishes recursive and repeated calls.',
 }
@@ -119,6 +122,8 @@ export const TraceTableColumnDesigner = ({
   selectedVariableIds,
   selectedColumnOrder,
   aliases,
+  columnWidths = {},
+  displayDepths = {},
   fallbackLabels = {},
   autoSelect,
   onApply,
@@ -131,11 +136,22 @@ export const TraceTableColumnDesigner = ({
   const wasOpenRef = useRef(false)
   const onCloseRef = useRef(onClose)
   const [search, setSearch] = useState('')
-  const incomingColumnOrder = useMemo(
-    () => uniqueIds(selectedColumnOrder ?? selectedVariableIds.map(traceTableVariableColumnKey)),
+  const incomingVariableOrder = useMemo(
+    () => uniqueIds([
+      ...(selectedColumnOrder ?? []).flatMap(key => {
+        const variableId = traceTableVariableIdFromColumnKey(key)
+        return variableId ? [traceTableVariableColumnKey(variableId)] : []
+      }),
+      ...selectedVariableIds.map(traceTableVariableColumnKey),
+    ]),
     [selectedColumnOrder, selectedVariableIds],
   )
-  const [draftColumnOrder, setDraftColumnOrder] = useState<TraceTableColumnKey[]>(() => incomingColumnOrder)
+  const incomingMetaIds = useMemo(
+    () => uniqueIds((selectedColumnOrder ?? []).filter(isTraceTableMetaColumnId)),
+    [selectedColumnOrder],
+  )
+  const [draftVariableOrder, setDraftVariableOrder] = useState<TraceTableColumnKey[]>(() => incomingVariableOrder)
+  const [draftMetaIds, setDraftMetaIds] = useState<TraceTableMetaColumnId[]>(() => incomingMetaIds)
   const [draftAliases, setDraftAliases] = useState<Record<string, string>>(() => ({ ...aliases }))
   const [draftAutoSelect, setDraftAutoSelect] = useState(autoSelect)
 
@@ -153,7 +169,7 @@ export const TraceTableColumnDesigner = ({
   // This effect intentionally runs before the open-transition reset below.
   useEffect(() => {
     if (!open || !draftAutoSelect) return
-    setDraftColumnOrder(current => uniqueIds([
+    setDraftVariableOrder(current => uniqueIds([
       ...current,
       ...availableVariables.slice().sort(sortVariables).map(variable => traceTableVariableColumnKey(variable.id)),
     ]))
@@ -164,10 +180,11 @@ export const TraceTableColumnDesigner = ({
     wasOpenRef.current = open
     if (!open || wasOpen) return
     setSearch('')
-    setDraftColumnOrder(incomingColumnOrder)
+    setDraftVariableOrder(incomingVariableOrder)
+    setDraftMetaIds(incomingMetaIds)
     setDraftAliases({ ...aliases })
     setDraftAutoSelect(autoSelect)
-  }, [aliases, autoSelect, incomingColumnOrder, open])
+  }, [aliases, autoSelect, incomingMetaIds, incomingVariableOrder, open])
 
   useEffect(() => {
     if (!open) return
@@ -229,7 +246,7 @@ export const TraceTableColumnDesigner = ({
     const query = search.trim().toLocaleLowerCase()
     if (!query) return TRACE_TABLE_META_COLUMNS
     return TRACE_TABLE_META_COLUMNS.filter(column =>
-      `${column.defaultLabel} ${metaColumnDetails[column.id]} table information metadata`
+      `${column.defaultLabel} ${metaColumnDetails[column.id] ?? ''} table information metadata`
         .toLocaleLowerCase()
         .includes(query),
     )
@@ -237,26 +254,25 @@ export const TraceTableColumnDesigner = ({
 
   if (!open) return null
 
-  const selectedSet = new Set(draftColumnOrder)
+  const selectedSet = new Set<TraceTableColumnKey>([...draftMetaIds, ...draftVariableOrder])
 
   const toggleVariable = (id: TraceVariableId) => {
     setDraftAutoSelect(false)
     const key = traceTableVariableColumnKey(id)
-    setDraftColumnOrder(current => current.includes(key)
+    setDraftVariableOrder(current => current.includes(key)
       ? current.filter(columnKey => columnKey !== key)
       : [...current, key])
   }
 
   const toggleMetaColumn = (id: TraceTableMetaColumnId) => {
-    setDraftColumnOrder(current => current.includes(id)
-      ? current.filter(columnKey => columnKey !== id)
+    setDraftMetaIds(current => current.includes(id)
+      ? current.filter(metaId => metaId !== id)
       : [...current, id])
   }
 
   const moveColumn = (index: number, offset: -1 | 1) => {
-    const key = draftColumnOrder[index]
-    if (!isTraceTableMetaColumnId(key)) setDraftAutoSelect(false)
-    setDraftColumnOrder(current => {
+    setDraftAutoSelect(false)
+    setDraftVariableOrder(current => {
       const target = index + offset
       if (target < 0 || target >= current.length) return current
       const next = [...current]
@@ -267,13 +283,13 @@ export const TraceTableColumnDesigner = ({
 
   const selectAll = () => {
     setDraftAutoSelect(false)
-    setDraftColumnOrder(current => {
+    setDraftMetaIds(TRACE_TABLE_META_COLUMNS.map(column => column.id))
+    setDraftVariableOrder(current => {
       const unavailableKeys = current.filter(key => {
         const variableId = traceTableVariableIdFromColumnKey(key)
         return variableId !== null && !availableById.has(variableId)
       })
       return uniqueIds([
-        ...TRACE_TABLE_META_COLUMNS.map(column => column.id),
         ...availableVariables.slice().sort(sortVariables).map(variable => traceTableVariableColumnKey(variable.id)),
         ...unavailableKeys,
       ])
@@ -282,13 +298,18 @@ export const TraceTableColumnDesigner = ({
 
   const reset = () => {
     setSearch('')
-    setDraftColumnOrder(incomingColumnOrder)
+    setDraftVariableOrder(incomingVariableOrder)
+    setDraftMetaIds(incomingMetaIds)
     setDraftAliases({ ...aliases })
     setDraftAutoSelect(autoSelect)
   }
 
   const apply = () => {
-    const selectedAliases = draftColumnOrder.reduce<Record<string, string>>((result, key) => {
+    const columnOrder: TraceTableColumnKey[] = [
+      ...TRACE_TABLE_META_COLUMNS.map(column => column.id).filter(id => draftMetaIds.includes(id)),
+      ...draftVariableOrder,
+    ]
+    const selectedAliases = columnOrder.reduce<Record<string, string>>((result, key) => {
       const variableId = traceTableVariableIdFromColumnKey(key)
       const metaColumn = isTraceTableMetaColumnId(key)
         ? TRACE_TABLE_META_COLUMNS.find(column => column.id === key)
@@ -301,10 +322,12 @@ export const TraceTableColumnDesigner = ({
     }, {})
     onApply({
       autoSelect: draftAutoSelect,
-      variableIds: draftColumnOrder.flatMap(key => traceTableVariableIdFromColumnKey(key) ?? []),
-      metaColumnIds: draftColumnOrder.filter(isTraceTableMetaColumnId),
-      columnOrder: draftColumnOrder,
+      variableIds: draftVariableOrder.flatMap(key => traceTableVariableIdFromColumnKey(key) ?? []),
+      metaColumnIds: columnOrder.filter(isTraceTableMetaColumnId),
+      columnOrder,
       aliases: selectedAliases,
+      columnWidths: { ...columnWidths },
+      displayDepths: { ...displayDepths },
     })
   }
 
@@ -375,7 +398,7 @@ export const TraceTableColumnDesigner = ({
                 <h3 id={`${titleId}-available`} className="text-sm font-semibold">Available columns</h3>
                 <div className="flex gap-1">
                   <button type="button" onClick={selectAll} className="rounded px-2 py-1 text-xs text-slate-300 hover:bg-sky-500/10">All</button>
-                  <button type="button" onClick={() => { setDraftAutoSelect(false); setDraftColumnOrder([]) }} className="rounded px-2 py-1 text-xs text-slate-300 hover:bg-slate-700/60">Clear</button>
+                  <button type="button" onClick={() => { setDraftAutoSelect(false); setDraftVariableOrder([]); setDraftMetaIds([]) }} className="rounded px-2 py-1 text-xs text-slate-300 hover:bg-slate-700/60">Clear</button>
                   <button type="button" onClick={reset} className="rounded px-2 py-1 text-xs text-slate-300 hover:bg-slate-700/60">Reset</button>
                 </div>
               </div>
@@ -447,60 +470,64 @@ export const TraceTableColumnDesigner = ({
 
             <section aria-labelledby={`${titleId}-selected`} className="rounded-lg border border-slate-700 bg-slate-950/40 p-3">
               <div className="flex items-baseline justify-between gap-2">
-                <h3 id={`${titleId}-selected`} className="text-sm font-semibold">Selected columns</h3>
-                <span className="text-xs text-slate-400" aria-live="polite">{draftColumnOrder.length} selected · left to right</span>
+                <h3 id={`${titleId}-selected`} className="text-sm font-semibold">Selected variable columns</h3>
+                <span className="text-xs text-slate-400" aria-live="polite">{draftVariableOrder.length} selected · top to bottom</span>
               </div>
+              <p className="mt-1 text-xs text-slate-500">
+                Move variables up to place them further left. Selected call information is always pinned on the left.
+              </p>
 
-              {draftColumnOrder.length > 0 ? (
-                <ol className="mt-3 grid gap-2 sm:grid-cols-2">
-                  {draftColumnOrder.map((key, index) => {
+              {draftVariableOrder.length > 0 ? (
+                <ol className="mt-2 space-y-1.5">
+                  {draftVariableOrder.map((key, index) => {
                     const variableId = traceTableVariableIdFromColumnKey(key)
                     const variable = variableId ? availableById.get(variableId) : undefined
-                    const metaColumn = isTraceTableMetaColumnId(key)
-                      ? TRACE_TABLE_META_COLUMNS.find(column => column.id === key)
-                      : undefined
-                    const label = metaColumn?.defaultLabel
-                      ?? (variableId ? variable?.defaultLabel ?? fallbackLabels[variableId] ?? unavailableLabel(variableId) : key)
+                    const label = variableId ? variable?.defaultLabel ?? fallbackLabels[variableId] ?? unavailableLabel(variableId) : key
                     const unavailable = variableId !== null && !variable
-                    const detail = metaColumn
-                      ? 'Call information'
-                      : unavailable
+                    const detail = unavailable
                         ? 'Unavailable this run'
                         : variable
                           ? scopeLabel(variable)
                           : ''
                     return (
-                      <li key={key} className="rounded-md border border-slate-700 bg-slate-800/40 p-3">
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="min-w-0">
-                            <span className="block text-[10px] font-bold uppercase tracking-wide text-slate-500">Column {index + 1}</span>
+                      <li key={key} className="rounded-md border border-slate-700 bg-slate-800/40 px-2 py-1.5">
+                        <div className="flex items-center gap-2">
+                          <div className="min-w-0 w-28 shrink-0">
                             <span className="block truncate text-sm font-medium text-slate-200">{label}</span>
-                            <span className="block text-xs text-slate-400">
-                              {detail}
-                            </span>
+                            <span className="block truncate text-[11px] text-slate-400">{detail}</span>
                           </div>
+                          <label className="min-w-0 flex-1 text-[11px] text-slate-400">
+                            <span className="sr-only">Column header for {label}</span>
+                            <input
+                              type="text"
+                              aria-label={`Column header for ${label}`}
+                              value={draftAliases[key] ?? (variableId ? draftAliases[variableId] : undefined) ?? label}
+                              onChange={event => setDraftAliases(current => ({ ...current, [key]: event.target.value }))}
+                              className="w-full rounded border border-slate-600 bg-slate-950 px-2 py-1 text-sm text-slate-100 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                            />
+                          </label>
                           <div className="flex shrink-0 gap-1" role="group" aria-label={`Arrange ${label}`}>
                             <button
                               type="button"
                               onClick={() => moveColumn(index, -1)}
                               disabled={index === 0}
-                              aria-label={`Move ${label} left`}
+                              aria-label={`Move ${label} up`}
                               className="rounded px-1.5 py-1 text-slate-300 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-35"
                             >
-                              ←
+                              ↑
                             </button>
                             <button
                               type="button"
                               onClick={() => moveColumn(index, 1)}
-                              disabled={index === draftColumnOrder.length - 1}
-                              aria-label={`Move ${label} right`}
+                              disabled={index === draftVariableOrder.length - 1}
+                              aria-label={`Move ${label} down`}
                               className="rounded px-1.5 py-1 text-slate-300 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-35"
                             >
-                              →
+                              ↓
                             </button>
                             <button
                               type="button"
-                              onClick={() => variableId ? toggleVariable(variableId) : toggleMetaColumn(key as TraceTableMetaColumnId)}
+                              onClick={() => variableId && toggleVariable(variableId)}
                               aria-label={`Remove ${label}`}
                               className="rounded px-1.5 py-1 text-red-200 hover:bg-red-500/10"
                             >
@@ -508,22 +535,13 @@ export const TraceTableColumnDesigner = ({
                             </button>
                           </div>
                         </div>
-                        <label className="mt-2 block text-xs text-slate-400">
-                          Column header for {label}
-                          <input
-                            type="text"
-                            value={draftAliases[key] ?? (variableId ? draftAliases[variableId] : undefined) ?? label}
-                            onChange={event => setDraftAliases(current => ({ ...current, [key]: event.target.value }))}
-                            className="mt-1 w-full rounded-md border border-slate-600 bg-slate-950 px-2.5 py-1.5 text-sm text-slate-100 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
-                          />
-                        </label>
                       </li>
                     )
                   })}
                 </ol>
               ) : (
                 <p className="mt-3 rounded-md border border-dashed border-slate-700 px-4 py-8 text-center text-sm text-slate-500">
-                  No columns selected. Choose columns from the available list.
+                  No variable columns selected. Choose variables from the available list.
                 </p>
               )}
             </section>
