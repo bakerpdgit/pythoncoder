@@ -9,6 +9,15 @@ export type TraceTableRowMode = 'compact' | 'every-line'
 /** Whether the table follows the discovered catalogue or an explicit column list. */
 export type TraceTableColumnMode = 'auto' | 'custom'
 
+/** Selectable execution context columns. Namespacing prevents collisions with source IDs. */
+export type TraceTableMetaColumnId =
+  | 'meta:function'
+  | 'meta:call-depth'
+  | 'meta:call-number'
+
+/** One configurable table column after the fixed Step/Line leading columns. */
+export type TraceTableColumnKey = TraceTableMetaColumnId | `variable:${TraceVariableId}`
+
 /**
  * Per-source display choices for a trace table.  `variableIds` deliberately
  * retains IDs which are not in the current catalogue: a source may be run
@@ -18,6 +27,10 @@ export interface TraceTablePreferences {
   rowMode: TraceTableRowMode
   columnMode: TraceTableColumnMode
   variableIds: TraceVariableId[]
+  /** Retained as a convenient selection list and for migration from stage 3 preferences. */
+  metaColumnIds: TraceTableMetaColumnId[]
+  /** Mixed left-to-right ordering of metadata and source-variable columns. */
+  columnOrder: TraceTableColumnKey[]
   aliases: Record<TraceVariableId, string>
   /** Last known friendly labels, used when a selected variable is not rediscovered yet. */
   cachedDefaultLabels: Record<TraceVariableId, string>

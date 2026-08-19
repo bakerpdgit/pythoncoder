@@ -47,23 +47,37 @@ const project = vi.mocked(projectTraceTable)
 describe('TraceTable', () => {
   beforeEach(() => {
     localStorage.clear()
-    project.mockImplementation((_session, { showLine, variableIds }) => ({
+    project.mockImplementation((_session, { showLine, variableIds, metaColumnIds = [], columnOrder = [] }) => ({
       columns: variableIds.map(variableId => ({
         variableId,
         label: variableId === 'first' ? 'x' : 'y',
       })),
+      metadataColumns: metaColumnIds.map(id => ({ id, label: id })),
+      displayColumns: columnOrder.map(key => key.startsWith('variable:')
+        ? {
+            kind: 'variable' as const,
+            key,
+            variableId: key.slice('variable:'.length),
+            label: key.endsWith('first') ? 'x' : 'y',
+          }
+        : { kind: 'metadata' as const, key, metadataId: key, label: key }),
       rows: showLine
         ? [
-            { id: 'line-7', sequences: [4], line: 7, cells: {} },
             {
-              id: 'line-8', sequences: [5], line: 8,
+              id: 'line-7', sequence: 4, sequences: [4], line: 7, cells: {},
+              metadata: { functionName: '<module>', callDepth: 0, callId: 1, callNumber: null },
+            },
+            {
+              id: 'line-8', sequence: 5, sequences: [5], line: 8,
+              metadata: { functionName: '<module>', callDepth: 0, callId: 1, callNumber: null },
               cells: {
                 first: { variableId: 'first', callId: null, sequence: 5, state: { status: 'value', value: value(1) }, outcome: 'value' },
               },
             },
           ]
         : [{
-            id: 'write-5', sequences: [5],
+            id: 'write-5', sequence: 5, sequences: [5],
+            metadata: { functionName: '<module>', callDepth: 0, callId: 1, callNumber: null },
             cells: {
               // An explicit write still belongs in the table even if it kept the old value.
               first: { variableId: 'first', callId: null, sequence: 5, state: { status: 'value', value: value(1) }, outcome: 'value' },
@@ -79,7 +93,10 @@ describe('TraceTable', () => {
     expect(within(table).getByRole('columnheader', { name: 'Step' })).toBeInTheDocument()
     expect(within(table).getByRole('columnheader', { name: 'y' })).toBeInTheDocument()
     expect(within(table).getByRole('columnheader', { name: 'x' })).toBeInTheDocument()
-    expect(project).toHaveBeenLastCalledWith(session, { variableIds: ['second', 'first'], showLine: false })
+    expect(project).toHaveBeenLastCalledWith(session, {
+      variableIds: ['second', 'first'], metaColumnIds: [],
+      columnOrder: ['variable:second', 'variable:first'], showLine: false,
+    })
   })
 
   it('switches from compact rows to every-line rows', async () => {
@@ -89,7 +106,10 @@ describe('TraceTable', () => {
     expect(screen.getByRole('button', { name: 'Compact' })).toHaveAttribute('aria-pressed', 'true')
     await user.click(screen.getByRole('button', { name: 'Every line' }))
 
-    expect(project).toHaveBeenLastCalledWith(session, { variableIds: ['second', 'first'], showLine: true })
+    expect(project).toHaveBeenLastCalledWith(session, {
+      variableIds: ['second', 'first'], metaColumnIds: [],
+      columnOrder: ['variable:second', 'variable:first'], showLine: true,
+    })
     expect(screen.getByRole('button', { name: 'Every line' })).toHaveAttribute('aria-pressed', 'true')
     expect(screen.getByRole('columnheader', { name: 'Line' })).toBeInTheDocument()
     expect(screen.getByRole('rowheader', { name: 'Line 7' })).toBeInTheDocument()
@@ -106,15 +126,46 @@ describe('TraceTable', () => {
     await user.type(xHeader, 'Current x')
     await user.click(screen.getByRole('button', { name: 'Apply columns' }))
 
-    expect(project).toHaveBeenLastCalledWith(session, { variableIds: ['first', 'second'], showLine: false })
+    expect(project).toHaveBeenLastCalledWith(session, {
+      variableIds: ['first', 'second'], metaColumnIds: [],
+      columnOrder: ['variable:first', 'variable:second'], showLine: false,
+    })
     const table = screen.getByRole('table', { name: 'Trace event history' })
     const headers = within(table).getAllByRole('columnheader').map(header => header.textContent)
     expect(headers).toEqual(['Step', 'Current x', 'y'])
 
     unmount()
     render(<TraceTable session={session} />)
-    expect(project).toHaveBeenLastCalledWith(session, { variableIds: ['first', 'second'], showLine: false })
+    expect(project).toHaveBeenLastCalledWith(session, {
+      variableIds: ['first', 'second'], metaColumnIds: [],
+      columnOrder: ['variable:first', 'variable:second'], showLine: false,
+    })
     expect(screen.getByRole('columnheader', { name: 'Current x' })).toBeInTheDocument()
+  })
+
+  it('interleaves selectable call metadata with variables and renders module context clearly', async () => {
+    const user = userEvent.setup()
+    render(<TraceTable session={session} />)
+
+    await user.click(screen.getByRole('button', { name: 'Columns (2)' }))
+    await user.click(screen.getByRole('checkbox', { name: /Call #.*stable invocation number/i }))
+    await user.click(screen.getByRole('button', { name: 'Move Call # left' }))
+    await user.click(screen.getByRole('button', { name: 'Move Call # left' }))
+    const callHeader = screen.getByRole('textbox', { name: 'Column header for Call #' })
+    await user.clear(callHeader)
+    await user.type(callHeader, 'Invocation')
+    await user.click(screen.getByRole('button', { name: 'Apply columns' }))
+
+    expect(project).toHaveBeenLastCalledWith(session, {
+      variableIds: ['second', 'first'], metaColumnIds: ['meta:call-number'],
+      columnOrder: ['meta:call-number', 'variable:second', 'variable:first'], showLine: false,
+    })
+    const table = screen.getByRole('table', { name: 'Trace event history' })
+    expect(within(table).getAllByRole('columnheader').map(header => header.textContent))
+      .toEqual(['Step', 'Invocation', 'y', 'x'])
+    expect(within(table).getByRole('cell', { name: '—' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Columns (3)' }))
+    expect(screen.getByRole('radio', { name: /Automatic/ })).toBeChecked()
   })
 
   it('restores row layout independently for each source', async () => {
@@ -143,8 +194,11 @@ describe('TraceTable', () => {
     const stringNode: InspectorNode = { kind: 'primitive', type: 'str', value: 'hello', summary: "'hello'" }
     project.mockReturnValue({
       columns: [{ variableId: 'first', label: 'x' }],
+      metadataColumns: [],
+      displayColumns: [{ kind: 'variable', key: 'variable:first', variableId: 'first', label: 'x' }],
       rows: [{
-        id: 'string-write', sequence: 5, sequences: [5], metadata: {},
+        id: 'string-write', sequence: 5, sequences: [5],
+        metadata: { functionName: '<module>', callDepth: 0, callId: 1, callNumber: null },
         cells: {
           first: {
             variableId: 'first', callId: null, sequence: 5,
@@ -162,7 +216,7 @@ describe('TraceTable', () => {
   })
 
   it('shows an empty-state message before a run has events', () => {
-    project.mockReturnValue({ columns: [], rows: [] } as ReturnType<typeof projectTraceTable>)
+    project.mockReturnValue({ columns: [], metadataColumns: [], displayColumns: [], rows: [] })
     render(<TraceTable session={{ ...session, events: [] }} />)
 
     expect(screen.getByRole('status')).toHaveTextContent('Run code to capture trace events.')

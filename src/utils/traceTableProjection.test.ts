@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type {
   TraceBindingDelta,
+  TraceCallActivation,
   TraceExecutionEvent,
   TraceVariableDefinition,
   TraceWriteMarker,
@@ -63,7 +64,11 @@ function event(
   }
 }
 
-function session(events: TraceExecutionEvent[], variables: TraceVariableDefinition[] = [definition(x, 'x'), definition(y, 'y')]) {
+function session(
+  events: TraceExecutionEvent[],
+  variables: TraceVariableDefinition[] = [definition(x, 'x'), definition(y, 'y')],
+  calls: TraceCallActivation[] = [],
+) {
   return mergeTraceBatch(
     createTraceSession({ id: 'trace-1', source: { path: 'main.py' }, startedAt: 1 }),
     {
@@ -71,6 +76,7 @@ function session(events: TraceExecutionEvent[], variables: TraceVariableDefiniti
       sessionId: 'trace-1',
       batchSequence: 0,
       variables,
+      calls,
       events,
     },
   )
@@ -269,5 +275,145 @@ describe('projectTraceTable cell identity and history', () => {
     expect(after.columns.map(column => column.variableId)).toEqual([y, x])
     expect(after.rows[0].cells[y].value).toEqual(primitive(2))
     expect(after.rows[0].sequences).toEqual([0, 1])
+  })
+})
+
+describe('projectTraceTable execution metadata', () => {
+  const activation = (
+    id: number,
+    parentId: number | null,
+    qualifiedName: string,
+    depth: number,
+    startedAtSequence: number,
+  ): TraceCallActivation => ({
+    id,
+    parentId,
+    qualifiedName,
+    functionName: qualifiedName.split('.').at(-1) ?? qualifiedName,
+    depth,
+    startedAtSequence,
+  })
+
+  it('preserves mixed custom column order after the fixed leading columns', () => {
+    const result = projectTraceTable(session([
+      event(0, { bindingDeltas: [delta(x, 1)], writes: [write(x)] }),
+    ]), {
+      variableIds: [x, y],
+      metaColumnIds: ['meta:function', 'meta:call-depth'],
+      columnOrder: [
+        `variable:${x}`,
+        'meta:function',
+        `variable:${y}`,
+        'meta:call-depth',
+      ],
+      showLine: false,
+    })
+
+    expect(result.displayColumns.map(column => column.key)).toEqual([
+      `variable:${x}`,
+      'meta:function',
+      `variable:${y}`,
+      'meta:call-depth',
+    ])
+    expect(result.columns.map(column => column.variableId)).toEqual([x, y])
+    expect(result.metadataColumns.map(column => column.id)).toEqual(['meta:function', 'meta:call-depth'])
+  })
+
+  it('numbers user invocations by start order through recursion and unwind', () => {
+    const calls = [
+      activation(10, null, '<module>', 0, 0),
+      activation(42, 10, 'factorial', 1, 1),
+      activation(90, 42, 'factorial', 2, 3),
+    ]
+    const recorded = session([
+      event(0, { callId: 10, callStack: [10], functionName: '<module>' }),
+      event(1, { kind: 'call-entered', callId: 42, callStack: [10, 42], functionName: 'factorial' }),
+      event(2, { callId: 42, callStack: [10, 42], functionName: 'factorial' }),
+      event(3, { kind: 'call-entered', callId: 90, callStack: [10, 42, 90], functionName: 'factorial' }),
+      event(4, { callId: 90, callStack: [10, 42, 90], functionName: 'factorial' }),
+      event(5, { kind: 'call-returned', callId: 90, callStack: [10, 42, 90], functionName: 'factorial' }),
+      event(6, { callId: 42, callStack: [10, 42], functionName: 'factorial' }),
+      event(7, { kind: 'call-returned', callId: 42, callStack: [10, 42], functionName: 'factorial' }),
+      event(8, { callId: 10, callStack: [10], functionName: '<module>' }),
+    ], undefined, calls)
+
+    const result = projectTraceTable(recorded, {
+      variableIds: [],
+      columnOrder: ['meta:function', 'meta:call-depth', 'meta:call-number'],
+      showLine: true,
+    })
+
+    expect(result.rows.map(row => [
+      row.metadata.functionName,
+      row.metadata.callDepth,
+      row.metadata.callNumber,
+    ])).toEqual([
+      ['<module>', 0, null],
+      ['factorial', 1, 1],
+      ['factorial', 2, 2],
+      ['factorial', 1, 1],
+      ['<module>', 0, null],
+    ])
+  })
+
+  it('creates compact metadata-only rows for stable call regions', () => {
+    const recorded = session([
+      event(0, { callId: 1, callStack: [1] }),
+      event(1, { callId: 1, callStack: [1] }),
+      event(2, { kind: 'call-entered', callId: 2, callStack: [1, 2], functionName: 'outer' }),
+      event(3, { callId: 2, callStack: [1, 2], functionName: 'outer' }),
+      event(4, { kind: 'call-entered', callId: 3, callStack: [1, 2, 3], functionName: 'inner' }),
+      event(5, { kind: 'call-returned', callId: 3, callStack: [1, 2, 3], functionName: 'inner' }),
+      event(6, { callId: 2, callStack: [1, 2], functionName: 'outer' }),
+    ])
+    const result = projectTraceTable(recorded, {
+      variableIds: [],
+      columnOrder: ['meta:call-number'],
+      showLine: false,
+    })
+
+    expect(result.rows.map(row => row.sequences)).toEqual([[0, 1], [2, 3], [4], [5], [6]])
+    expect(result.rows.map(row => row.metadata.callNumber)).toEqual([null, 1, 2, 2, 1])
+  })
+
+  it('falls back to event stacks when the call catalogue is unavailable', () => {
+    const result = projectTraceTable(session([
+      event(0, { callId: 7, callStack: [7], functionName: '<module>' }),
+      event(1, { callId: 11, callStack: [7, 11], functionName: 'outer' }),
+      event(2, { callId: 15, callStack: [7, 11, 15], functionName: 'inner' }),
+    ]), { variableIds: [], columnOrder: ['meta:function'], showLine: true })
+
+    expect(result.rows.map(row => row.metadata)).toEqual([
+      { functionName: '<module>', callDepth: 0, callId: 7, callNumber: null },
+      { functionName: 'outer', callDepth: 1, callId: 11, callNumber: 1 },
+      { functionName: 'inner', callDepth: 2, callId: 15, callNumber: 2 },
+    ])
+  })
+
+  it('keeps executing-call metadata separate from a closure binding activation', () => {
+    const captured = localTraceVariableId('outer', 'captured')
+    const result = projectTraceTable(session([
+      event(0, {
+        callId: 3,
+        callStack: [1, 2, 3],
+        functionName: 'inner',
+        bindingDeltas: [delta(captured, 9, 2)],
+        writes: [write(captured, { callId: 2 })],
+      }),
+    ], [{
+      id: captured,
+      name: 'captured',
+      defaultLabel: 'outer.captured',
+      scope: { kind: 'local', owner: 'outer', functionName: 'outer' },
+      firstSeenSequence: 0,
+      lastSeenSequence: 0,
+    }]), {
+      variableIds: [captured],
+      columnOrder: [`variable:${captured}`, 'meta:function'],
+      showLine: true,
+    })
+
+    expect(result.rows[0].cells[captured].callId).toBe(2)
+    expect(result.rows[0].metadata).toMatchObject({ functionName: 'inner', callId: 3, callDepth: 2 })
   })
 })
