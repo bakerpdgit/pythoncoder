@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { InspectorNode } from '../../types'
 import type { TraceSession } from '../../types/traceTable'
 import { triggerDownload } from '../../utils/download'
-import { projectTraceTable } from '../../utils/traceTableProjection'
+import { projectTraceTable, type TraceTableProjection, type TraceTableProjectionRow } from '../../utils/traceTableProjection'
 import { TraceTable } from './TraceTable'
 
 vi.mock('../../utils/traceTableProjection', () => ({
@@ -49,6 +49,33 @@ const session: TraceSession = {
 
 const project = vi.mocked(projectTraceTable)
 const download = vi.mocked(triggerDownload)
+
+const makeRows = (
+  count: number,
+  options: { prefix?: string; functionName?: (index: number) => string } = {},
+): TraceTableProjectionRow[] => Array.from({ length: count }, (_, index) => ({
+  id: `${options.prefix ?? 'large'}-${index + 1}`,
+  kind: 'line',
+  sequence: index + 1,
+  sequences: [index + 1],
+  line: index + 1,
+  cells: {},
+  metadata: {
+    functionName: options.functionName?.(index) ?? '<module>',
+    callDepth: 0,
+    callId: 1,
+    callNumber: null,
+  },
+  annotations: [],
+  teachingNote: null,
+}))
+
+const projectionWithRows = (rows: TraceTableProjectionRow[]): TraceTableProjection => ({
+  columns: [{ variableId: 'first', label: 'x' }],
+  metadataColumns: [],
+  displayColumns: [{ kind: 'variable', key: 'variable:first', variableId: 'first', label: 'x' }],
+  rows,
+})
 
 describe('TraceTable', () => {
   beforeEach(() => {
@@ -203,17 +230,17 @@ describe('TraceTable', () => {
       displayColumns: [{ kind: 'variable', key: 'variable:first', variableId: 'first', label: 'x' }],
       rows: [
         {
-          id: 'call-1', kind: 'event', sequence: 1, sequences: [1], line: 3, cells: {},
+          id: 'call-1', stepNumber: 1, kind: 'event', sequence: 1, sequences: [1], line: 3, cells: {},
           metadata: { functionName: 'factorial', callDepth: 1, callId: 2, callNumber: 1 },
           annotations: [], teachingNote: 'Entered factorial (call #1).',
         },
         {
-          id: 'call-2', kind: 'line', sequence: 2, sequences: [2], line: 4, cells: {},
+          id: 'call-2', stepNumber: 2, kind: 'line', sequence: 2, sequences: [2], line: 4, cells: {},
           metadata: { functionName: 'factorial', callDepth: 2, callId: 3, callNumber: 2 },
           annotations: [], teachingNote: 'For loop iteration 1.',
         },
         {
-          id: 'helper', kind: 'event', sequence: 3, sequences: [3], line: 9, cells: {},
+          id: 'helper', stepNumber: 3, kind: 'event', sequence: 3, sequences: [3], line: 9, cells: {},
           metadata: { functionName: 'helper', callDepth: 1, callId: 4, callNumber: 3 },
           annotations: [], teachingNote: 'Entered helper (call #3).',
         },
@@ -230,7 +257,7 @@ describe('TraceTable', () => {
     await user.click(screen.getByRole('button', { name: 'Download CSV' }))
     expect(download).toHaveBeenCalledWith(
       'main-trace.csv',
-      expect.stringContaining('Step,Context,x\r\nStep 1,For loop iteration 1.,'),
+      expect.stringContaining('Step,Context,x\r\nStep 2,For loop iteration 1.,'),
       'text/csv;charset=utf-8',
     )
 
@@ -360,4 +387,100 @@ describe('TraceTable', () => {
     expect(screen.getByText('Error')).toBeInTheDocument()
     expect(screen.getByRole('alert')).toHaveTextContent('Python execution failed.')
   })
+
+  it('presents a retention limit as an explicit non-error terminal status', () => {
+    const message = 'Trace event limit of 10,000 reached; execution stopped with all recorded history retained.'
+    render(<TraceTable session={{
+      ...session,
+      status: 'limit-reached',
+      error: message,
+      retention: { eventLimit: 10_000, retainedEventCount: 10_000, droppedEventCount: 0, limitReached: true },
+    }} />)
+
+    const notice = screen.getByText(message)
+    expect(notice).toHaveAttribute('role', 'status')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.getByText('Limit reached')).toBeInTheDocument()
+  })
+
+  it('incrementally renders thousands of rows while preserving a semantic table and complete CSV export', async () => {
+    const user = userEvent.setup()
+    project.mockReturnValue(projectionWithRows(makeRows(2_500)))
+    render(<TraceTable session={session} />)
+
+    const table = screen.getByRole('table', { name: 'Trace event history' })
+    expect(within(table).getAllByRole('rowheader')).toHaveLength(200)
+    expect(within(table).getByRole('columnheader', { name: 'Step' })).toHaveAttribute('scope', 'col')
+    expect(within(table).getAllByRole('rowheader')[0]).toHaveAttribute('scope', 'row')
+    expect(screen.getByText('Showing 200 of 2,500 matching rows.')).toHaveAttribute('aria-live', 'polite')
+    expect(within(table).queryByRole('rowheader', { name: 'Step 201' })).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Show 200 more rows' }))
+    expect(within(table).getAllByRole('rowheader')).toHaveLength(400)
+    expect(within(table).getByRole('rowheader', { name: 'Step 400' })).toBeInTheDocument()
+    expect(screen.getByText('Showing 400 of 2,500 matching rows.')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Download CSV' }))
+    expect(download).toHaveBeenCalledTimes(1)
+    const csv = download.mock.calls[0][1]
+    expect(csv).toContain('Step 2500')
+    expect(csv.split('\r\n')).toHaveLength(2_501)
+  }, 10_000)
+
+  it('resets an expanded window for filters, layout mode, and source changes', async () => {
+    const user = userEvent.setup()
+    const rows = makeRows(700, {
+      functionName: index => index < 350 ? 'alpha' : 'beta',
+    })
+    project.mockReturnValue(projectionWithRows(rows))
+    const { rerender } = render(<TraceTable session={session} />)
+
+    await user.click(screen.getByRole('button', { name: 'Show 200 more rows' }))
+    expect(screen.getAllByRole('rowheader')).toHaveLength(400)
+
+    await user.selectOptions(screen.getByLabelText('Filter trace rows by function'), 'alpha')
+    await waitFor(() => expect(screen.getAllByRole('rowheader')).toHaveLength(200))
+    expect(screen.getByText('Showing 200 of 350 matching rows.')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Show 150 more rows' }))
+    expect(screen.getAllByRole('rowheader')).toHaveLength(350)
+
+    await user.click(screen.getByRole('button', { name: 'Every line' }))
+    await waitFor(() => expect(screen.getAllByRole('rowheader')).toHaveLength(200))
+    await user.click(screen.getByRole('button', { name: 'Show 150 more rows' }))
+    expect(screen.getAllByRole('rowheader')).toHaveLength(350)
+
+    rerender(<TraceTable session={{ ...session, source: { path: 'lesson-two.py' } }} />)
+    await waitFor(() => expect(screen.getAllByRole('rowheader')).toHaveLength(200))
+    expect(screen.getByLabelText('Filter trace rows by function')).toHaveValue('')
+    expect(screen.getByText('Showing 200 of 700 matching rows.')).toBeInTheDocument()
+  }, 10_000)
+
+  it('keeps an expanded row window when a running trace appends events', async () => {
+    const user = userEvent.setup()
+    project.mockImplementation(currentSession => projectionWithRows(makeRows(currentSession.events.length)))
+    const runningSession = {
+      ...session,
+      status: 'recording' as const,
+      events: Array.from({ length: 450 }, (_, index) => ({
+        ...session.events[0],
+        sequence: index + 1,
+      })),
+    }
+    const { rerender } = render(<TraceTable session={runningSession} />)
+
+    await user.click(screen.getByRole('button', { name: 'Show 200 more rows' }))
+    expect(screen.getAllByRole('rowheader')).toHaveLength(400)
+
+    rerender(<TraceTable session={{
+      ...runningSession,
+      events: Array.from({ length: 600 }, (_, index) => ({
+        ...session.events[0],
+        sequence: index + 1,
+      })),
+    }} />)
+
+    expect(screen.getAllByRole('rowheader')).toHaveLength(400)
+    expect(screen.getByText('Showing 400 of 600 matching rows.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Show 200 more rows' })).toBeInTheDocument()
+  }, 10_000)
 })

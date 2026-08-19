@@ -10,6 +10,7 @@ import type {
   TraceWorkerDeletedValue,
   TraceWorkerEndMessage,
   TraceWorkerEvent,
+  TraceWorkerLimitReachedMessage,
   TraceWorkerStopAckMessage,
   TraceWorkerVariableValue,
   TraceWriteKind,
@@ -295,6 +296,73 @@ function preservesFailure(status: TraceSession['status']): boolean {
   return status === 'error' || status === 'limit-reached'
 }
 
+function limitProtocolError(session: TraceSession, message: TraceWorkerLimitReachedMessage): string | null {
+  const countError = batchCountError(session, message.batchCount)
+  if (countError) return countError
+  const configuredLimit = session.retention?.eventLimit ?? message.eventLimit
+  if (message.eventLimit !== configuredLimit) {
+    return `Trace table limit acknowledgement reported ${message.eventLimit} events; expected ${configuredLimit}.`
+  }
+  if (message.eventCount !== message.eventLimit || session.events.length !== message.eventCount) {
+    return `Trace table retained ${session.events.length} of ${message.eventCount} acknowledged events at its ${message.eventLimit} event limit.`
+  }
+  if (message.droppedEventCount !== 0) {
+    return `Trace table discarded ${message.droppedEventCount} events at its retention limit.`
+  }
+  const expectedLastSequence = message.eventCount === 0 ? null : message.eventCount - 1
+  if (message.lastSequence !== expectedLastSequence) {
+    return `Trace table limit acknowledgement ended at sequence ${String(message.lastSequence)}; expected ${String(expectedLastSequence)}.`
+  }
+  for (let index = 0; index < session.events.length; index += 1) {
+    if (session.events[index].sequence !== index) {
+      return `Trace table event history has a gap at sequence ${index}.`
+    }
+  }
+  return null
+}
+
+/**
+ * Validate the final flush and mark execution as deliberately stopped at the
+ * retention bound. This is terminal and cannot be overwritten by completion.
+ */
+export function finalizeTraceWorkerLimitReached(
+  session: TraceSession,
+  message: TraceWorkerLimitReachedMessage,
+  endedAt = Date.now(),
+): TraceSession {
+  if (message.sessionId !== session.id) return session
+  if (preservesFailure(session.status) || session.status === 'stopped') return session
+  const protocolError = limitProtocolError(session, message)
+  if (protocolError) {
+    return {
+      ...session,
+      status: 'error',
+      error: protocolError,
+      truncated: true,
+      endedAt,
+      retention: {
+        eventLimit: session.retention?.eventLimit ?? message.eventLimit,
+        retainedEventCount: session.events.length,
+        droppedEventCount: message.droppedEventCount,
+        limitReached: true,
+      },
+    }
+  }
+  return {
+    ...session,
+    status: 'limit-reached',
+    error: `Trace event limit of ${message.eventLimit.toLocaleString()} reached; execution stopped with all recorded history retained.`,
+    truncated: false,
+    endedAt,
+    retention: {
+      eventLimit: message.eventLimit,
+      retainedEventCount: message.eventCount,
+      droppedEventCount: 0,
+      limitReached: true,
+    },
+  }
+}
+
 /** Apply a terminal worker message without allowing success to erase data loss. */
 export function finalizeTraceWorkerEnd(
   session: TraceSession,
@@ -306,7 +374,13 @@ export function finalizeTraceWorkerEnd(
   if (countError) return { ...session, status: 'error', error: countError, truncated: true, endedAt }
   if (preservesFailure(session.status) || session.status === 'stopped') return session
   if (message.status === 'error') {
-    return { ...session, status: 'error', error: message.error ?? 'Trace table recording failed.', endedAt }
+    return {
+      ...session,
+      status: 'error',
+      error: message.error ?? 'Trace table recording failed.',
+      truncated: message.traceDataIncomplete ? true : session.truncated,
+      endedAt,
+    }
   }
   if (message.status === 'stopped') return { ...session, status: 'stopped', error: undefined, endedAt }
   return { ...session, status: 'completed', error: undefined, endedAt }

@@ -13,6 +13,7 @@ type WireEvent = {
   stack: Array<{ callId: number; function: string }>
   writes?: Array<{ name: string; sourceId: string; activationSourceId: string; callId: number | null; operation: string; changed?: boolean; value?: { value?: unknown } }>
   variables?: Array<{ name: string; sourceId: string; activationSourceId: string; callId: number | null; value?: { value?: unknown } }>
+  activeBindings?: string[]
   deletes?: Array<{ name: string; sourceId: string; operation: string }>
   loopBoundary?: { loopId: string; loopKind: string; iteration: number } | null
   exception?: { type: string; message: string }
@@ -28,6 +29,8 @@ type RecorderResult = {
   inspectorSnapshots: InspectorSnapshot[]
   stopAcks: number
   inputReads: number
+  limitAcks: Array<{ eventCount: number; eventLimit: number; lastSequence: number }>
+  userState: { caught: unknown; continued: unknown }
 }
 
 const workerPath = resolve(process.cwd(), 'src/workers/tracer.worker.ts')
@@ -52,6 +55,8 @@ function record(code: string, options: {
   traceCommand?: number
   stopRequested?: boolean
   stopOnInput?: boolean
+  eventLimit?: number
+  rejectBatch?: boolean
 } = {}): RecorderResult {
   if (!pythonAvailable) throw new Error('Native Python is unavailable; recorder integration tests cannot run.')
 
@@ -64,7 +69,10 @@ inspector_snapshots = []
 stop_requested = ${options.stopRequested === true ? 'True' : 'False'}
 stop_acks = 0
 input_reads = 0
+limit_acks = []
 def js_trace_table_batch(payload):
+    if ${options.rejectBatch === true ? 'True' : 'False'}:
+        raise RuntimeError("bridge rejected trace batch")
     batches.append(json.loads(payload))
 def js_trace_callback(*args):
     global stop_requested
@@ -90,10 +98,13 @@ def js_trace_table_stop_ack():
     global stop_acks
     if stop_acks == 0:
         stop_acks = 1
+def js_trace_table_limit_reached(event_count, event_limit, last_sequence):
+    limit_acks.append({"eventCount": event_count, "eventLimit": event_limit, "lastSequence": last_sequence})
 
 initial_breakpoints = {}
 pause_on_first_line = ${options.pauseOnFirstLine === true ? 'True' : 'False'}
 trace_table_enabled = True
+trace_table_event_limit = ${options.eventLimit ?? 10_000}
 user_code_str = ${JSON.stringify(code)}
 
 ${setupCode}
@@ -104,7 +115,11 @@ try:
 except BaseException as exc:
     run_error = f'{type(exc).__name__}: {exc}'
 finally:
-    trace_table_flush()
+    try:
+        trace_table_flush()
+    except BaseException as exc:
+        if run_error is None:
+            run_error = f'{type(exc).__name__}: {exc}'
     sys.settrace(None)
 
 print(json.dumps({
@@ -113,6 +128,11 @@ print(json.dumps({
     'inspectorSnapshots': inspector_snapshots,
     'stopAcks': stop_acks,
     'inputReads': input_reads,
+    'limitAcks': limit_acks,
+    'userState': {
+        'caught': user_namespace.get('caught'),
+        'continued': user_namespace.get('continued'),
+    },
 }, separators=(',', ':')))
 `
   const result = spawnSync('python', ['-'], { input: harness, encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 })
@@ -332,6 +352,54 @@ describe.skipIf(!pythonAvailable)('tracer worker embedded Python recorder', () =
     expect(lambdaBindings[0].activationSourceId).not.toBe(lambdaBindings[1].activationSourceId)
   })
 
+  it('keeps a nonlocal bound to its lexical owner when a closure is called before being returned', () => {
+    const result = record([
+      'def helper(callback):',
+      '    x = 99',
+      '    callback()',
+      'def make():',
+      '    x = 1',
+      '    def increment():',
+      '        nonlocal x',
+      '        x += 1',
+      '    helper(increment)',
+      '    return x',
+      'answer = make()',
+    ].join('\n'))
+    const recordedEvents = events(result)
+    const makeCall = recordedEvents.find(event => event.type === 'function-entry' && event.function === 'make')?.callId
+    const nonlocalWrite = recordedEvents
+      .filter(event => event.function === 'increment')
+      .flatMap(event => event.writes ?? [])
+      .find(write => write.name === 'x')
+
+    expect(result.error).toBeNull()
+    expect(nonlocalWrite).toEqual(expect.objectContaining({
+      sourceId: 'local:make:x',
+      activationSourceId: `local:make:x@${makeCall}`,
+      callId: makeCall,
+    }))
+  })
+
+  it('resolves an inline callback lambda through its active lexical parent, not a same-named caller local', () => {
+    const result = record([
+      'def helper(callback):',
+      '    x = 99',
+      '    return callback()',
+      'def make():',
+      '    x = 1',
+      '    return helper(lambda: x)',
+      'answer = make()',
+    ].join('\n'))
+    const recordedEvents = events(result)
+    const makeCall = recordedEvents.find(event => event.type === 'function-entry' && event.function === 'make')?.callId
+    const lambdaEntry = recordedEvents
+      .find(event => event.type === 'function-entry' && event.function === '<lambda>')
+
+    expect(result.error).toBeNull()
+    expect(lambdaEntry?.activeBindings).toContain(`local:make:x@${makeCall}`)
+  })
+
   it('falls back safely when user introspection hooks raise', () => {
     const result = record([
       'class Hostile:',
@@ -348,6 +416,94 @@ describe.skipIf(!pythonAvailable)('tracer worker embedded Python recorder', () =
 
     expect(result.error).toBeNull()
     expect(afterWrite).toEqual(expect.objectContaining({ sourceId: 'global:after', changed: true }))
+  })
+
+  it('serializes non-finite floats into JSON-safe InspectorNode values', () => {
+    const result = record([
+      'not_a_number = float("nan")',
+      'positive = float("inf")',
+      'negative = float("-inf")',
+    ].join('\n'))
+    const writes = events(result).flatMap(event => event.writes ?? [])
+    const serialized = (name: string) => writes.find(write => write.name === name)?.value?.value
+
+    expect(result.error).toBeNull()
+    expect(serialized('not_a_number')).toBe('NaN')
+    expect(serialized('positive')).toBe('Infinity')
+    expect(serialized('negative')).toBe('-Infinity')
+  })
+
+  it('surfaces a rejected transport batch instead of clearing it silently', () => {
+    const result = record('value = 1\n', { rejectBatch: true })
+
+    expect(result.batches).toEqual([])
+    expect(result.error).toContain('RuntimeError: bridge rejected trace batch')
+  })
+
+  it('retains a rejected batch for terminal failure even when user code catches the trace-hook exception', () => {
+    const protectedAssignments = Array.from({ length: 80 }, (_, index) => `    value_${index} = ${index}`)
+    const result = record([
+      'caught = False',
+      'continued = False',
+      'try:',
+      ...protectedAssignments,
+      'except BaseException:',
+      '    caught = True',
+      'continued = True',
+    ].join('\n'), { rejectBatch: true })
+
+    expect(result.userState).toEqual({ caught: true, continued: true })
+    expect(result.batches).toEqual([])
+    expect(result.error).toContain('RuntimeError: bridge rejected trace batch')
+
+    const bridgeStart = workerSource.indexOf("pyodide.globals.set('js_trace_table_batch'")
+    const bridgeEnd = workerSource.indexOf("pyodide.globals.set('js_trace_stop_requested'", bridgeStart)
+    const bridge = workerSource.slice(bridgeStart, bridgeEnd)
+    const terminalFlush = workerSource.indexOf("await pyodide.runPythonAsync('trace_table_flush()')")
+    const terminalCatch = workerSource.indexOf('\n  } catch (err) {', terminalFlush)
+    const successfulExecutionPath = workerSource.slice(Math.max(0, terminalFlush - 20), terminalCatch)
+
+    expect(bridge).toContain('traceTableTransportError =')
+    expect(bridge).toContain('throw error')
+    expect(terminalFlush).toBeGreaterThanOrEqual(0)
+    expect(successfulExecutionPath).toContain("await pyodide.runPythonAsync('trace_table_flush()')")
+    expect(successfulExecutionPath).toContain('if (traceTableTransportError) throw new Error')
+    expect(successfulExecutionPath).not.toContain("try { await pyodide.runPythonAsync('trace_table_flush()')")
+    expect(workerSource).toContain('traceDataIncomplete: traceTableTransportError !== null')
+  })
+
+  it('does not execute collection-subclass or object access hooks during serialization', () => {
+    const result = record([
+      'list_hook_calls = 0',
+      'object_hook_calls = 0',
+      'class HostileList(list):',
+      '    def __len__(self):',
+      '        global list_hook_calls',
+      '        list_hook_calls += 1',
+      '        return super().__len__()',
+      '    def __iter__(self):',
+      '        global list_hook_calls',
+      '        list_hook_calls += 1',
+      '        return super().__iter__()',
+      '    def __getitem__(self, key):',
+      '        global list_hook_calls',
+      '        list_hook_calls += 1',
+      '        return super().__getitem__(key)',
+      'class HostileObject:',
+      '    def __getattribute__(self, name):',
+      '        global object_hook_calls',
+      '        object_hook_calls += 1',
+      '        return object.__getattribute__(self, name)',
+      'items = HostileList([1, 2, 3])',
+      'item = HostileObject()',
+      'after_list_hooks = list_hook_calls',
+      'after_object_hooks = object_hook_calls',
+    ].join('\n'))
+    const writes = events(result).flatMap(event => event.writes ?? [])
+
+    expect(result.error).toBeNull()
+    expect(writes.find(write => write.name === 'after_list_hooks')?.value?.value).toBe(0)
+    expect(writes.find(write => write.name === 'after_object_hooks')?.value?.value).toBe(0)
   })
 
   it('marks each entered loop body with an ordered loop boundary', () => {
@@ -469,8 +625,72 @@ describe.skipIf(!pythonAvailable)('tracer worker embedded Python recorder', () =
 
     expect(result.error).toBeNull()
     expect(result.batches.length).toBeGreaterThan(1)
-    expect(sequences).toEqual(Array.from({ length: sequences.length }, (_, index) => index + 1))
+    expect(sequences).toEqual(Array.from({ length: sequences.length }, (_, index) => index))
     expect(result.batches.at(-1)?.events.length).toBeGreaterThan(0)
+  })
+
+  it('stops cleanly at an exact full-batch limit without posting an empty batch', () => {
+    const code = Array.from({ length: 70 }, (_, index) => `value = ${index}`).join('\n')
+    const result = record(code, { eventLimit: 48 })
+    const flattened = events(result)
+
+    expect(result.error).toBe('_TraceTableLimitReached: ')
+    expect(result.batches.map(batch => batch.events.length)).toEqual([48])
+    expect(flattened.map(event => event.sequence)).toEqual(Array.from({ length: 48 }, (_, index) => index))
+    expect(result.limitAcks).toEqual([{ eventCount: 48, eventLimit: 48, lastSequence: 47 }])
+  })
+
+  it('flushes a final partial batch and its catalogue before acknowledging the limit', () => {
+    const code = Array.from({ length: 70 }, (_, index) => `value_${index} = ${index}`).join('\n')
+    const result = record(code, { eventLimit: 49 })
+    const flattened = events(result)
+
+    expect(result.error).toBe('_TraceTableLimitReached: ')
+    expect(result.batches.map(batch => batch.events.length)).toEqual([48, 1])
+    expect(flattened.map(event => event.sequence)).toEqual(Array.from({ length: 49 }, (_, index) => index))
+    const finalWrites = flattened.at(-1)?.writes ?? []
+    const finalCatalogueNames = result.batches.at(-1)?.catalogue.map(item => item.name) ?? []
+    expect(finalWrites).toHaveLength(1)
+    expect(finalCatalogueNames).toContain(finalWrites[0].name)
+    expect(result.limitAcks).toEqual([{ eventCount: 49, eventLimit: 49, lastSequence: 48 }])
+  })
+
+  it('makes the real worker limit bridge terminal outside user Python exception handling', () => {
+    const bridgeStart = workerSource.indexOf("pyodide.globals.set('js_trace_table_limit_reached'")
+    const bridgeEnd = workerSource.indexOf("pyodide.globals.set('js_trace_callback'", bridgeStart)
+    const bridge = workerSource.slice(bridgeStart, bridgeEnd)
+    const acknowledgement = bridge.indexOf("type: 'trace-table-limit-reached'")
+    const completion = bridge.indexOf("type: 'done'")
+    const terminalWait = bridge.indexOf('Atomics.wait(terminalWait, 0, 0)')
+
+    expect(bridgeStart).toBeGreaterThanOrEqual(0)
+    expect(bridge).toContain('collectUpdatedFiles()')
+    expect(acknowledgement).toBeGreaterThanOrEqual(0)
+    expect(completion).toBeGreaterThan(acknowledgement)
+    expect(terminalWait).toBeGreaterThan(completion)
+  })
+
+  it('bounds deeply nested and wide serialization while preserving top-level summaries', () => {
+    const result = record([
+      'wide = list(range(10000))',
+      'deep = current = []',
+      'for _ in range(20):',
+      '    child = []',
+      '    current.append(child)',
+      '    current = child',
+      'tree = [list(range(120)) for _ in range(120)]',
+      'marker = 1',
+    ].join('\n'))
+    const recorded = events(result)
+    const wide = recorded.flatMap(event => event.variables ?? []).find(item => item.name === 'wide')?.value as Record<string, unknown> | undefined
+    const serializedText = JSON.stringify(recorded)
+
+    expect(result.error).toBeNull()
+    expect(wide).toMatchObject({ type: 'list', length: 10000, summary: 'list[10000]', truncated: true })
+    expect((wide?.items as unknown[])?.length).toBe(120)
+    expect(serializedText).toContain('depth limit')
+    expect(serializedText).toContain('node limit')
+    expect(recorded.flatMap(event => event.writes ?? []).some(write => write.name === 'marker')).toBe(true)
   })
 })
 

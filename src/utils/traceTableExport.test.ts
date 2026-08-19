@@ -199,6 +199,16 @@ describe('trace table CSV export', () => {
     ])
   })
 
+  it('preserves original compact step numbers when exporting filtered rows', () => {
+    const filtered = row('4', 'factorial', 2, { stepNumber: 7 })
+    const csv = exportTraceTableCsv(projection({ rows: [filtered] }), {
+      rows: [filtered],
+      leadingColumn: 'step',
+    })
+
+    expect(csv.split('\r\n')[1]).toBe('Step 7,factorial,,2,')
+  })
+
   it('formats inspector values exactly like the current table UI', () => {
     expect(formatTraceTableInspectorSummary(primitive('abc'))).toBe('"abc"')
     expect(formatTraceTableInspectorSummary({ kind: 'sequence', type: 'list', length: 3 })).toBe('list • 3 items')
