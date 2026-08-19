@@ -3,6 +3,26 @@ import type { InspectorNode } from './index'
 /** Stable identity for a source-level variable, independent of a call activation. */
 export type TraceVariableId = string
 
+/** The amount of execution history shown by a trace table. */
+export type TraceTableRowMode = 'compact' | 'every-line'
+
+/** Whether the table follows the discovered catalogue or an explicit column list. */
+export type TraceTableColumnMode = 'auto' | 'custom'
+
+/**
+ * Per-source display choices for a trace table.  `variableIds` deliberately
+ * retains IDs which are not in the current catalogue: a source may be run
+ * again later and those columns should then return in the student's order.
+ */
+export interface TraceTablePreferences {
+  rowMode: TraceTableRowMode
+  columnMode: TraceTableColumnMode
+  variableIds: TraceVariableId[]
+  aliases: Record<TraceVariableId, string>
+  /** Last known friendly labels, used when a selected variable is not rediscovered yet. */
+  cachedDefaultLabels: Record<TraceVariableId, string>
+}
+
 /** Monotonically increasing identity for one invocation of user code. */
 export type TraceCallId = number
 

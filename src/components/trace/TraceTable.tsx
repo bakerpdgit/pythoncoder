@@ -1,9 +1,16 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { InspectorNode } from '../../types'
-import type { TraceSession, TraceVariableId } from '../../types/traceTable'
+import type { TraceSession, TraceTablePreferences } from '../../types/traceTable'
 import { projectTraceTable, type TraceTableProjectionCell } from '../../utils/traceTableProjection'
-
-type RowMode = 'compact' | 'every-line'
+import {
+  getStoredTraceTablePreferences,
+  persistTraceTablePreferences,
+  refreshTraceTableCachedLabels,
+  resolveTraceTableColumnIds,
+  resolveTraceTableColumnLabel,
+  traceTablePreferenceStorageKey,
+} from '../../utils/traceTablePreferences'
+import { TraceTableColumnDesigner, type TraceTableColumnDesignerResult } from './TraceTableColumnDesigner'
 
 const SESSION_STATUS_LABELS: Record<TraceSession['status'], string> = {
   recording: 'Recording',
@@ -16,11 +23,6 @@ const SESSION_STATUS_LABELS: Record<TraceSession['status'], string> = {
 
 interface TraceTableProps {
   session: TraceSession
-  /**
-   * Reserved for the future column designer. When absent, the whole discovered
-   * catalogue is displayed in its source discovery order.
-   */
-  variableIds?: TraceVariableId[]
 }
 
 const formatInspectorSummary = (node: InspectorNode): string => {
@@ -44,20 +46,60 @@ const formatTraceCell = (cell: TraceTableProjectionCell): string => {
 }
 
 /** A compact, teaching-oriented history of writes captured in a trace session. */
-export const TraceTable = ({ session, variableIds }: TraceTableProps) => {
-  const [rowMode, setRowMode] = useState<RowMode>('compact')
+export const TraceTable = ({ session }: TraceTableProps) => {
+  const preferenceKey = traceTablePreferenceStorageKey(session.source)
+  const [preferences, setPreferences] = useState<TraceTablePreferences>(
+    () => refreshTraceTableCachedLabels(getStoredTraceTablePreferences(session.source), session.variables),
+  )
+  const [isDesignerOpen, setIsDesignerOpen] = useState(false)
 
-  const discoveredVariableIds = useMemo(
+  useEffect(() => {
+    const restored = refreshTraceTableCachedLabels(getStoredTraceTablePreferences(session.source), session.variables)
+    setPreferences(restored)
+    persistTraceTablePreferences(session.source, restored)
+  // The encoded key is stable even though session.source is replaced with each session object.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [preferenceKey])
+
+  useEffect(() => {
+    setPreferences(current => {
+      const refreshed = refreshTraceTableCachedLabels(current, session.variables)
+      if (JSON.stringify(refreshed.cachedDefaultLabels) === JSON.stringify(current.cachedDefaultLabels)) return current
+      persistTraceTablePreferences(session.source, refreshed)
+      return refreshed
+    })
+  }, [session.source, session.variables])
+
+  const updatePreferences = (next: TraceTablePreferences) => {
+    setPreferences(next)
+    persistTraceTablePreferences(session.source, next)
+  }
+
+  const displayedVariableIds = useMemo(
+    () => resolveTraceTableColumnIds(preferences, session.variables),
+    [preferences, session.variables],
+  )
+  const projection = useMemo(
+    () => projectTraceTable(session, { variableIds: displayedVariableIds, showLine: preferences.rowMode === 'every-line' }),
+    [displayedVariableIds, preferences.rowMode, session],
+  )
+  const availableVariables = useMemo(
     () => Object.values(session.variables)
-      .sort((a, b) => a.firstSeenSequence - b.firstSeenSequence || a.defaultLabel.localeCompare(b.defaultLabel))
-      .map(variable => variable.id),
+      .sort((a, b) => a.firstSeenSequence - b.firstSeenSequence || a.defaultLabel.localeCompare(b.defaultLabel)),
     [session.variables],
   )
-  const displayedVariableIds = variableIds ?? discoveredVariableIds
-  const projection = useMemo(
-    () => projectTraceTable(session, { variableIds: displayedVariableIds, showLine: rowMode === 'every-line' }),
-    [displayedVariableIds, rowMode, session],
-  )
+  const labelFor = (variableId: string) => resolveTraceTableColumnLabel(preferences, variableId, session.variables)
+
+  const setRowMode = (rowMode: TraceTablePreferences['rowMode']) => updatePreferences({ ...preferences, rowMode })
+  const applyColumnDesign = (result: TraceTableColumnDesignerResult) => {
+    updatePreferences(refreshTraceTableCachedLabels({
+      ...preferences,
+      columnMode: result.autoSelect ? 'auto' : 'custom',
+      variableIds: result.variableIds,
+      aliases: result.aliases,
+    }, session.variables))
+    setIsDesignerOpen(false)
+  }
 
   const eventCount = session.events.length
   const rowCount = projection.rows.length
@@ -75,23 +117,29 @@ export const TraceTable = ({ session, variableIds }: TraceTableProps) => {
             {eventCount} {eventCount === 1 ? 'event' : 'events'} · {rowCount} {rowCount === 1 ? 'row' : 'rows'}
           </p>
         </div>
-        <div className="inline-flex rounded-md border border-slate-700 bg-slate-950/40 p-0.5" role="group" aria-label="Trace table row layout">
-          <button
-            type="button"
-            aria-pressed={rowMode === 'compact'}
-            onClick={() => setRowMode('compact')}
-            className={`rounded px-2 py-1 text-xs transition-colors ${rowMode === 'compact' ? 'bg-sky-500/20 text-sky-100' : 'text-slate-400 hover:text-slate-200'}`}
-          >
-            Compact
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <button type="button" onClick={() => setIsDesignerOpen(true)}
+            className="rounded-md border border-slate-600 px-2.5 py-1 text-xs font-medium text-slate-200 hover:border-sky-500 hover:text-sky-100">
+            Columns ({projection.columns.length})
           </button>
-          <button
-            type="button"
-            aria-pressed={rowMode === 'every-line'}
-            onClick={() => setRowMode('every-line')}
-            className={`rounded px-2 py-1 text-xs transition-colors ${rowMode === 'every-line' ? 'bg-sky-500/20 text-sky-100' : 'text-slate-400 hover:text-slate-200'}`}
-          >
-            Every line
-          </button>
+          <div className="inline-flex rounded-md border border-slate-700 bg-slate-950/40 p-0.5" role="group" aria-label="Trace table row layout">
+            <button
+              type="button"
+              aria-pressed={preferences.rowMode === 'compact'}
+              onClick={() => setRowMode('compact')}
+              className={`rounded px-2 py-1 text-xs transition-colors ${preferences.rowMode === 'compact' ? 'bg-sky-500/20 text-sky-100' : 'text-slate-400 hover:text-slate-200'}`}
+            >
+              Compact
+            </button>
+            <button
+              type="button"
+              aria-pressed={preferences.rowMode === 'every-line'}
+              onClick={() => setRowMode('every-line')}
+              className={`rounded px-2 py-1 text-xs transition-colors ${preferences.rowMode === 'every-line' ? 'bg-sky-500/20 text-sky-100' : 'text-slate-400 hover:text-slate-200'}`}
+            >
+              Every line
+            </button>
+          </div>
         </div>
       </div>
 
@@ -107,11 +155,11 @@ export const TraceTable = ({ session, variableIds }: TraceTableProps) => {
             <thead>
               <tr>
                 <th scope="col" className="sticky top-0 z-10 border-b border-r border-slate-700 bg-slate-900 px-3 py-2 font-semibold text-slate-300">
-                  {rowMode === 'every-line' ? 'Line' : 'Step'}
+                  {preferences.rowMode === 'every-line' ? 'Line' : 'Step'}
                 </th>
                 {projection.columns.map(column => (
                   <th key={column.variableId} scope="col" className="sticky top-0 z-10 border-b border-slate-700 bg-slate-900 px-3 py-2 font-semibold text-slate-300">
-                    {column.label}
+                    {labelFor(column.variableId)}
                   </th>
                 ))}
               </tr>
@@ -124,8 +172,9 @@ export const TraceTable = ({ session, variableIds }: TraceTableProps) => {
                   </th>
                   {projection.columns.map(column => {
                     const cell = row.cells[column.variableId]
+                    const columnLabel = labelFor(column.variableId)
                     if (!cell || cell.state.status === 'out-of-scope') {
-                      return <td key={column.variableId} className="border-b border-slate-700/60 px-3 py-2" aria-label={`${column.label}: no write`} />
+                      return <td key={column.variableId} className="border-b border-slate-700/60 px-3 py-2" aria-label={`${columnLabel}: no write`} />
                     }
                     if (cell.state.status === 'deleted') {
                       return <td key={column.variableId} className="border-b border-slate-700/60 px-3 py-2 font-medium text-red-200">Deleted</td>
@@ -143,9 +192,30 @@ export const TraceTable = ({ session, variableIds }: TraceTableProps) => {
         </div>
       ) : (
         <div className="flex flex-1 items-center justify-center p-6 text-center text-sm text-slate-500" role="status">
-          {eventCount === 0 ? 'Run code to capture trace events.' : 'No variable writes were captured for this trace.'}
+          <div>
+            <p>{projection.columns.length === 0 && preferences.columnMode === 'custom'
+              ? 'Choose columns to add variables to this trace table.'
+              : eventCount === 0
+                ? 'Run code to capture trace events.'
+                : 'No variable writes were captured for this trace.'}</p>
+            {projection.columns.length === 0 && preferences.columnMode === 'custom' && (
+              <button type="button" onClick={() => setIsDesignerOpen(true)} className="mt-3 rounded-md border border-slate-600 px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-sky-500 hover:text-sky-100">
+                Choose columns
+              </button>
+            )}
+          </div>
         </div>
       )}
+      <TraceTableColumnDesigner
+        open={isDesignerOpen}
+        availableVariables={availableVariables}
+        selectedVariableIds={displayedVariableIds}
+        aliases={preferences.aliases}
+        fallbackLabels={preferences.cachedDefaultLabels}
+        autoSelect={preferences.columnMode === 'auto'}
+        onApply={applyColumnDesign}
+        onClose={() => setIsDesignerOpen(false)}
+      />
     </section>
   )
 }
