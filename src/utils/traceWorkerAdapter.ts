@@ -71,6 +71,7 @@ function writeMarker(event: TraceWorkerEvent, value: TraceWorkerVariableValue): 
     kind: writeKind(event, value),
     changed: value.changed ?? true,
     outcome: 'value',
+    value: value.value,
   }
 }
 

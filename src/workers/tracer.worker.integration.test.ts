@@ -32,8 +32,10 @@ type RecorderResult = {
 
 const workerPath = resolve(process.cwd(), 'src/workers/tracer.worker.ts')
 const workerSource = readFileSync(workerPath, 'utf8')
-const setupStart = workerSource.indexOf('const SETUP_CODE = `')
-const setupEnd = workerSource.indexOf('\n`\n\nself.onmessage', setupStart)
+const setupMarker = 'const SETUP_CODE = `'
+const setupStart = workerSource.indexOf(setupMarker)
+const setupTailOffset = workerSource.slice(setupStart + setupMarker.length).search(/\r?\n`\r?\n\r?\nself\.onmessage/)
+const setupEnd = setupTailOffset < 0 ? -1 : setupStart + setupMarker.length + setupTailOffset
 
 if (setupStart < 0 || setupEnd < 0) {
   throw new Error('Unable to extract SETUP_CODE from tracer.worker.ts')
@@ -42,7 +44,7 @@ if (setupStart < 0 || setupEnd < 0) {
 // This deliberately executes the exact Python embedded in the worker. The
 // bridge has only the callbacks normally supplied by Pyodide; every assertion
 // below is against the JSON protocol delivered to JS, not a copied recorder.
-const setupCode = workerSource.slice(setupStart + 'const SETUP_CODE = `'.length, setupEnd)
+const setupCode = workerSource.slice(setupStart + setupMarker.length, setupEnd)
 const pythonAvailable = spawnSync('python', ['--version'], { encoding: 'utf8' }).status === 0
 
 function record(code: string, options: {

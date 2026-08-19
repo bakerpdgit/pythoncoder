@@ -73,8 +73,23 @@ describe('adaptTraceWorkerBatch', () => {
     expect(session.events[0].bindingDeltas).toHaveLength(1)
     expect(session.events[1].bindingDeltas).toHaveLength(0)
     expect(session.events[1].writes).toEqual([
-      expect.objectContaining({ kind: 'assignment', changed: false, outcome: 'value' }),
+      expect.objectContaining({ kind: 'assignment', changed: false, outcome: 'value', value: primitive(1) }),
     ])
+  })
+
+  it('retains the immediate value of each write when one event writes a binding repeatedly', () => {
+    const first = value('x', 1, { operation: 'write', changed: true })
+    const second = value('x', 2, { operation: 'write', changed: true })
+    const normalized = adaptTraceWorkerBatch(
+      createTraceSession({ id: 'trace-1', source: { path: 'main.py' } }),
+      message(0, [event(1, { variables: [second], writes: [first, second] })]),
+      'main.py',
+    )
+
+    expect(normalized.events[0].bindingDeltas).toEqual([
+      expect.objectContaining({ state: { status: 'value', value: primitive(2) } }),
+    ])
+    expect(normalized.events[0].writes.map(write => write.value)).toEqual([primitive(1), primitive(2)])
   })
 
   it('creates recursive call metadata and marks returned bindings out of scope', () => {
