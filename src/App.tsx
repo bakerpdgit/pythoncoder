@@ -63,9 +63,17 @@ import type {
   OverallTestResult, TesterRunOutput, ViewMode, Breakpoint,
 } from './types'
 import { evaluateAll } from './utils/testMatcher'
+import { createTraceSession, mergeTraceBatch } from './utils/traceLog'
+import {
+  adaptTraceWorkerBatch, finalizeTraceWorkerEnd, finalizeTraceWorkerStop, finishTraceSessionSafely,
+} from './utils/traceWorkerAdapter'
+import type {
+  TraceSession, TraceWorkerBatchMessage, TraceWorkerEndMessage, TraceWorkerStopAckMessage,
+} from './types/traceTable'
 import { normalizeTestInputs } from './utils/testInputs'
 import { startVersionPolling } from './utils/versionCheck'
 import { githubRepositoryBookUrl } from './utils/bookSource'
+import { isRuntimeSourceLocked, RuntimeStartGuard } from './utils/runtimeStartGuard'
 import { useDialogs } from './components/dialogs/DialogProvider'
 import {
   readDirectoryToMap, writeFileToFolderHandle, mkdirInFolderHandle,
@@ -111,6 +119,19 @@ const PYTHON_KEYWORDS = new Set([
 
 type WorkerRunMode = 'trace' | 'run' | 'debug'
 
+interface TraceWorkerStartSource {
+  filesystemId: string
+  workingDirectory: string
+  sourcePath: string
+  code: string
+}
+
+const sameTraceWorkerStartSource = (left: TraceWorkerStartSource, right: TraceWorkerStartSource) =>
+  left.filesystemId === right.filesystemId
+  && left.workingDirectory === right.workingDirectory
+  && left.sourcePath === right.sourcePath
+  && left.code === right.code
+
 // Build Monaco glyph decorations for the current breakpoints. Shared between the
 // [breakpoints] effect and editor (re)mount so glyphs survive an editor remount
 // (e.g. after a "run" that hid the code panel).
@@ -153,6 +174,7 @@ export default function App() {
   const [inputRequest, setInputRequest] = useState<InputRequest | null>(null)
   const [inputValue, setInputValue] = useState('')
   const [outputLog, setOutputLog] = useState('')
+  const [traceSession, setTraceSession] = useState<TraceSession | null>(null)
   const [activeRuntime, setActiveRuntime] = useState<RuntimeKey | ''>('')
   const [mainThreadStatus, setMainThreadStatus] = useState('Main-thread runtime is ready.')
   const [isPygameRunActive, setIsPygameRunActive] = useState(false)
@@ -250,6 +272,24 @@ export default function App() {
   const [updateAvailable, setUpdateAvailable] = useState(false)
 
   const workerRef = useRef<Worker | null>(null)
+  const isRunningRef = useRef(isRunning)
+  isRunningRef.current = isRunning
+  const traceWorkerStartGuardRef = useRef(new RuntimeStartGuard<TraceWorkerStartSource>())
+  const traceWorkerSourceRef = useRef<TraceWorkerStartSource>({
+    filesystemId: activeFilesystemId,
+    workingDirectory: currentWorkingDir,
+    sourcePath: openFilePath ?? codeFileName,
+    code: codeText,
+  })
+  traceWorkerSourceRef.current = {
+    filesystemId: activeFilesystemId,
+    workingDirectory: currentWorkingDir,
+    sourcePath: openFilePath ?? codeFileName,
+    code: codeText,
+  }
+  const traceSessionRef = useRef<TraceSession | null>(null)
+  const traceStopAckHandlerRef = useRef<((message: TraceWorkerStopAckMessage | null) => void) | null>(null)
+  const traceStopTimeoutRef = useRef<number | null>(null)
   const prewarmedTraceWorkerRef = useRef<Worker | null>(null)
   const testerWorkerRef = useRef<Worker | null>(null)
   const prewarmedTesterWorkerRef = useRef<Worker | null>(null)
@@ -350,6 +390,11 @@ export default function App() {
 
   const deferredCodeText = useDeferredValue(codeText)
   const hasCode = codeText.trim().length > 0
+  const isCodeSourceLocked = isRuntimeSourceLocked({
+    isRunning,
+    hasWorker: workerRef.current !== null,
+    isStarting: traceWorkerStartGuardRef.current.isStarting,
+  })
 
   // ── Derived state ────────────────────────────────────────────────────────
 
@@ -495,6 +540,10 @@ export default function App() {
     if (!hasSab) return
     prepareTraceWorker()
     return () => {
+      traceWorkerStartGuardRef.current.cancel()
+      if (traceStopTimeoutRef.current !== null) window.clearTimeout(traceStopTimeoutRef.current)
+      traceStopTimeoutRef.current = null
+      traceStopAckHandlerRef.current = null
       prewarmedTraceWorkerRef.current?.terminate()
       prewarmedTraceWorkerRef.current = null
       workerRef.current?.terminate()
@@ -957,6 +1006,7 @@ export default function App() {
   const handleEditorChange = (value: string | undefined) => {
     if (applyingEditorValueRef.current) return
     const nextValue = value ?? ''
+    traceWorkerSourceRef.current = { ...traceWorkerSourceRef.current, code: nextValue }
     setCodeText(nextValue)
     setCodeStatus(nextValue.trim() ? 'Code edited in the browser.' : 'Editor is empty. Load or type Python.')
     setIsUnsaved(openFilePath !== null && nextValue !== savedCodeRef.current)
@@ -964,31 +1014,65 @@ export default function App() {
 
   // ── Code loading ─────────────────────────────────────────────────────────
 
+  const canSwitchCodeSource = () => {
+    if (!isRuntimeSourceLocked({
+      isRunning: isRunningRef.current,
+      hasWorker: workerRef.current !== null,
+      isStarting: traceWorkerStartGuardRef.current.isStarting,
+    })) return true
+    setCodeStatus('Stop the running program before changing code or switching files.')
+    return false
+  }
+
+  const replaceProgrammaticEditorCode = (
+    text: string,
+    unsaved: boolean,
+    source?: Omit<TraceWorkerStartSource, 'code'>,
+  ) => {
+    if (!canSwitchCodeSource()) return false
+    traceWorkerSourceRef.current = {
+      ...(source ?? traceWorkerSourceRef.current),
+      code: text,
+    }
+    setCodeText(text)
+    if (editorRef.current) {
+      applyingEditorValueRef.current = true
+      editorRef.current.setValue(text)
+      applyingEditorValueRef.current = false
+    }
+    setIsUnsaved(unsaved)
+    return true
+  }
+
   const loadCodeText = (text: string, fileName = DEFAULT_CODE_FILENAME, vfsPath: string | null = null) => {
     const cleanCode = cleanCodeText(text)
+    if (!replaceProgrammaticEditorCode(cleanCode, false, {
+      filesystemId: activeFilesystemId,
+      workingDirectory: currentWorkingDir,
+      sourcePath: vfsPath ?? fileName,
+    })) return false
     breakpointsRef.current = new Map()
     setBreakpoints(new Map())
-    setCodeText(cleanCode)
     setCodeFileName(fileName)
     setCodeStatus(`${fileName} loaded.`)
     setOpenFilePath(vfsPath)
     savedCodeRef.current = cleanCode
-    setIsUnsaved(false)
     setCurrentLine(-1); setCurrentFunc(''); setCurrentClass(''); setSimState(null)
     setInputRequest(null); setInputValue(''); setOutputLog(''); setActiveRuntime('')
+    traceSessionRef.current = null; setTraceSession(null)
     setMainThreadStatus('Main-thread runtime is ready.')
     setIsInsightEditing(false); setShowExportDialog(false)
 
-    if (editorRef.current) {
-      applyingEditorValueRef.current = true
-      editorRef.current.setValue(cleanCode)
-      applyingEditorValueRef.current = false
-    }
+    return true
   }
 
-  const handleLoadButtonClick = () => { if (fileInputRef.current) { fileInputRef.current.value = ''; fileInputRef.current.click() } }
+  const handleLoadButtonClick = () => {
+    if (!canSwitchCodeSource()) return
+    if (fileInputRef.current) { fileInputRef.current.value = ''; fileInputRef.current.click() }
+  }
 
   const handleCodeFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    if (!canSwitchCodeSource()) { event.target.value = ''; return }
     const file = event.target.files?.[0]
     if (!file) return
     try {
@@ -1004,6 +1088,7 @@ export default function App() {
 
   const handleCodeSaveDialogSave = async (parentPath: string, filename: string) => {
     if (!pendingCodeLoad) return
+    if (isTextMime(pendingCodeLoad.mimeType) && !canSwitchCodeSource()) return
     try {
       const path = parentPath === '/' ? `/${filename}` : `${parentPath}/${filename}`
       const mimeType = pendingCodeLoad.mimeType || guessMimeType(filename)
@@ -1019,6 +1104,7 @@ export default function App() {
   }
 
   const handleNewFileButton = () => {
+    if (!canSwitchCodeSource()) return
     setPendingCodeLoad({ content: '', name: 'new_file.py', rawBuffer: new ArrayBuffer(0), mimeType: 'text/x-python' })
     setShowCodeSaveDialog(true)
   }
@@ -1063,6 +1149,7 @@ export default function App() {
   saveCodeRef.current = () => { void handleSaveCode() }
 
   const handleCloseFile = async () => {
+    if (!canSwitchCodeSource()) return
     if (!openFilePath) return
     if (isUnsaved) {
       const choice = await dialogs.choose({
@@ -1077,7 +1164,7 @@ export default function App() {
       if (choice === 'cancel' || choice === null) return
       if (choice === 'save') await saveCurrentToVFS()
     }
-    clearEditorForSwitch()
+    if (!clearEditorForSwitch()) return
   }
 
   const saveCurrentToVFS = async () => {
@@ -1109,6 +1196,7 @@ export default function App() {
   }
 
   const handleReloadFolder = async () => {
+    if (!canSwitchCodeSource()) return
     const handle = localFolderHandleRef.current
     if (!handle || localFolderFsId !== activeFilesystemId) return
     if (isUnsaved && !(await dialogs.confirm({
@@ -1121,13 +1209,13 @@ export default function App() {
       if (perm !== 'granted') perm = await handle.requestPermission({ mode: 'readwrite' })
       if (perm !== 'granted') { setCodeStatus('Folder permission denied.'); return }
       const fileMap = await readDirectoryToMap(handle)
+      if (!canSwitchCodeSource()) return
       await importFileMapToFs(activeFilesystemId, fileMap, true)
       setVfsReloadTrigger(t => t + 1)
       if (openFilePath) {
         const entry = await getEntryByPath(activeFilesystemId, openFilePath)
         if (entry?.content) {
           const text = new TextDecoder().decode(entry.content)
-          savedCodeRef.current = text
           loadCodeText(text, codeFileName, openFilePath)
         }
       }
@@ -1147,6 +1235,7 @@ export default function App() {
 
   // Remove the connected folder's filesystem entirely and return to the default.
   const handleCloseFolder = async () => {
+    if (!canSwitchCodeSource()) return
     const fsId = localFolderFsId
     if (!(await dialogs.confirm({
       title: 'Close connected folder',
@@ -1154,13 +1243,14 @@ export default function App() {
       detail: 'Your files remain on disk; this just removes the in-app filesystem and returns to the default.',
       confirmLabel: 'Close', danger: true,
     }))) return
+    if (!canSwitchCodeSource()) return
     localFolderHandleRef.current = null
     setLocalFolderFsId(null)
     setDiskDeleteWarnDismissed(false)
     if (fsId && fsId !== 'default') {
       try { await deleteFilesystem(fsId) } catch { /* ignore */ }
     }
-    clearEditorForSwitch()
+    if (!clearEditorForSwitch()) return
     setActiveFilesystemId('default')
     setCurrentWorkingDir('/')
     setVfsReloadTrigger(t => t + 1)
@@ -1168,6 +1258,7 @@ export default function App() {
   }
 
   const onOpenVFSFile = async (entry: VFSEntry) => {
+    if (!canSwitchCodeSource()) return
     if (entry.type !== 'file') return
     const mime = entry.mimeType ?? guessMimeType(entry.name)
     if (!isTextMime(mime)) {
@@ -1189,7 +1280,6 @@ export default function App() {
     }
     if (entry.content) {
       const text = new TextDecoder().decode(entry.content)
-      savedCodeRef.current = text
       loadCodeText(text, entry.name, entry.path)
     }
   }
@@ -1324,13 +1414,7 @@ export default function App() {
     }
 
     const newCode = lines.join('\n')
-    setCodeText(newCode)
-    if (editorRef.current) {
-      applyingEditorValueRef.current = true
-      editorRef.current.setValue(newCode)
-      applyingEditorValueRef.current = false
-    }
-    setIsUnsaved(openFilePath !== null)
+    replaceProgrammaticEditorCode(newCode, openFilePath !== null)
   }
 
   const downloadNotesExport = (mode: 'comments' | 'docstrings') => {
@@ -1596,25 +1680,26 @@ export default function App() {
   // ── Filesystem switching ─────────────────────────────────────────────────
 
   const clearEditorForSwitch = () => {
-    if (editorRef.current) {
-      applyingEditorValueRef.current = true
-      editorRef.current.setValue('')
-      applyingEditorValueRef.current = false
-    }
-    setCodeText('')
+    if (!replaceProgrammaticEditorCode('', false, {
+      filesystemId: activeFilesystemId,
+      workingDirectory: currentWorkingDir,
+      sourcePath: DEFAULT_CODE_FILENAME,
+    })) return false
     setCodeFileName(DEFAULT_CODE_FILENAME)
     setCodeStatus('No file open. Select a file from the file system panel.')
     setOpenFilePath(null)
     savedCodeRef.current = ''
-    setIsUnsaved(false)
     setCurrentLine(-1); setCurrentFunc(''); setCurrentClass(''); setSimState(null)
     setInputRequest(null); setInputValue(''); setOutputLog(''); setActiveRuntime('')
+    traceSessionRef.current = null; setTraceSession(null)
     mainThreadMountedPathsRef.current = []
     setHtmlPreview(null)
+    return true
   }
 
   const handleFilesystemChange = async (id: string) => {
     if (id === activeFilesystemId) return
+    if (!canSwitchCodeSource()) return
     if (isUnsaved && openFilePath) {
       const choice = await dialogs.choose({
         title: 'Switch filesystem',
@@ -1628,19 +1713,20 @@ export default function App() {
       if (choice === 'cancel' || choice === null) return
       if (choice === 'save') await saveCurrentToVFS()
     }
-    clearEditorForSwitch()
+    if (!clearEditorForSwitch()) return
     setActiveFilesystemId(id)
     setCurrentWorkingDir('/')
   }
 
   const handleFilesystemForcedChange = (id: string) => {
-    clearEditorForSwitch()
+    if (!clearEditorForSwitch()) return false
     setActiveFilesystemId(id)
     setCurrentWorkingDir('/')
+    return true
   }
 
   const handleFilesystemCreated = async (id: string) => {
-    clearEditorForSwitch()
+    if (!clearEditorForSwitch()) return
     setActiveFilesystemId(id)
     setCurrentWorkingDir('/')
     await autoOpenMainPy(id)
@@ -1705,9 +1791,28 @@ export default function App() {
     clearConsole()
   }
 
+  const storeTraceSession = (session: TraceSession | null) => {
+    traceSessionRef.current = session
+    setTraceSession(session)
+  }
+
+  const finishTraceSession = (status: TraceSession['status'], error?: string) => {
+    const current = traceSessionRef.current
+    if (!current) return
+    storeTraceSession(finishTraceSessionSafely(current, status, error))
+  }
+
+  const setTraceSessionActivity = (status: 'recording' | 'paused') => {
+    const current = traceSessionRef.current
+    if (!current || (current.status !== 'recording' && current.status !== 'paused')) return
+    storeTraceSession({ ...current, status })
+  }
+
   const handleBookOpen = async (url: string) => {
+    if (!canSwitchCodeSource()) return
     try {
       const manifest = await fetchBookManifest(url)
+      if (!canSwitchCodeSource()) return
       const newState: BookNavState = {
         rootUrl: url,
         currentBookUrl: url,
@@ -1726,6 +1831,7 @@ export default function App() {
   // other URL is fetched as a ZIP and opened as a book (if it contains book.json) or a
   // plain filesystem otherwise.
   const openResourceUrl = async (rawUrl: string) => {
+    if (!canSwitchCodeSource()) return
     const url = rawUrl.trim()
     if (!url) return
     hideTeacherToolsPanel()
@@ -1743,7 +1849,7 @@ export default function App() {
       if (bookEntry) {
         await handleBookOpen(`vfs://fs:${fsId}/book.json`)
       } else {
-        handleFilesystemForcedChange(fsId)
+        if (!handleFilesystemForcedChange(fsId)) return
         await autoOpenMainPy(fsId)
       }
       revealFilesystemPanel()
@@ -1762,23 +1868,25 @@ export default function App() {
   }
 
   const handleBookNavStateChange = (state: BookNavState) => {
+    if (!state.activeChallengeId && !canSwitchCodeSource()) return
     if (!state.activeChallengeId) challengeLoadIdRef.current += 1
     setBookNavState(state)
     persistBookNavState(state)
     if (!state.activeChallengeId) {
       setChallengeHiddenPaths([])
-      clearEditorForSwitch()
+      if (!clearEditorForSwitch()) return
       setActiveFilesystemId('default')
       setCurrentWorkingDir('/')
     }
   }
 
   const handleEnterChallenge = async (bookUrl: string, challenge: BookChallenge, forceReset = false) => {
+    if (!canSwitchCodeSource()) return
     const loadId = ++challengeLoadIdRef.current
     try {
       await saveCurrentToVFS()
       if (loadId !== challengeLoadIdRef.current) return
-      clearEditorForSwitch()
+      if (!clearEditorForSwitch()) return
       setEditorTab('starter')
       solutionPathRef.current = challenge.sol?.file ?? null
       setActiveBookChallenge(challenge)
@@ -1795,7 +1903,6 @@ export default function App() {
         if (loadId !== challengeLoadIdRef.current) return
         if (entry?.content) {
           const text = new TextDecoder().decode(entry.content)
-          savedCodeRef.current = text
           loadCodeText(text, entry.name, entry.path)
         }
       }
@@ -1807,6 +1914,7 @@ export default function App() {
   }
 
   const handleCloseBook = () => {
+    if (!canSwitchCodeSource()) return
     challengeLoadIdRef.current += 1
     setBookNavState(null)
     persistBookNavState(null)
@@ -1814,7 +1922,7 @@ export default function App() {
     setActiveBookChallenge(null)
     activeBookChallengeRef.current = null
     setTestResult(null)
-    clearEditorForSwitch()
+    if (!clearEditorForSwitch()) return
     setActiveFilesystemId('default')
     setCurrentWorkingDir('/')
     // Tear down any teacher edit session.
@@ -1838,13 +1946,15 @@ export default function App() {
 
   // Enter edit mode for a freshly created/opened book source session.
   const enterBookEditSession = async (sess: BookEditSession) => {
+    if (!canSwitchCodeSource()) return
     const manifest = await bookEdit.readManifest(sess.srcFsId)
+    if (!canSwitchCodeSource()) return
     // Close any currently-open (non-edit) book first.
     setActiveBookChallenge(null)
     activeBookChallengeRef.current = null
     setChallengeHiddenPaths([])
     setTestResult(null)
-    clearEditorForSwitch()
+    if (!clearEditorForSwitch()) return
     setActiveFilesystemId('default')
     setBookEditSession(sess)
     setEditManifest(manifest)
@@ -2170,27 +2280,23 @@ export default function App() {
   }
 
   const applyEditorText = (text: string) => {
-    setCodeText(text)
-    if (editorRef.current) {
-      applyingEditorValueRef.current = true
-      editorRef.current.setValue(text)
-      applyingEditorValueRef.current = false
-    }
-    setIsUnsaved(true)
+    return replaceProgrammaticEditorCode(text, true)
   }
 
   const loadStarterBuffer = async () => {
+    if (!canSwitchCodeSource()) return false
     const py = activeBookChallengeRef.current?.py
-    if (!py) return
+    if (!py) return false
     const name = flatName(py)
     const entry = await getEntryByPath(activeFilesystemId, '/' + name)
     const text = entry?.content ? new TextDecoder().decode(entry.content) : ''
-    loadCodeText(text, name, '/' + name)
+    return loadCodeText(text, name, '/' + name)
   }
 
   const loadSolutionBuffer = async () => {
+    if (!canSwitchCodeSource()) return false
     const challenge = activeBookChallengeRef.current
-    if (!challenge || !bookEditSession || !editManifest) return
+    if (!challenge || !bookEditSession || !editManifest) return false
     let solPath = challenge.sol?.file
     if (!solPath) {
       solPath = defaultSolutionPath(challenge)
@@ -2206,18 +2312,20 @@ export default function App() {
     }
     solutionPathRef.current = solPath
     const text = await bookEdit.readBookFile(bookEditSession.srcFsId, solPath)
-    loadCodeText(text, flatName(solPath), solPath)
+    return loadCodeText(text, flatName(solPath), solPath)
   }
 
   const switchEditorTab = async (next: 'starter' | 'solution') => {
     if (next === editorTab || !isBookEditMode || !activeBookChallengeRef.current) return
+    if (!canSwitchCodeSource()) return
     await saveCurrentToVFS()
-    if (next === 'solution') await loadSolutionBuffer()
-    else await loadStarterBuffer()
-    setEditorTab(next)
+    if (!canSwitchCodeSource()) return
+    const loaded = next === 'solution' ? await loadSolutionBuffer() : await loadStarterBuffer()
+    if (loaded) setEditorTab(next)
   }
 
   const copyFromOtherTab = async () => {
+    if (!canSwitchCodeSource()) return
     const challenge = activeBookChallengeRef.current
     if (!challenge || !bookEditSession) return
     if (editorTab === 'solution') {
@@ -2301,6 +2409,7 @@ export default function App() {
     }
 
     worker.onmessage = (e: MessageEvent) => {
+      if (workerRef.current !== worker) return
       const data = e.data
       if (data.type === 'status') {
         setTestRunnerStatus(data.message as string)
@@ -2380,6 +2489,7 @@ export default function App() {
   }
 
   const importLocalFiles = async (fileMap: Map<string, ArrayBuffer>, sourceName: string) => {
+    if (!canSwitchCodeSource()) return
     hideTeacherToolsPanel()
     const bookJsonBuf = fileMap.get('book.json')
     if (bookJsonBuf) {
@@ -2423,7 +2533,7 @@ export default function App() {
       localFolderHandleRef.current = null
       setLocalFolderFsId(null)
       setVfsReloadTrigger(t => t + 1)
-      clearEditorForSwitch()
+      if (!clearEditorForSwitch()) return
       setActiveFilesystemId(fsId)
       setCurrentWorkingDir('/')
       revealFilesystemPanel()
@@ -2432,6 +2542,7 @@ export default function App() {
   }
 
   const handleLocalFileImport = async (fileMap: Map<string, ArrayBuffer>, sourceName: string) => {
+    if (!canSwitchCodeSource()) return
     try { await importLocalFiles(fileMap, sourceName) }
     catch (e) { setCodeStatus(`Import failed: ${e instanceof Error ? e.message : String(e)}`) }
   }
@@ -2459,6 +2570,7 @@ export default function App() {
   }
 
   const handlePyodideReset = () => {
+    traceWorkerStartGuardRef.current.cancel()
     if (isRunning && activeRuntime === 'main-thread') {
       mainThreadAbandonedRef.current = true
       mainThreadRunIdRef.current++
@@ -2475,23 +2587,71 @@ export default function App() {
   }
 
   const startTraceWorker = async (modeOverride?: WorkerRunMode) => {
-    if (!hasSab || !hasCode) return
+    if (!hasSab || !hasCode || isRunningRef.current || workerRef.current) return
+    const startGuard = traceWorkerStartGuardRef.current
+    const startClaim = startGuard.begin({ ...traceWorkerSourceRef.current })
+    if (!startClaim) return
+    const abortStart = (message: string) => {
+      startGuard.finish(startClaim)
+      setCodeStatus(message)
+    }
+    const startIsCurrent = () => startGuard.isCurrent(
+      startClaim,
+      traceWorkerSourceRef.current,
+      sameTraceWorkerStartSource,
+    )
     const choice = modeOverride ?? runModeChoice
-    // Auto-refocus the Console when a run starts from the Tests tab.
-    if (consoleTab === 'tests') setConsoleTab('console')
-    if (pendingRestore) pendingRestore()
-    setPendingRestore(null)
-    fixedInputsQueueRef.current = appSettings.useFixedInputs
-      ? fixedInputsText.split('\n').filter(l => l.length > 0)
-      : []
-    // On every run, re-consume fixed inputs from the top and show the console (not the Inputs tab).
-    setConsoleTab('console')
-    await saveCurrentToVFS()
-    const vfsFiles = await getAllFiles(activeFilesystemId)
-    const capturedFsId = activeFilesystemId
-    const capturedCwd = currentWorkingDir
+    let vfsFiles: Awaited<ReturnType<typeof getAllFiles>>
+    try {
+      // Auto-refocus the Console when a run starts from the Tests tab.
+      if (consoleTab === 'tests') setConsoleTab('console')
+      if (pendingRestore) pendingRestore()
+      setPendingRestore(null)
+      fixedInputsQueueRef.current = appSettings.useFixedInputs
+        ? fixedInputsText.split('\n').filter(l => l.length > 0)
+        : []
+      // On every run, re-consume fixed inputs from the top and show the console (not the Inputs tab).
+      setConsoleTab('console')
+      setCodeStatus('Preparing trace-worker runtime...')
 
-    const hasTurtleForMode = codeUsesTurtle(codeText)
+      const saved = await saveCurrentToVFS()
+      if (!startIsCurrent()) {
+        abortStart('Runtime start cancelled because the code source changed while preparing it.')
+        return
+      }
+      if (!saved) {
+        abortStart('Runtime start cancelled because the current file could not be saved.')
+        return
+      }
+      vfsFiles = await getAllFiles(startClaim.source.filesystemId)
+      if (!startIsCurrent()) {
+        abortStart('Runtime start cancelled because the code source changed while preparing it.')
+        return
+      }
+    } catch (error) {
+      abortStart(`Worker runtime could not be prepared: ${error instanceof Error ? error.message : String(error)}`)
+      return
+    }
+
+    const capturedFsId = startClaim.source.filesystemId
+    const capturedCwd = startClaim.source.workingDirectory
+    const capturedSourcePath = startClaim.source.sourcePath
+    const capturedCode = startClaim.source.code
+    // No await occurs between here and assigning workerRef, so releasing the
+    // preparation claim cannot expose a source-switch window to another event.
+    startGuard.finish(startClaim)
+    const traceTableSessionId = choice === 'trace'
+      ? `trace-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      : ''
+
+    if (traceTableSessionId) {
+      storeTraceSession(createTraceSession({
+        id: traceTableSessionId,
+        source: { path: capturedSourcePath, filesystemId: capturedFsId },
+      }))
+    }
+
+    const hasTurtleForMode = codeUsesTurtle(capturedCode)
     const isSvgTurtleRun = (choice === 'run') && hasTurtleForMode && appSettings.turtleMode === 'basthon-svg'
 
     workerRunModeRef.current = choice
@@ -2513,27 +2673,81 @@ export default function App() {
     )
     setMainThreadStatus(choice === 'debug' ? 'Debug worker runtime is active.' : 'Trace-worker runtime is active.')
 
-    const sab = new SharedArrayBuffer(1024 * 4)
-    sabRef.current = { sab, int32: new Int32Array(sab), uint8: new Uint8Array(sab) }
-    sabRef.current.int32[750] = -1  // sentinel: -1 = watches not yet written by main thread
+    let worker: Worker
+    try {
+      const sab = new SharedArrayBuffer(1024 * 4)
+      sabRef.current = { sab, int32: new Int32Array(sab), uint8: new Uint8Array(sab) }
+      sabRef.current.int32[750] = -1  // sentinel: -1 = watches not yet written by main thread
+      sabRef.current.int32[751] = 0   // cooperative trace-table stop request
 
-    // Claim the background-warmed worker when available. If the user clicked
-    // before warm-up completed, the queued init message simply shares the same
-    // Pyodide-loading promise inside the worker.
-    const worker = prewarmedTraceWorkerRef.current ?? new TracerWorker()
-    prewarmedTraceWorkerRef.current = null
-    workerRef.current = worker
+      // Claim the background-warmed worker when available. If the user clicked
+      // before warm-up completed, the queued init message simply shares the same
+      // Pyodide-loading promise inside the worker.
+      worker = prewarmedTraceWorkerRef.current ?? new TracerWorker()
+      prewarmedTraceWorkerRef.current = null
+      workerRef.current = worker
+      startGuard.finish(startClaim)
+    } catch (error) {
+      startGuard.finish(startClaim)
+      sabRef.current = null
+      setIsRunning(false); setActiveRuntime('')
+      workerRunModeRef.current = 'debug'
+      workerStartModeRef.current = 'debug'
+      if (traceTableSessionId) finishTraceSession('error', String(error))
+      setCodeStatus(`Worker runtime failed to start: ${error instanceof Error ? error.message : String(error)}`)
+      return
+    }
 
     const releaseWorker = () => {
+      traceWorkerStartGuardRef.current.cancel()
+      if (traceStopTimeoutRef.current !== null) window.clearTimeout(traceStopTimeoutRef.current)
+      traceStopTimeoutRef.current = null
+      traceStopAckHandlerRef.current = null
       worker.terminate()
       if (workerRef.current === worker) workerRef.current = null
       sabRef.current = null
       window.setTimeout(prepareTraceWorker, 0)
     }
 
+    traceStopAckHandlerRef.current = (ack) => {
+      if (workerRef.current !== worker) return
+      const current = traceSessionRef.current
+      if (current?.id === traceTableSessionId) {
+        if (ack) storeTraceSession(finalizeTraceWorkerStop(current, ack))
+        else storeTraceSession({
+          ...current,
+          status: 'error',
+          error: 'Trace table stop timed out before the final recording batch was acknowledged.',
+          truncated: true,
+          endedAt: Date.now(),
+        })
+      }
+      setInputRequest(null); setInputValue(''); setIsRunning(false); setActiveRuntime('')
+      setCodeStatus(ack ? 'Worker runtime stopped.' : 'Worker stopped without a complete trace table.')
+      workerRunModeRef.current = 'debug'
+      workerStartModeRef.current = 'debug'
+      releaseWorker()
+    }
+
     worker.onmessage = (e: MessageEvent) => {
+      if (workerRef.current !== worker) return
       const data = e.data
-      if (data.type === 'trace') {
+      if (data.type === 'trace-table-batch') {
+        const current = traceSessionRef.current
+        if (!current || data.sessionId !== current.id) return
+        try {
+          const normalized = adaptTraceWorkerBatch(current, data as TraceWorkerBatchMessage, capturedSourcePath)
+          storeTraceSession(mergeTraceBatch(current, normalized))
+        } catch (error) {
+          finishTraceSession('error', `Trace table recording failed: ${String(error)}`)
+        }
+      } else if (data.type === 'trace-table-end') {
+        const ended = data as TraceWorkerEndMessage
+        const current = traceSessionRef.current
+        if (current?.id === ended.sessionId) storeTraceSession(finalizeTraceWorkerEnd(current, ended))
+      } else if (data.type === 'trace-table-stop-ack') {
+        traceStopAckHandlerRef.current?.(data as TraceWorkerStopAckMessage)
+      } else if (data.type === 'trace') {
         if (data.turtleSvg) { setTurtleSvg(data.turtleSvg); setDiagramView('turtle'); addToTurtleHistory(data.turtleSvg) }
         const mode = workerRunModeRef.current
         if (mode === 'run') {
@@ -2552,6 +2766,7 @@ export default function App() {
             sendTraceCommand(TRACE_CMD_CONTINUE)
           }
         } else {
+          setTraceSessionActivity('paused')
           setCurrentLine(data.line); setCurrentFunc(data.func); setCurrentClass(data.cls || '')
           if (data.state && data.state !== '{}') {
             try { setSimState(JSON.parse(data.state)) } catch { /* ignore */ }
@@ -2575,6 +2790,9 @@ export default function App() {
         }
         appendOutput('\n[ERROR] ' + data.error)
         setInputRequest(null); setInputValue(''); setIsRunning(false); setActiveRuntime('')
+        if (workerStartModeRef.current === 'trace' && traceSessionRef.current?.status !== 'error') {
+          finishTraceSession('error', String(data.error))
+        }
         setCodeStatus('Worker runtime failed.')
         if (workerStartModeRef.current === 'run') {
           const inSvgMode = svgTurtleLayoutSnapshotRef.current !== null
@@ -2595,6 +2813,12 @@ export default function App() {
         const label = wasRunMode ? '[RUN FINISHED]' : startedMode === 'debug' ? '[DEBUG FINISHED]' : '[TRACE FINISHED]'
         appendOutput(`\n${label}`)
         setInputRequest(null); setInputValue(''); setIsRunning(false); setActiveRuntime('')
+        if (workerStartModeRef.current === 'trace') {
+          const current = traceSessionRef.current
+          if (current && (current.status === 'recording' || current.status === 'paused')) {
+            finishTraceSession('error', 'Trace runtime ended without a trace-table completion summary.')
+          }
+        }
         // A "capture test case" run just finished: build a test from the recorded inputs.
         if (captureRunRef.current) {
           captureRunRef.current = false
@@ -2635,6 +2859,7 @@ export default function App() {
       appendOutput(`\n[ERROR] Worker failed to start: ${event.message || 'Unknown worker error'}`)
       setInputRequest(null); setInputValue(''); setIsRunning(false); setActiveRuntime('')
       setCodeStatus('Worker runtime failed.')
+      if (workerStartModeRef.current === 'trace') finishTraceSession('error', event.message || 'Worker failed')
       workerRunModeRef.current = 'debug'
       workerStartModeRef.current = 'debug'
       releaseWorker()
@@ -2644,17 +2869,28 @@ export default function App() {
     const initialBreakpoints = choice === 'run' ? [] : [...breakpointsRef.current.entries()]
       .filter(([, breakpoint]) => breakpoint.enabled)
       .map(([line, breakpoint]) => ({ line, condition: breakpoint.condition.trim() }))
-    worker.postMessage({
-      type: 'init',
-      sab: sabRef.current.sab,
-      code: codeText,
-      files: vfsFiles,
-      cwd: capturedCwd,
-      svgTurtleBootstrap,
-      watches: watchesRef.current,
-      breakpoints: initialBreakpoints,
-      pauseOnFirstLine: choice === 'trace',
-    })
+    try {
+      worker.postMessage({
+        type: 'init',
+        sab: sabRef.current.sab,
+        code: capturedCode,
+        files: vfsFiles,
+        cwd: capturedCwd,
+        svgTurtleBootstrap,
+        watches: watchesRef.current,
+        breakpoints: initialBreakpoints,
+        traceTableEnabled: choice === 'trace',
+        traceTableSessionId,
+        pauseOnFirstLine: choice === 'trace',
+      })
+    } catch (error) {
+      setInputRequest(null); setInputValue(''); setIsRunning(false); setActiveRuntime('')
+      if (choice === 'trace') finishTraceSession('error', String(error))
+      setCodeStatus(`Worker runtime failed to start: ${error instanceof Error ? error.message : String(error)}`)
+      workerRunModeRef.current = 'debug'
+      workerStartModeRef.current = 'debug'
+      releaseWorker()
+    }
   }
 
   const startMainThreadRun = async () => {
@@ -2864,13 +3100,14 @@ exec(code_obj, globals())
       const condLen = Math.min(condBytes.length, 592)
       uint8.set(condBytes.subarray(0, condLen), 2404)
       int32[600] = condLen
-      // Write current watch expressions to SAB (int32[750]=length, uint8[3004..]=JSON)
+      // Write current watch expressions to SAB (int32[750]=length, uint8[3008..]=JSON).
       const watchJson = JSON.stringify(watchesRef.current)
       const watchBytes = new TextEncoder().encode(watchJson)
-      const safeLen = Math.min(watchBytes.length, 1092)
-      uint8.set(watchBytes.subarray(0, safeLen), 3004)
+      const safeLen = Math.min(watchBytes.length, 1088)
+      uint8.set(watchBytes.subarray(0, safeLen), 3008)
       Atomics.store(int32, 750, safeLen)
       Atomics.store(int32, 1, cmd); Atomics.store(int32, 0, 0); Atomics.notify(int32, 0, 1)
+      if (workerStartModeRef.current === 'trace') setTraceSessionActivity('recording')
     }
   }
 
@@ -2881,15 +3118,38 @@ exec(code_obj, globals())
     if (Atomics.load(int32, 0) === 2) {
       const encoder = new TextEncoder()
       const bytes = encoder.encode(submittedValue)
-      const safeBytes = bytes.slice(0, uint8.length - 12)
-      int32[2] = safeBytes.length; uint8.fill(0, 12); uint8.set(safeBytes, 12)
+      // Input occupies bytes 12..1999 only. Bytes 2000+ contain breakpoint,
+      // watch-expression, and cooperative-stop metadata that must survive an
+      // input submission or stop wake-up.
+      const inputEnd = 2000
+      const safeBytes = bytes.slice(0, inputEnd - 12)
+      int32[2] = safeBytes.length; uint8.fill(0, 12, inputEnd); uint8.set(safeBytes, 12)
       Atomics.store(int32, 0, 0); Atomics.notify(int32, 0, 1)
+      if (workerStartModeRef.current === 'trace') setTraceSessionActivity('recording')
       setInputRequest(null); setInputValue('')
     }
   }
 
   const forceStop = () => {
+    if (traceWorkerStartGuardRef.current.isStarting && !workerRef.current) {
+      traceWorkerStartGuardRef.current.cancel()
+      setCodeStatus('Worker runtime start cancelled.')
+      return
+    }
     if (workerRef.current) {
+      if (workerStartModeRef.current === 'trace' && sabRef.current && traceStopAckHandlerRef.current) {
+        const { int32 } = sabRef.current
+        if (Atomics.compareExchange(int32, 751, 0, 1) === 0) {
+          setCodeStatus('Stopping trace runtime and saving its final trace events...')
+          // Wake a worker paused either for stepping or for input. The worker
+          // observes int32[751], flushes, and acknowledges before termination.
+          Atomics.notify(int32, 0, 1)
+          traceStopTimeoutRef.current = window.setTimeout(() => {
+            traceStopAckHandlerRef.current?.(null)
+          }, 5000)
+        }
+        return
+      }
       workerRef.current.terminate(); workerRef.current = null; sabRef.current = null
       setCodeStatus('Worker runtime stopped.')
       if (workerStartModeRef.current === 'run') {
@@ -3000,7 +3260,7 @@ exec(code_obj, globals())
                       </svg>
                     </IconButton>
                   )}
-                  {!isRunning && (
+                  {!isCodeSourceLocked && (
                     <IconButton title="Insert/update docstring in code" onClick={handleInsertDocstring} disabled={!activeInsightText && !noteDraft}>
                       <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
@@ -3747,18 +4007,18 @@ exec(code_obj, globals())
                 {isBookEditMode && activeBookChallenge && (
                   <div className="flex items-center gap-2 mt-1.5 pt-1.5 border-t border-slate-700/60">
                     <div className="flex items-center rounded overflow-hidden border border-slate-700">
-                      <button type="button" onClick={() => void switchEditorTab('starter')}
+                      <button type="button" onClick={() => void switchEditorTab('starter')} disabled={isCodeSourceLocked}
                         className={`px-2.5 py-0.5 text-[11px] font-semibold transition-colors ${editorTab === 'starter' ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
                         Starter
                       </button>
-                      <button type="button" onClick={() => void switchEditorTab('solution')}
+                      <button type="button" onClick={() => void switchEditorTab('solution')} disabled={isCodeSourceLocked}
                         className={`px-2.5 py-0.5 text-[11px] font-semibold transition-colors ${editorTab === 'solution' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
                         Solution
                       </button>
                     </div>
-                    <button type="button" onClick={() => void copyFromOtherTab()}
+                    <button type="button" onClick={() => void copyFromOtherTab()} disabled={isCodeSourceLocked}
                       title={editorTab === 'starter' ? 'Overwrite the starter with the solution code' : 'Overwrite the solution with the starter code'}
-                      className="text-[11px] text-slate-400 hover:text-slate-200 px-1.5 py-0.5 rounded border border-slate-700 hover:border-slate-500 transition-colors">
+                      className="text-[11px] text-slate-400 hover:text-slate-200 px-1.5 py-0.5 rounded border border-slate-700 hover:border-slate-500 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
                       {editorTab === 'starter' ? 'Copy from solution' : 'Copy from starter'}
                     </button>
                     {editorTab === 'solution' && (
