@@ -46,11 +46,12 @@ const project = vi.mocked(projectTraceTable)
 
 describe('TraceTable', () => {
   beforeEach(() => {
-    project.mockImplementation((_session, { showLine }) => ({
-      columns: [
-        { variableId: 'second', label: 'y' },
-        { variableId: 'first', label: 'x' },
-      ],
+    localStorage.clear()
+    project.mockImplementation((_session, { showLine, variableIds }) => ({
+      columns: variableIds.map(variableId => ({
+        variableId,
+        label: variableId === 'first' ? 'x' : 'y',
+      })),
       rows: showLine
         ? [
             { id: 'line-7', sequences: [4], line: 7, cells: {} },
@@ -92,6 +93,43 @@ describe('TraceTable', () => {
     expect(screen.getByRole('button', { name: 'Every line' })).toHaveAttribute('aria-pressed', 'true')
     expect(screen.getByRole('columnheader', { name: 'Line' })).toBeInTheDocument()
     expect(screen.getByRole('rowheader', { name: 'Line 7' })).toBeInTheDocument()
+  })
+
+  it('applies and persists custom order and editable column headers', async () => {
+    const user = userEvent.setup()
+    const { unmount } = render(<TraceTable session={session} />)
+
+    await user.click(screen.getByRole('button', { name: 'Columns (2)' }))
+    await user.click(screen.getByRole('button', { name: 'Move x left' }))
+    const xHeader = screen.getByRole('textbox', { name: 'Column header for x' })
+    await user.clear(xHeader)
+    await user.type(xHeader, 'Current x')
+    await user.click(screen.getByRole('button', { name: 'Apply columns' }))
+
+    expect(project).toHaveBeenLastCalledWith(session, { variableIds: ['first', 'second'], showLine: false })
+    const table = screen.getByRole('table', { name: 'Trace event history' })
+    const headers = within(table).getAllByRole('columnheader').map(header => header.textContent)
+    expect(headers).toEqual(['Step', 'Current x', 'y'])
+
+    unmount()
+    render(<TraceTable session={session} />)
+    expect(project).toHaveBeenLastCalledWith(session, { variableIds: ['first', 'second'], showLine: false })
+    expect(screen.getByRole('columnheader', { name: 'Current x' })).toBeInTheDocument()
+  })
+
+  it('restores row layout independently for each source', async () => {
+    const user = userEvent.setup()
+    const { unmount } = render(<TraceTable session={session} />)
+    await user.click(screen.getByRole('button', { name: 'Every line' }))
+    unmount()
+
+    const otherSession = { ...session, source: { filesystemId: 'other', path: 'main.py' } }
+    const { unmount: unmountOther } = render(<TraceTable session={otherSession} />)
+    expect(screen.getByRole('button', { name: 'Compact' })).toHaveAttribute('aria-pressed', 'true')
+    unmountOther()
+
+    render(<TraceTable session={session} />)
+    expect(screen.getByRole('button', { name: 'Every line' })).toHaveAttribute('aria-pressed', 'true')
   })
 
   it('keeps untouched cells blank while rendering an explicit same-value write', () => {
