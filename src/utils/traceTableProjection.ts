@@ -26,6 +26,11 @@ export interface TraceTableProjectionOptions {
   columnOrder?: TraceTableColumnKey[]
   /** When true, guarantee a sparse row for every completed source line. */
   showLine: boolean
+  /**
+   * Include concise teaching annotations and otherwise-hidden lifecycle rows.
+   * Defaults to false so existing table packing remains backward compatible.
+   */
+  includeAnnotations?: boolean
 }
 
 
@@ -67,8 +72,41 @@ export interface TraceTableProjectionRowMetadata {
   callNumber: number | null
 }
 
+export type TraceTableRowKind = 'line' | 'event' | 'continuation'
+
+export type TraceTableRowAnnotationKind =
+  | 'loop-iteration'
+  | 'call-entered'
+  | 'call-returned'
+  | 'call-exception-exit'
+  | 'exception'
+  | 'input-completed'
+  | 'generator-yielded'
+  | 'generator-resumed'
+  | 'continuation'
+
+/**
+ * Structured teaching context retained alongside a ready-to-render label.
+ * Renderers can use `label` directly, while richer views can inspect the
+ * event-specific value, exception, input, or loop identity without reparsing it.
+ */
+export interface TraceTableRowAnnotation {
+  kind: TraceTableRowAnnotationKind
+  sequence: number
+  label: string
+  functionName: string
+  loopIteration?: TraceExecutionEvent['loopIteration']
+  value?: InspectorNode
+  exception?: TraceExecutionEvent['exception']
+  inputValue?: string
+  /** Zero-based index in the event's write list that began this overflow row. */
+  continuationWriteIndex?: number
+}
+
 export interface TraceTableProjectionRow {
   id: string
+  /** Distinguishes lifecycle-only and overflow rows from ordinary line rows. */
+  kind: TraceTableRowKind
   /** First contributing event, useful as a stable sort and scroll anchor. */
   sequence: number
   /** All events represented by or packed into this row. */
@@ -79,6 +117,10 @@ export interface TraceTableProjectionRow {
   /** Sparse by design: a missing selected variable is a blank table cell. */
   cells: Record<TraceVariableId, TraceTableProjectionCell>
   metadata: TraceTableProjectionRowMetadata
+  /** Ordered, structured context contributed by events packed into this row. */
+  annotations: TraceTableRowAnnotation[]
+  /** One accessible teaching note, ready for a renderer to announce verbatim. */
+  teachingNote: string | null
 }
 
 export interface TraceTableProjection {
@@ -144,6 +186,148 @@ function rowMetadata(
   }
 }
 
+function inspectorSummary(value: InspectorNode | undefined): string | null {
+  if (!value) return null
+  if (value.summary) return conciseTeachingText(value.summary)
+  if (value.kind === 'primitive') {
+    if (typeof value.value === 'string') return conciseTeachingText(JSON.stringify(value.value))
+    return conciseTeachingText(String(value.value))
+  }
+  return conciseTeachingText(value.type)
+}
+
+function exceptionSummary(exception: TraceExecutionEvent['exception']): string {
+  if (!exception) return 'an exception'
+  return conciseTeachingText(exception.message ? `${exception.type}: ${exception.message}` : exception.type)
+}
+
+const MAX_TEACHING_DETAIL_LENGTH = 96
+
+function conciseTeachingText(value: string): string {
+  return value.length <= MAX_TEACHING_DETAIL_LENGTH
+    ? value
+    : `${value.slice(0, MAX_TEACHING_DETAIL_LENGTH - 1)}…`
+}
+
+function loopLabel(loopId: string, iteration: number): string {
+  const rawKind = loopId.split(':', 1)[0]?.toLowerCase()
+  const kind = rawKind === 'for' ? 'For loop' : rawKind === 'while' ? 'While loop' : 'Loop'
+  return `${kind} iteration ${iteration}.`
+}
+
+function callSuffix(metadata: TraceTableProjectionRowMetadata): string {
+  return metadata.callNumber === null ? '' : ` (call #${metadata.callNumber})`
+}
+
+function annotationsForEvent(
+  event: TraceExecutionEvent,
+  metadata: TraceTableProjectionRowMetadata,
+): TraceTableRowAnnotation[] {
+  const annotations: TraceTableRowAnnotation[] = []
+  const base = { sequence: event.sequence, functionName: metadata.functionName }
+
+  if (event.loopIteration) {
+    annotations.push({
+      ...base,
+      kind: 'loop-iteration',
+      label: loopLabel(event.loopIteration.loopId, event.loopIteration.iteration),
+      loopIteration: { ...event.loopIteration },
+    })
+  }
+
+  switch (event.kind) {
+    case 'call-entered':
+      annotations.push({
+        ...base,
+        kind: 'call-entered',
+        label: `Entered ${metadata.functionName}${callSuffix(metadata)}.`,
+      })
+      break
+    case 'call-returned': {
+      const value = inspectorSummary(event.returnValue)
+      annotations.push({
+        ...base,
+        kind: 'call-returned',
+        label: `Returned from ${metadata.functionName}${callSuffix(metadata)}${value === null ? '.' : ` with ${value}.`}`,
+        value: event.returnValue,
+      })
+      break
+    }
+    case 'call-exception-exit':
+      annotations.push({
+        ...base,
+        kind: 'call-exception-exit',
+        label: `Left ${metadata.functionName}${callSuffix(metadata)} after ${exceptionSummary(event.exception)}.`,
+        exception: event.exception,
+      })
+      break
+    case 'exception':
+      annotations.push({
+        ...base,
+        kind: 'exception',
+        label: `${exceptionSummary(event.exception)} raised in ${metadata.functionName}.`,
+        exception: event.exception,
+      })
+      break
+    case 'input-completed':
+      annotations.push({
+        ...base,
+        kind: 'input-completed',
+        label: event.inputValue === undefined
+          ? 'Input received.'
+          : `Input received: ${conciseTeachingText(JSON.stringify(event.inputValue))}.`,
+        inputValue: event.inputValue,
+      })
+      break
+    case 'generator-yielded': {
+      const value = inspectorSummary(event.returnValue)
+      annotations.push({
+        ...base,
+        kind: 'generator-yielded',
+        label: `${metadata.functionName} yielded${value === null ? '.' : ` ${value}.`}`,
+        value: event.returnValue,
+      })
+      break
+    }
+    case 'generator-resumed':
+      annotations.push({
+        ...base,
+        kind: 'generator-resumed',
+        label: `Resumed ${metadata.functionName}.`,
+      })
+      break
+    case 'line-completed':
+      break
+  }
+
+  return annotations
+}
+
+function continuationAnnotation(
+  event: TraceExecutionEvent,
+  metadata: TraceTableProjectionRowMetadata,
+  writeIndex: number,
+): TraceTableRowAnnotation {
+  return {
+    kind: 'continuation',
+    sequence: event.sequence,
+    functionName: metadata.functionName,
+    label: 'Continued values from the same execution event.',
+    continuationWriteIndex: writeIndex,
+  }
+}
+
+function updateTeachingNote(row: TraceTableProjectionRow): void {
+  row.teachingNote = row.annotations.length === 0
+    ? null
+    : row.annotations.map(annotation => annotation.label).join(' ')
+}
+
+function appendAnnotations(row: TraceTableProjectionRow, annotations: TraceTableRowAnnotation[]): void {
+  row.annotations.push(...annotations)
+  updateTeachingNote(row)
+}
+
 function sameCallStack(left: TraceCallId[] | undefined, right: TraceCallId[]): boolean {
   return left !== undefined
     && left.length === right.length
@@ -187,12 +371,17 @@ function eventRow(
   const continuation = continuationWriteIndex === undefined ? '' : `:${continuationWriteIndex}`
   return {
     id: `${session.id}:${rowKind}:${event.sequence}${continuation}`,
+    kind: continuationWriteIndex === undefined
+      ? event.kind === 'line-completed' ? 'line' : 'event'
+      : 'continuation',
     sequence: event.sequence,
     sequences: [event.sequence],
     line: event.location.line,
     location: event.location,
     cells: {},
     metadata: rowMetadata(session, event, context),
+    annotations: [],
+    teachingNote: null,
   }
 }
 
@@ -204,10 +393,13 @@ function compactRow(
 ): TraceTableProjectionRow {
   return {
     id: `${session.id}:compact:${event.sequence}:${writeIndex}`,
+    kind: event.kind === 'line-completed' ? 'line' : 'event',
     sequence: event.sequence,
     sequences: [],
     cells: {},
     metadata: rowMetadata(session, event, context),
+    annotations: [],
+    teachingNote: null,
   }
 }
 
@@ -219,6 +411,7 @@ function projectEveryLine(
   session: TraceSession,
   selected: ReadonlySet<TraceVariableId>,
   context: ProjectionMetadataContext,
+  includeAnnotations: boolean,
 ): TraceTableProjectionRow[] {
   const bindings = new Map<string, TraceBindingState>()
   const rows: TraceTableProjectionRow[] = []
@@ -226,16 +419,20 @@ function projectEveryLine(
   for (const event of session.events) {
     applyEventDeltas(bindings, event)
     const selectedWrites = event.writes.filter(write => selected.has(write.variableId))
+    const metadata = rowMetadata(session, event, context)
+    const annotations = includeAnnotations ? annotationsForEvent(event, metadata) : []
     // Every-line mode continues to mean one row per completed source line.
     // Lifecycle events only join it when they carry a selected parameter/write,
     // preserving the pre-metadata Step/Line semantics.
-    if (event.kind !== 'line-completed' && selectedWrites.length === 0) continue
+    if (event.kind !== 'line-completed' && selectedWrites.length === 0 && annotations.length === 0) continue
 
     let row = eventRow(session, event, context)
+    appendAnnotations(row, annotations)
     selectedWrites.forEach((write, writeIndex) => {
       if (row.cells[write.variableId]) {
         rows.push(row)
         row = eventRow(session, event, context, writeIndex)
+        if (includeAnnotations) appendAnnotations(row, [continuationAnnotation(event, row.metadata, writeIndex)])
       }
       row.cells[write.variableId] = cellFor(event, write, bindings)
     })
@@ -250,6 +447,7 @@ function projectCompact(
   selected: ReadonlySet<TraceVariableId>,
   includeMetadata: boolean,
   context: ProjectionMetadataContext,
+  includeAnnotations: boolean,
 ): TraceTableProjectionRow[] {
   const bindings = new Map<string, TraceBindingState>()
   const rows: TraceTableProjectionRow[] = []
@@ -258,26 +456,35 @@ function projectCompact(
 
   for (const event of session.events) {
     applyEventDeltas(bindings, event)
+    const metadata = rowMetadata(session, event, context)
+    const annotations = includeAnnotations ? annotationsForEvent(event, metadata) : []
 
     const lifecycleTransition = event.kind !== 'line-completed'
     const callStackTransition = previousCallStack !== undefined && !sameCallStack(previousCallStack, event.callStack)
     const regionBoundary = Boolean(event.loopIteration || lifecycleTransition || callStackTransition)
     if (regionBoundary) current = undefined
 
-    if (includeMetadata && !current) {
+    if ((includeMetadata || annotations.length > 0) && !current) {
       current = compactRow(session, event, context, 0)
       rows.push(current)
     }
-    if (includeMetadata && current) appendSequence(current, event.sequence)
+    if ((includeMetadata || annotations.length > 0) && current) appendSequence(current, event.sequence)
+    if (current && annotations.length > 0) appendAnnotations(current, annotations)
 
+    let selectedWritesPlaced = 0
     event.writes.forEach((write, writeIndex) => {
       if (!selected.has(write.variableId)) return
       if (!current || current.cells[write.variableId]) {
         current = compactRow(session, event, context, writeIndex)
+        if (selectedWritesPlaced > 0) {
+          current.kind = 'continuation'
+          if (includeAnnotations) appendAnnotations(current, [continuationAnnotation(event, current.metadata, writeIndex)])
+        }
         rows.push(current)
       }
       current.cells[write.variableId] = cellFor(event, write, bindings)
       appendSequence(current, event.sequence)
+      selectedWritesPlaced += 1
     })
 
     previousCallStack = event.callStack
@@ -333,7 +540,7 @@ export function projectTraceTable(
     metadataColumns,
     displayColumns,
     rows: options.showLine
-      ? projectEveryLine(session, selected, context)
-      : projectCompact(session, selected, metaColumnIds.length > 0, context),
+      ? projectEveryLine(session, selected, context, options.includeAnnotations ?? false)
+      : projectCompact(session, selected, metaColumnIds.length > 0, context, options.includeAnnotations ?? false),
   }
 }

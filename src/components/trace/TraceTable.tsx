@@ -1,11 +1,17 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { InspectorNode } from '../../types'
-import type { TraceSession, TraceTableMetaColumnId, TraceTablePreferences } from '../../types/traceTable'
+import type { TraceSession, TraceTablePreferences } from '../../types/traceTable'
+import { getBaseFileStem, triggerDownload } from '../../utils/download'
 import {
   projectTraceTable,
-  type TraceTableProjectionCell,
-  type TraceTableProjectionRow,
 } from '../../utils/traceTableProjection'
+import {
+  deriveTraceTableFilterOptions,
+  exportTraceTableCsv,
+  filterTraceTableRows,
+  formatTraceTableInspectorSummary,
+  formatTraceTableLeadingCell,
+  formatTraceTableMetadata,
+} from '../../utils/traceTableExport'
 import {
   getStoredTraceTablePreferences,
   persistTraceTablePreferences,
@@ -32,32 +38,6 @@ interface TraceTableProps {
   session: TraceSession
 }
 
-const formatInspectorSummary = (node: InspectorNode): string => {
-  if (node.kind === 'primitive') {
-    if (typeof node.value === 'string') return node.summary ?? JSON.stringify(node.value)
-    return node.summary ?? String(node.value)
-  }
-
-  if (node.summary) return node.summary
-  if (node.kind === 'sequence') return `${node.type} • ${node.length ?? node.items?.length ?? 0} items`
-  if (node.kind === 'mapping') return `${node.type} • ${node.length ?? node.entries?.length ?? 0} entries`
-  if (node.kind === 'object') return `${node.type} • ${node.attrs?.length ?? 0} attrs`
-  if (node.kind === 'scope') return `${node.type} • ${node.entries?.length ?? 0} values`
-  return node.type
-}
-
-const formatTraceCell = (cell: TraceTableProjectionCell): string => {
-  if (cell.state.status === 'deleted') return 'Deleted'
-  if (cell.state.status !== 'value') return 'Unavailable'
-  return formatInspectorSummary(cell.state.value)
-}
-
-const formatTraceMetadata = (row: TraceTableProjectionRow, columnId: TraceTableMetaColumnId): string => {
-  if (columnId === 'meta:function') return row.metadata.functionName
-  if (columnId === 'meta:call-depth') return String(row.metadata.callDepth)
-  return row.metadata.callNumber === null ? '—' : String(row.metadata.callNumber)
-}
-
 /** A compact, teaching-oriented history of writes captured in a trace session. */
 export const TraceTable = ({ session }: TraceTableProps) => {
   const preferenceKey = traceTablePreferenceStorageKey(session.source)
@@ -65,11 +45,18 @@ export const TraceTable = ({ session }: TraceTableProps) => {
     () => refreshTraceTableCachedLabels(getStoredTraceTablePreferences(session.source), session.variables),
   )
   const [isDesignerOpen, setIsDesignerOpen] = useState(false)
+  const [showContext, setShowContext] = useState(true)
+  const [functionFilter, setFunctionFilter] = useState('')
+  const [callFilter, setCallFilter] = useState('')
+  const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'failed'>('idle')
 
   useEffect(() => {
     const restored = refreshTraceTableCachedLabels(getStoredTraceTablePreferences(session.source), session.variables)
     setPreferences(restored)
     persistTraceTablePreferences(session.source, restored)
+    setFunctionFilter('')
+    setCallFilter('')
+    setCopyStatus('idle')
   // The encoded key is stable even though session.source is replaced with each session object.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [preferenceKey])
@@ -106,15 +93,42 @@ export const TraceTable = ({ session }: TraceTableProps) => {
       metaColumnIds: displayedMetaColumnIds,
       columnOrder: displayedColumnOrder,
       showLine: preferences.rowMode === 'every-line',
+      includeAnnotations: showContext,
     }),
-    [displayedColumnOrder, displayedMetaColumnIds, displayedVariableIds, preferences.rowMode, session],
+    [displayedColumnOrder, displayedMetaColumnIds, displayedVariableIds, preferences.rowMode, session, showContext],
   )
+  const filterOptions = useMemo(() => deriveTraceTableFilterOptions(projection), [projection])
+  const visibleCallOptions = useMemo(
+    () => functionFilter
+      ? filterOptions.callNumbers.filter(option => option.functionName === functionFilter)
+      : filterOptions.callNumbers,
+    [filterOptions.callNumbers, functionFilter],
+  )
+  const visibleRows = useMemo(() => filterTraceTableRows(projection.rows, {
+    ...(functionFilter ? { functionName: functionFilter } : {}),
+    ...(callFilter ? { callNumber: Number(callFilter) } : {}),
+  }), [callFilter, functionFilter, projection.rows])
+
+  useEffect(() => {
+    if (functionFilter && !filterOptions.functions.some(option => option.value === functionFilter)) {
+      setFunctionFilter('')
+    }
+  }, [filterOptions.functions, functionFilter])
+
+  useEffect(() => {
+    if (!callFilter) return
+    const selectedCall = filterOptions.callNumbers.find(option => option.value === Number(callFilter))
+    if (!selectedCall || (functionFilter && selectedCall.functionName !== functionFilter)) setCallFilter('')
+  }, [callFilter, filterOptions.callNumbers, functionFilter])
   const availableVariables = useMemo(
     () => Object.values(session.variables)
       .sort((a, b) => a.firstSeenSequence - b.firstSeenSequence || a.defaultLabel.localeCompare(b.defaultLabel)),
     [session.variables],
   )
   const labelFor = (variableId: string) => resolveTraceTableColumnLabel(preferences, variableId, session.variables)
+  const labelForDisplayColumn = (column: (typeof projection.displayColumns)[number]) => column.kind === 'metadata'
+    ? resolveTraceTableMetaColumnLabel(preferences, column.metadataId)
+    : labelFor(column.variableId)
 
   const setRowMode = (rowMode: TraceTablePreferences['rowMode']) => updatePreferences({ ...preferences, rowMode })
   const applyColumnDesign = (result: TraceTableColumnDesignerResult) => {
@@ -129,9 +143,31 @@ export const TraceTable = ({ session }: TraceTableProps) => {
     setIsDesignerOpen(false)
   }
 
+  const csvForVisibleRows = () => exportTraceTableCsv(projection, {
+    rows: visibleRows,
+    leadingColumn: preferences.rowMode === 'every-line' ? 'line' : 'step',
+    includeTeachingNote: showContext,
+    resolveColumnLabel: labelForDisplayColumn,
+  })
+
+  const downloadCsv = () => {
+    const fileName = session.source.path.split('/').at(-1) ?? session.source.path
+    triggerDownload(`${getBaseFileStem(fileName, 'trace')}-trace.csv`, csvForVisibleRows(), 'text/csv;charset=utf-8')
+  }
+
+  const copyCsv = async () => {
+    try {
+      await navigator.clipboard.writeText(csvForVisibleRows())
+      setCopyStatus('copied')
+    } catch {
+      setCopyStatus('failed')
+    }
+  }
+
   const eventCount = session.events.length
-  const rowCount = projection.rows.length
-  const hasTableData = projection.displayColumns.length > 0 && rowCount > 0
+  const rowCount = visibleRows.length
+  const totalRowCount = projection.rows.length
+  const hasTableData = projection.displayColumns.length > 0 && totalRowCount > 0
 
   return (
     <section className="flex h-full min-h-0 flex-col rounded-lg border border-slate-700 bg-slate-900/60" aria-labelledby="trace-table-title">
@@ -142,7 +178,7 @@ export const TraceTable = ({ session }: TraceTableProps) => {
             <span className="rounded bg-slate-700/60 px-1.5 py-0.5 text-[10px] font-medium text-slate-300">{SESSION_STATUS_LABELS[session.status]}</span>
           </div>
           <p className="mt-0.5 text-xs text-slate-500" aria-live="polite">
-            {eventCount} {eventCount === 1 ? 'event' : 'events'} · {rowCount} {rowCount === 1 ? 'row' : 'rows'}
+            {eventCount} {eventCount === 1 ? 'event' : 'events'} · {rowCount !== totalRowCount ? `${rowCount} of ${totalRowCount}` : rowCount} {totalRowCount === 1 ? 'row' : 'rows'}
           </p>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
@@ -177,6 +213,74 @@ export const TraceTable = ({ session }: TraceTableProps) => {
         </div>
       )}
 
+      {projection.displayColumns.length > 0 && eventCount > 0 && (
+        <div className="flex flex-wrap items-center gap-2 border-b border-slate-700 bg-slate-950/40 px-3 py-2">
+          <label className="sr-only" htmlFor="trace-table-function-filter">Filter trace rows by function</label>
+          <select
+            id="trace-table-function-filter"
+            value={functionFilter}
+            onChange={event => {
+              const nextFunction = event.target.value
+              setFunctionFilter(nextFunction)
+              if (callFilter) {
+                const selectedCall = filterOptions.callNumbers.find(option => option.value === Number(callFilter))
+                if (nextFunction && selectedCall?.functionName !== nextFunction) setCallFilter('')
+              }
+            }}
+            className="max-w-48 rounded-md border border-slate-600 bg-slate-900 px-2 py-1 text-xs text-slate-200 focus:border-sky-500 focus:outline-none"
+          >
+            <option value="">All functions</option>
+            {filterOptions.functions.map(option => (
+              <option key={option.value} value={option.value}>{option.label} ({option.rowCount})</option>
+            ))}
+          </select>
+          <label className="sr-only" htmlFor="trace-table-call-filter">Filter trace rows by call</label>
+          <select
+            id="trace-table-call-filter"
+            value={callFilter}
+            onChange={event => setCallFilter(event.target.value)}
+            className="max-w-52 rounded-md border border-slate-600 bg-slate-900 px-2 py-1 text-xs text-slate-200 focus:border-sky-500 focus:outline-none"
+          >
+            <option value="">All calls</option>
+            {visibleCallOptions.map(option => (
+              <option key={option.value} value={option.value}>{option.label} ({option.rowCount})</option>
+            ))}
+          </select>
+          {(functionFilter || callFilter) && (
+            <button type="button" onClick={() => { setFunctionFilter(''); setCallFilter('') }}
+              className="rounded px-2 py-1 text-xs text-slate-400 hover:bg-slate-700/60 hover:text-slate-200">
+              Clear filters
+            </button>
+          )}
+          <div className="ml-auto flex items-center gap-1.5">
+            <button
+              type="button"
+              aria-pressed={showContext}
+              title="Show loop, call, return, exception, and input notes"
+              onClick={() => setShowContext(current => !current)}
+              className={`rounded-md border px-2 py-1 text-xs font-medium ${showContext ? 'border-sky-500 bg-sky-500/10 text-sky-100' : 'border-slate-600 text-slate-400 hover:text-slate-200'}`}
+            >
+              Context
+            </button>
+            <button type="button" onClick={downloadCsv}
+              className="rounded-md border border-slate-600 px-2 py-1 text-xs font-medium text-slate-200 hover:border-sky-500 hover:text-sky-100">
+              Download CSV
+            </button>
+            <button type="button" onClick={() => void copyCsv()}
+              className="rounded-md border border-slate-600 px-2 py-1 text-xs font-medium text-slate-200 hover:border-sky-500 hover:text-sky-100">
+              Copy CSV
+            </button>
+          </div>
+          <span
+            className={`text-xs ${copyStatus === 'failed' ? 'text-red-200' : 'text-emerald-300'}`}
+            role="status"
+            aria-live="polite"
+          >
+            {copyStatus === 'copied' ? 'Trace table CSV copied.' : copyStatus === 'failed' ? 'Could not copy trace table CSV.' : ''}
+          </span>
+        </div>
+      )}
+
       {hasTableData ? (
         <div className="min-h-0 flex-1 overflow-auto" tabIndex={0} aria-label="Trace table results">
           <table className="w-full min-w-max border-separate border-spacing-0 text-left text-xs" aria-label="Trace event history">
@@ -195,14 +299,18 @@ export const TraceTable = ({ session }: TraceTableProps) => {
               </tr>
             </thead>
             <tbody>
-              {projection.rows.map((row, rowIndex) => (
+              {visibleRows.map((row, rowIndex) => (
                 <tr key={row.id} className={rowIndex % 2 === 0 ? 'bg-slate-800/40' : undefined}>
-                  <th scope="row" className="whitespace-nowrap border-b border-r border-slate-700/60 px-3 py-2 font-medium text-slate-400">
-                    {row.line === undefined ? `Event ${row.sequences.join(', ')}` : `Line ${row.line}`}
+                  <th scope="row" title={`Trace ${row.sequences.length === 1 ? 'event' : 'events'} ${row.sequences.join(', ')}`}
+                    className="max-w-64 border-b border-r border-slate-700/60 px-3 py-2 font-medium text-slate-400">
+                    <span className="block whitespace-nowrap">{formatTraceTableLeadingCell(row, preferences.rowMode === 'every-line' ? 'line' : 'step', rowIndex)}</span>
+                    {showContext && row.teachingNote && (
+                      <span className="trace-table-teaching-note mt-0.5 block max-w-60 text-[10px] font-normal leading-snug text-amber-300">{row.teachingNote}</span>
+                    )}
                   </th>
                   {projection.displayColumns.map(column => {
                     if (column.kind === 'metadata') {
-                      const value = formatTraceMetadata(row, column.metadataId)
+                      const value = formatTraceTableMetadata(row, column.metadataId)
                       return (
                         <td key={column.key} className="whitespace-nowrap border-b border-slate-700/60 px-3 py-2 font-medium text-sky-100">
                           {value}
@@ -218,13 +326,20 @@ export const TraceTable = ({ session }: TraceTableProps) => {
                       return <td key={column.variableId} className="border-b border-slate-700/60 px-3 py-2 font-medium text-red-200">Deleted</td>
                     }
                     return (
-                      <td key={column.variableId} className="max-w-64 border-b border-slate-700/60 px-3 py-2 text-emerald-300" title={formatTraceCell(cell)}>
-                        <span className="block truncate">{formatTraceCell(cell)}</span>
+                      <td key={column.variableId} className="max-w-64 border-b border-slate-700/60 px-3 py-2 text-emerald-300" title={formatTraceTableInspectorSummary(cell.state.value)}>
+                        <span className="block truncate">{formatTraceTableInspectorSummary(cell.state.value)}</span>
                       </td>
                     )
                   })}
                 </tr>
               ))}
+              {visibleRows.length === 0 && (
+                <tr>
+                  <td colSpan={projection.displayColumns.length + 1} className="px-4 py-8 text-center text-sm text-slate-500">
+                    No trace rows match these filters.
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>

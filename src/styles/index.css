@@ -2,6 +2,10 @@
 @tailwind components;
 @tailwind utilities;
 
+html[data-theme="light"] .trace-table-teaching-note {
+  color: #92400e;
+}
+
 body {
   font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
   background: #0f172a;
