@@ -125,7 +125,7 @@ export function formatTraceTableLeadingCell(
     if (row.line === undefined) return row.kind === 'event' ? 'Event' : ''
     return `Line ${row.line}${row.kind === 'continuation' ? ' (continued)' : ''}`
   }
-  return `Step ${rowIndex + 1}`
+  return `Step ${row.stepNumber ?? rowIndex + 1}`
 }
 
 export interface TraceTableCsvOptions {

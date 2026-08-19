@@ -14,8 +14,12 @@ import type {
   TraceVariableDefinition,
   TraceVariableId,
 } from '../types/traceTable'
+import { TRACE_TABLE_EVENT_LIMIT } from '../types/traceTable'
 
 const BINDING_SEPARATOR = '@'
+
+/** Keeps worker-batch adaptation replay bounded without excessive snapshots. */
+export const TRACE_TABLE_CHECKPOINT_INTERVAL = 480
 
 function encodeIdPart(value: string): string {
   return encodeURIComponent(value)
@@ -85,12 +89,22 @@ function cloneCheckpoint(checkpoint: TraceCheckpoint): TraceCheckpoint {
 }
 
 export function createTraceSession(init: TraceSessionInit): TraceSession {
+  const eventLimit = init.eventLimit ?? TRACE_TABLE_EVENT_LIMIT
+  if (!Number.isSafeInteger(eventLimit) || eventLimit <= 0) {
+    throw new RangeError('eventLimit must be a positive safe integer')
+  }
   return {
     id: init.id,
     source: { ...init.source },
     startedAt: init.startedAt ?? Date.now(),
     status: 'recording',
     truncated: false,
+    retention: {
+      eventLimit,
+      retainedEventCount: 0,
+      droppedEventCount: 0,
+      limitReached: false,
+    },
     variables: {},
     calls: {},
     events: [],
@@ -113,10 +127,17 @@ function validateBatch(session: TraceSession, batch: TraceEventBatch): void {
     throw new Error(`Missing trace batch ${expectedBatch}; received ${batch.batchSequence}`)
   }
 
+
+  const eventLimit = session.retention?.eventLimit ?? TRACE_TABLE_EVENT_LIMIT
+  if (session.events.length + batch.events.length > eventLimit) {
+    throw new Error(`Trace batch exceeds the ${eventLimit} event retention limit`)
+  }
+
   let previousSequence = session.events.at(-1)?.sequence ?? -1
   for (const event of batch.events) {
-    if (event.sequence <= previousSequence) {
-      throw new Error(`Trace event sequence ${event.sequence} is not strictly increasing`)
+    const expectedSequence = previousSequence + 1
+    if (event.sequence !== expectedSequence) {
+      throw new Error(`Trace event sequence ${event.sequence} is not contiguous; expected ${expectedSequence}`)
     }
     previousSequence = event.sequence
 
@@ -163,6 +184,9 @@ export function mergeTraceBatch(session: TraceSession, batch: TraceEventBatch): 
     calls,
     events,
     checkpoints,
+    retention: session.retention
+      ? { ...session.retention, retainedEventCount: events.length }
+      : undefined,
     lastBatchSequence: batch.batchSequence,
     ...(batch.status
       ? {
@@ -252,4 +276,20 @@ export function appendTraceCheckpoint(session: TraceSession, eventCount = sessio
     .concat(checkpoint)
     .sort((a, b) => a.eventCount - b.eventCount)
   return { ...session, checkpoints }
+}
+
+/**
+ * Add a checkpoint only after a successfully merged batch has advanced far
+ * enough. This never changes event or transport-batch sequencing.
+ */
+export function maybeAppendTraceCheckpoint(
+  session: TraceSession,
+  interval = TRACE_TABLE_CHECKPOINT_INTERVAL,
+): TraceSession {
+  if (!Number.isInteger(interval) || interval <= 0) throw new RangeError('checkpoint interval must be a positive integer')
+  if (session.events.length === 0) return session
+  const lastCheckpointCount = session.checkpoints.at(-1)?.eventCount ?? 0
+  return session.events.length - lastCheckpointCount >= interval
+    ? appendTraceCheckpoint(session)
+    : session
 }

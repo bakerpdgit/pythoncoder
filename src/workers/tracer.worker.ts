@@ -1,5 +1,6 @@
 /// <reference lib="webworker" />
 
+import { TRACE_TABLE_EVENT_LIMIT } from '../types/traceTable'
 
 const PYODIDE_BASE_URL = 'https://cdn.jsdelivr.net/pyodide/v0.29.3/full'
 const PYODIDE_URL = `${PYODIDE_BASE_URL}/pyodide.js`
@@ -55,6 +56,8 @@ import sys
 import json
 import builtins
 import types
+import itertools
+import math
 _builtin_names = frozenset(dir(builtins))
 if trace_table_enabled:
     import dis
@@ -289,13 +292,17 @@ pending_action = None if pause_on_first_line else {"type": "continue"}
 breakpoint_hit = False
 MAX_ITEMS = 120
 MAX_STRING = 120
+MAX_SERIALIZATION_DEPTH = 6
+MAX_SERIALIZATION_NODES = 500
 
 # Trace-table recording is deliberately independent of debugger pausing. The
 # debugger may Continue over thousands of lines, but these non-blocking batches
 # still preserve the execution history needed by later table projections.
 TRACE_TABLE_PROTOCOL_VERSION = 1
 TRACE_TABLE_BATCH_SIZE = 48
-trace_table_sequence = 0
+TRACE_TABLE_EVENT_LIMIT = trace_table_event_limit
+# Event sequences are zero-based and contiguous for the complete retained run.
+trace_table_sequence = -1
 trace_table_batch = []
 trace_table_catalogue_batch = []
 trace_table_catalogue_ids = set()
@@ -310,75 +317,135 @@ trace_table_closure_sources = {}
 class _TraceTableStopRequested(BaseException):
     pass
 
+class _TraceTableLimitReached(BaseException):
+    pass
+
 def is_serializable_local(name, value):
     if name.startswith("__"):
         return False
     if callable(value):
         return False
-    if isinstance(value, type(sys)):
+    if type(value) is types.ModuleType:
         return False
     return True
 
 def format_scalar(value):
-    if isinstance(value, str):
+    value_type = type(value)
+    if value_type is str:
         if len(value) > MAX_STRING:
             return value[: MAX_STRING - 1] + "\\u2026"
         return value
-    if isinstance(value, float):
+    if value_type is float:
+        if math.isnan(value):
+            return "NaN"
+        if math.isinf(value):
+            return "Infinity" if value > 0 else "-Infinity"
         return round(value, 4)
     return value
 
 def summarize_value(value):
-    if isinstance(value, str):
+    value_type = type(value)
+    if value_type is str:
         preview = format_scalar(value)
         return repr(preview)
-    if value is None or isinstance(value, (bool, int, float)):
+    if value is None or value_type in (bool, int):
         return repr(value)
-    if isinstance(value, (list, tuple, set)):
-        return f"{type(value).__name__}[{len(value)}]"
-    if isinstance(value, dict):
+    if value_type is float:
+        return str(format_scalar(value))
+    if value_type in (list, tuple, set):
+        return f"{value_type.__name__}[{len(value)}]"
+    if value_type is dict:
         return f"dict {{{len(value)}}}"
-    return getattr(value, "__class__", type(value)).__name__
+    return safe_type_name(value)
 
-def _serialize_value(value, path_ids=None):
+def safe_type_name(value):
+    try:
+        # Bypass a custom metaclass __getattribute__ implementation.
+        return type.__getattribute__(type(value), "__name__")
+    except BaseException:
+        return "unavailable"
+
+def safe_instance_dict(value):
+    """Return a plain instance dictionary without invoking user access hooks."""
+    try:
+        value_type = type(value)
+        mro = type.__getattribute__(value_type, "__mro__")
+        getattribute_impl = None
+        dict_descriptor = None
+        for owner in mro:
+            namespace = type.__getattribute__(owner, "__dict__")
+            if getattribute_impl is None and "__getattribute__" in namespace:
+                getattribute_impl = namespace["__getattribute__"]
+            if dict_descriptor is None and "__dict__" in namespace:
+                dict_descriptor = namespace["__dict__"]
+        if getattribute_impl is not object.__getattribute__:
+            return None
+        if type(dict_descriptor) is not types.GetSetDescriptorType:
+            return None
+        namespace = object.__getattribute__(value, "__dict__")
+        return namespace if type(namespace) is dict else None
+    except BaseException:
+        return None
+
+def _serialization_limit_node(value, reason):
+    type_name = safe_type_name(value)
+    return {"kind": "reference", "type": type_name, "summary": f"{type_name} ({reason})"}
+
+def _serialize_value(value, path_ids=None, depth=0, budget=None):
     if path_ids is None:
         path_ids = set()
+    if budget is None:
+        budget = {"remaining": MAX_SERIALIZATION_NODES}
+    if budget["remaining"] <= 0:
+        return _serialization_limit_node(value, "node limit")
+    budget["remaining"] -= 1
+    value_type = type(value)
+    if depth >= MAX_SERIALIZATION_DEPTH and not (value is None or value_type in (bool, int, float, str)):
+        return _serialization_limit_node(value, "depth limit")
 
-    if value is None or isinstance(value, (bool, int, float, str)):
+    if value is None or value_type in (bool, int, float, str):
         return {
             "kind": "primitive",
-            "type": type(value).__name__,
+            "type": safe_type_name(value),
             "value": format_scalar(value),
             "summary": summarize_value(value),
         }
 
-    if isinstance(value, (list, tuple, set)):
+    if value_type in (list, tuple, set):
         object_id = id(value)
         if object_id in path_ids:
-            return {"kind": "reference", "type": type(value).__name__, "summary": f"{type(value).__name__} (circular)"}
+            return {"kind": "reference", "type": value_type.__name__, "summary": f"{value_type.__name__} (circular)"}
         next_ids = set(path_ids)
         next_ids.add(object_id)
-        sequence = list(value)
+        length = len(value)
+        if value_type in (list, tuple):
+            sequence = value[:MAX_ITEMS]
+        else:
+            # islice prevents copying an arbitrarily large set before applying
+            # the display bound.
+            sequence = list(itertools.islice(iter(value), MAX_ITEMS))
         return {
             "kind": "sequence",
-            "type": type(value).__name__,
-            "length": len(sequence),
-            "summary": f"{type(value).__name__}[{len(sequence)}]",
-            "truncated": len(sequence) > MAX_ITEMS,
-            "items": [{"label": f"[{i}]", "value": serialize_value(item, next_ids)} for i, item in enumerate(sequence[:MAX_ITEMS])],
+            "type": value_type.__name__,
+            "length": length,
+            "summary": f"{value_type.__name__}[{length}]",
+            "truncated": length > MAX_ITEMS,
+            "items": [{"label": f"[{i}]", "value": serialize_value(item, next_ids, depth + 1, budget)} for i, item in enumerate(sequence)],
         }
 
-    if isinstance(value, dict):
+    if value_type is dict:
         object_id = id(value)
         if object_id in path_ids:
             return {"kind": "reference", "type": "dict", "summary": "dict (circular)"}
         next_ids = set(path_ids)
         next_ids.add(object_id)
         entries = []
-        for key, item in list(value.items())[:MAX_ITEMS]:
-            if callable(item) or isinstance(item, type(sys)):
+        for key, item in itertools.islice(value.items(), MAX_ITEMS):
+            if callable(item) or type(item) is types.ModuleType:
                 continue
-            entries.append({"label": repr(key), "value": serialize_value(item, next_ids)})
+            key_type = type(key)
+            label = repr(key) if key is None or key_type in (bool, int, float, str) else f"<{safe_type_name(key)} key>"
+            entries.append({"label": label, "value": serialize_value(item, next_ids, depth + 1, budget)})
         return {
             "kind": "mapping",
             "type": "dict",
@@ -388,34 +455,38 @@ def _serialize_value(value, path_ids=None):
             "entries": entries,
         }
 
-    if hasattr(value, "__dict__"):
+    namespace = safe_instance_dict(value)
+    if namespace is not None:
         object_id = id(value)
         if object_id in path_ids:
-            return {"kind": "reference", "type": value.__class__.__name__, "summary": f"{value.__class__.__name__} (circular)"}
+            type_name = safe_type_name(value)
+            return {"kind": "reference", "type": type_name, "summary": f"{type_name} (circular)"}
         next_ids = set(path_ids)
         next_ids.add(object_id)
         attributes = []
-        for name, item in value.__dict__.items():
-            if name.startswith("__") or callable(item) or isinstance(item, type(sys)):
+        for name, item in itertools.islice(namespace.items(), MAX_ITEMS):
+            if type(name) is not str or name.startswith("__") or callable(item) or type(item) is types.ModuleType:
                 continue
-            attributes.append({"label": name, "value": serialize_value(item, next_ids)})
+            attributes.append({"label": name, "value": serialize_value(item, next_ids, depth + 1, budget)})
+        type_name = safe_type_name(value)
         return {
             "kind": "object",
-            "type": value.__class__.__name__,
-            "summary": f"{value.__class__.__name__} ({len(attributes)} attrs)",
+            "type": type_name,
+            "summary": f"{type_name} ({len(attributes)} attrs)",
             "attrs": attributes,
         }
 
-    return {"kind": "primitive", "type": type(value).__name__, "value": summarize_value(value), "summary": summarize_value(value)}
+    type_name = safe_type_name(value)
+    return {"kind": "reference", "type": type_name, "summary": type_name}
 
-def serialize_value(value, path_ids=None):
+def serialize_value(value, path_ids=None, depth=0, budget=None):
     try:
-        return _serialize_value(value, path_ids)
+        return _serialize_value(value, path_ids, depth, budget)
     except BaseException:
         # User-defined __repr__, __getattribute__, collection iteration, and
         # similar introspection hooks must never be able to abort tracing.
         try:
-            type_name = type(value).__name__
+            type_name = safe_type_name(value)
         except BaseException:
             type_name = "unavailable"
         summary = f"<{type_name}: unavailable>"
@@ -424,15 +495,27 @@ def serialize_value(value, path_ids=None):
 def trace_table_qualified_name(frame):
     return getattr(frame.f_code, "co_qualname", frame.f_code.co_name)
 
+def trace_table_lexical_parent_name(code):
+    qualified = getattr(code, "co_qualname", code.co_name)
+    marker = ".<locals>."
+    return qualified.rsplit(marker, 1)[0] if marker in qualified else None
+
 def trace_table_frame_meta(frame):
     return trace_table_frames.get(id(frame))
 
 def trace_table_defining_frame(frame, name):
     if name not in frame.f_code.co_freevars:
         return frame
+    lexical_parent = trace_table_lexical_parent_name(frame.f_code)
+    if lexical_parent is None:
+        return frame
     current = frame.f_back
     while current is not None:
-        if current.f_code.co_filename == "simulation.py" and name in current.f_locals:
+        if (
+            current.f_code.co_filename == "simulation.py" and
+            trace_table_qualified_name(current) == lexical_parent and
+            name in current.f_locals
+        ):
             return current
         current = current.f_back
     return frame
@@ -449,6 +532,12 @@ def trace_table_register_closure_value(frame, value, seen, depth=0):
         code = value.__code__
         closure = value.__closure__
         if closure:
+            # A foreign callback may close over x while the dynamic caller
+            # also has an unrelated x. Only its actual lexical parent may
+            # associate those closure cells with source bindings.
+            lexical_parent = trace_table_lexical_parent_name(code)
+            if lexical_parent is None or trace_table_qualified_name(frame) != lexical_parent:
+                return
             for free_name, cell in zip(code.co_freevars, closure):
                 if free_name not in frame.f_locals:
                     continue
@@ -509,7 +598,7 @@ def trace_table_safe_resolve(expression, frame, for_index=False):
         try:
             # Modules expose a plain dictionary; arbitrary object attribute
             # access could execute a descriptor or user __getattribute__ hook.
-            namespace = vars(owner) if isinstance(owner, type(sys)) else None
+            namespace = vars(owner) if type(owner) is types.ModuleType else None
             return namespace.get(expression.attr) if type(namespace) is dict else None
         except BaseException:
             return None
@@ -690,14 +779,12 @@ def trace_table_flush():
         "events": trace_table_batch,
         "catalogue": trace_table_catalogue_batch,
     }
+    # JSON transport failures are terminal recording errors. Retain the batch
+    # until the JS bridge has parsed and posted it so a failure can never look
+    # like a complete trace with silently missing history.
+    js_trace_table_batch(json.dumps(payload, allow_nan=False))
     trace_table_batch = []
     trace_table_catalogue_batch = []
-    try:
-        js_trace_table_batch(json.dumps(payload))
-    except Exception:
-        # Trace recording must never make the user's program fail. The normal
-        # debugger remains usable even if a future consumer rejects a batch.
-        pass
 
 def trace_table_record(event_type, frame, **details):
     global trace_table_sequence
@@ -740,6 +827,12 @@ def trace_table_record(event_type, frame, **details):
     trace_table_batch.append(event)
     if len(trace_table_batch) >= TRACE_TABLE_BATCH_SIZE:
         trace_table_flush()
+    if trace_table_sequence + 1 >= TRACE_TABLE_EVENT_LIMIT:
+        # Flush the exact event which reaches the bound, including any newly
+        # discovered catalogue entries, before publishing the terminal ack.
+        trace_table_flush()
+        js_trace_table_limit_reached(trace_table_sequence + 1, TRACE_TABLE_EVENT_LIMIT, trace_table_sequence)
+        raise _TraceTableLimitReached()
 
 def trace_table_values_equal(left, right):
     try:
@@ -762,10 +855,17 @@ def trace_table_finalize_opcode(frame):
     operation = meta.pop("pendingOpcode", None)
     if operation is None:
         return
+    name = operation["name"]
+    if operation["kind"] == "write":
+        # Register a newly stored closure while its lexical defining frame is
+        # still known. Waiting until it is returned is too late for callbacks
+        # invoked indirectly first, where a dynamic caller may have a different
+        # local with the same name as the captured cell.
+        raw_value = frame.f_locals.get(name, frame.f_globals.get(name))
+        trace_table_register_closure_value(frame, raw_value, set())
     pending = trace_table_pending.get(id(frame))
     if pending is None:
         return
-    name = operation["name"]
     if operation["kind"] == "write":
         item = trace_table_capture_named(frame, name)
         if item is not None:
@@ -783,9 +883,6 @@ def trace_table_finalize_opcode(frame):
 
 def trace_table_note_opcode(frame):
     trace_table_finalize_opcode(frame)
-    pending = trace_table_pending.get(id(frame))
-    if pending is None:
-        return
     instruction = trace_table_instruction(frame)
     if instruction is None:
         return
@@ -795,7 +892,11 @@ def trace_table_note_opcode(frame):
         meta = trace_table_frame_meta(frame)
         if meta is not None:
             meta["pendingOpcode"] = {"kind": "write", "name": name, "before": trace_table_capture_named(frame, name)}
-    elif opname in ("DELETE_FAST", "DELETE_NAME", "DELETE_GLOBAL", "DELETE_DEREF"):
+        return
+    pending = trace_table_pending.get(id(frame))
+    if pending is None:
+        return
+    if opname in ("DELETE_FAST", "DELETE_NAME", "DELETE_GLOBAL", "DELETE_DEREF"):
         name = str(instruction.argval)
         meta = trace_table_frame_meta(frame)
         if meta is not None:
@@ -1173,6 +1274,11 @@ def trace_calls(frame, event, arg):
             frame.f_trace_opcodes = True
         except Exception:
             pass
+        # Register concrete function/cell identities before this source line
+        # can pass a closure through an indirect callback. Lexical-parent
+        # validation prevents same-named locals in dynamic callers poisoning
+        # the registry.
+        trace_table_register_closures(frame)
         trace_table_complete_statement(frame, next_line=line_no)
         meta = trace_table_frame_meta(frame)
         if meta is not None:
@@ -1249,8 +1355,14 @@ self.onmessage = async function (e: MessageEvent) {
   const useSvgTurtle = Boolean(e.data.svgTurtleBootstrap)
   const traceTableEnabled = Boolean(e.data.traceTableEnabled ?? e.data.pauseOnFirstLine)
   const traceTableSessionId = String(e.data.traceTableSessionId ?? `trace-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+  const requestedTraceTableEventLimit = Number(e.data.traceTableEventLimit ?? TRACE_TABLE_EVENT_LIMIT)
+  const traceTableEventLimit = Number.isSafeInteger(requestedTraceTableEventLimit) && requestedTraceTableEventLimit > 0
+    ? requestedTraceTableEventLimit
+    : TRACE_TABLE_EVENT_LIMIT
   let traceTableBatchIndex = 0
   let traceTableStopAcknowledged = false
+  let traceTableLimitReached = false
+  let traceTableTransportError: string | null = null
 
   // This callback never blocks the Python worker. Debugger pauses continue to
   // use js_trace_callback + SharedArrayBuffer; trace-table history is delivered
@@ -1262,16 +1374,22 @@ self.onmessage = async function (e: MessageEvent) {
         events: unknown[]
         catalogue: unknown[]
       }
+      const batchSequence = traceTableBatchIndex
       self.postMessage({
         type: 'trace-table-batch',
         sessionId: traceTableSessionId,
-        batchSequence: traceTableBatchIndex++,
+        batchSequence,
         protocolVersion: payload.protocolVersion,
         events: payload.events,
         catalogue: payload.catalogue,
       })
-    } catch {
-      // Recording is auxiliary: malformed data must not interrupt user code.
+      traceTableBatchIndex += 1
+    } catch (error) {
+      traceTableTransportError = error instanceof Error ? error.message : String(error)
+      // Propagate into Python so trace_table_flush keeps ownership of the
+      // unposted batch. A user handler may catch the bridge exception, but the
+      // terminal flush below checks this persistent failure before completion.
+      throw error
     }
   })
 
@@ -1280,6 +1398,33 @@ self.onmessage = async function (e: MessageEvent) {
     if (traceTableStopAcknowledged) return
     traceTableStopAcknowledged = true
     self.postMessage({ type: 'trace-table-stop-ack', sessionId: traceTableSessionId, batchCount: traceTableBatchIndex })
+  })
+  pyodide.globals.set('js_trace_table_limit_reached', (eventCount: number, eventLimit: number, lastSequence: number) => {
+    if (traceTableLimitReached) return
+    traceTableLimitReached = true
+    const updatedFiles = collectUpdatedFiles()
+    let finalTurtleSvg = ''
+    if (useSvgTurtle) {
+      try { finalTurtleSvg = String(pyodide.globals.get('__turtle_svg__') ?? '') } catch { /* ignore */ }
+    }
+    self.postMessage({
+      type: 'trace-table-limit-reached',
+      sessionId: traceTableSessionId,
+      batchCount: traceTableBatchIndex,
+      eventCount,
+      eventLimit,
+      lastSequence,
+      droppedEventCount: 0,
+    })
+    if (finalTurtleSvg) self.postMessage({ type: 'turtle_update', svg: finalTurtleSvg })
+    self.postMessage({ type: 'done', files: updatedFiles, traceTableLimitReached: true })
+
+    // The terminal messages above are FIFO after the exact final batch. Block
+    // inside the JS bridge so no bare `except`/BaseException handler in user
+    // Python can intercept the fallback sentinel and continue untraced. The
+    // main thread handles `done` and terminates this worker.
+    const terminalWait = new Int32Array(new SharedArrayBuffer(4))
+    for (;;) Atomics.wait(terminalWait, 0, 0)
   })
 
   pyodide.globals.set('js_trace_callback', (line: number, func: string, cls: string, stateStr: string, watchValsStr: string, isBreakpoint: boolean) => {
@@ -1400,6 +1545,7 @@ self.onmessage = async function (e: MessageEvent) {
     pyodide.globals.set('initial_breakpoints', pyodide.toPy(initialBreakpoints))
     pyodide.globals.set('pause_on_first_line', Boolean(e.data.pauseOnFirstLine))
     pyodide.globals.set('trace_table_enabled', traceTableEnabled)
+    pyodide.globals.set('trace_table_event_limit', traceTableEventLimit)
     pyodide.globals.set('user_code_str', userCode)
     await pyodide.runPythonAsync(SETUP_CODE)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1408,7 +1554,8 @@ self.onmessage = async function (e: MessageEvent) {
 code_obj = compile(user_code_str, "simulation.py", "exec")
 exec(code_obj, user_namespace, user_namespace)
     `)
-    try { await pyodide.runPythonAsync('trace_table_flush()') } catch { /* best effort */ }
+    await pyodide.runPythonAsync('trace_table_flush()')
+    if (traceTableTransportError) throw new Error(`Trace table transport failed: ${traceTableTransportError}`)
     const updatedFiles = collectUpdatedFiles()
     let finalTurtleSvg = ''
     if (useSvgTurtle) {
@@ -1418,19 +1565,37 @@ exec(code_obj, user_namespace, user_namespace)
     if (traceTableEnabled) self.postMessage({ type: 'trace-table-end', sessionId: traceTableSessionId, status: 'done', batchCount: traceTableBatchIndex })
     self.postMessage({ type: 'done', files: updatedFiles })
   } catch (err) {
-    try { await pyodide.runPythonAsync('trace_table_flush()') } catch { /* best effort */ }
+    // Flush ordinary runtime/stop failures, but never retry a transport batch
+    // after the bridge has failed: its delivered prefix is the only history
+    // the terminal acknowledgement may claim as complete.
+    if (!traceTableTransportError) {
+      try { await pyodide.runPythonAsync('trace_table_flush()') } catch { /* best effort */ }
+    }
     const updatedFiles = collectUpdatedFiles()
     let finalTurtleSvg = ''
     if (useSvgTurtle) {
       try { finalTurtleSvg = String(pyodide.globals.get('__turtle_svg__') ?? '') } catch { /* ignore */ }
     }
     if (finalTurtleSvg) self.postMessage({ type: 'turtle_update', svg: finalTurtleSvg })
+    if (traceTableLimitReached) {
+      // The exact capped prefix and acknowledgement were already posted FIFO.
+      // Limit termination is deliberate, not a runtime error or ordinary end.
+      self.postMessage({ type: 'done', files: updatedFiles, traceTableLimitReached: true })
+      return
+    }
     if (traceTableStopAcknowledged) {
       if (traceTableEnabled) self.postMessage({ type: 'trace-table-end', sessionId: traceTableSessionId, status: 'stopped', batchCount: traceTableBatchIndex })
       self.postMessage({ type: 'done', files: updatedFiles })
       return
     }
-    if (traceTableEnabled) self.postMessage({ type: 'trace-table-end', sessionId: traceTableSessionId, status: 'error', batchCount: traceTableBatchIndex, error: String(err) })
+    if (traceTableEnabled) self.postMessage({
+      type: 'trace-table-end',
+      sessionId: traceTableSessionId,
+      status: 'error',
+      batchCount: traceTableBatchIndex,
+      error: String(err),
+      traceDataIncomplete: traceTableTransportError !== null,
+    })
     self.postMessage({ type: 'error', error: String(err), files: updatedFiles })
   }
 }

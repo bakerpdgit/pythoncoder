@@ -1,5 +1,11 @@
 import type { InspectorNode } from './index'
 
+/**
+ * Hard per-run retention bound. Reaching it stops execution after recording
+ * the final event; no recorded event is evicted or silently discarded.
+ */
+export const TRACE_TABLE_EVENT_LIMIT = 10_000
+
 /** Stable identity for a source-level variable, independent of a call activation. */
 export type TraceVariableId = string
 
@@ -195,6 +201,18 @@ export interface TraceSessionInit {
   id: string
   source: TraceSessionSource
   startedAt?: number
+  eventLimit?: number
+}
+
+export interface TraceRetentionMetadata {
+  /** Maximum number of ordered events this session may retain. */
+  eventLimit: number
+  /** Events retained from the start of execution. */
+  retainedEventCount: number
+  /** Always zero for the stop-at-limit policy; non-zero means data loss. */
+  droppedEventCount: number
+  /** True when execution was deliberately stopped before program completion. */
+  limitReached: boolean
 }
 
 export interface TraceSession {
@@ -205,6 +223,8 @@ export interface TraceSession {
   status: TraceSessionStatus
   error?: string
   truncated: boolean
+  /** Present on sessions created by the bounded recorder. Optional for legacy fixtures/data. */
+  retention?: TraceRetentionMetadata
   variables: Record<TraceVariableId, TraceVariableDefinition>
   calls: Record<TraceCallId, TraceCallActivation>
   events: TraceExecutionEvent[]
@@ -314,6 +334,8 @@ export interface TraceWorkerEndMessage {
   status: 'done' | 'error' | 'stopped'
   batchCount: number
   error?: string
+  /** True when recorder transport failed and some trace events could not be delivered. */
+  traceDataIncomplete?: boolean
 }
 
 export interface TraceWorkerStopAckMessage {
@@ -321,6 +343,19 @@ export interface TraceWorkerStopAckMessage {
   sessionId: string
   /** Number of batches posted before this acknowledgement. */
   batchCount: number
+}
+
+/** Terminal acknowledgement for a clean stop at the recorder retention bound. */
+export interface TraceWorkerLimitReachedMessage {
+  type: 'trace-table-limit-reached'
+  sessionId: string
+  /** Number of batches posted before this acknowledgement. */
+  batchCount: number
+  eventCount: number
+  eventLimit: number
+  lastSequence: number | null
+  /** Stop-at-limit never observes and drops a later event. */
+  droppedEventCount: 0
 }
 
 export interface ReconstructedTraceState {

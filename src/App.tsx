@@ -64,13 +64,15 @@ import type {
   OverallTestResult, TesterRunOutput, ViewMode, Breakpoint,
 } from './types'
 import { evaluateAll } from './utils/testMatcher'
-import { createTraceSession, mergeTraceBatch } from './utils/traceLog'
+import { createTraceSession, maybeAppendTraceCheckpoint, mergeTraceBatch } from './utils/traceLog'
 import {
-  adaptTraceWorkerBatch, finalizeTraceWorkerEnd, finalizeTraceWorkerStop, finishTraceSessionSafely,
+  adaptTraceWorkerBatch, finalizeTraceWorkerEnd, finalizeTraceWorkerLimitReached, finalizeTraceWorkerStop, finishTraceSessionSafely,
 } from './utils/traceWorkerAdapter'
 import type {
   TraceSession, TraceWorkerBatchMessage, TraceWorkerEndMessage, TraceWorkerStopAckMessage,
+  TraceWorkerLimitReachedMessage,
 } from './types/traceTable'
+import { TRACE_TABLE_EVENT_LIMIT } from './types/traceTable'
 import { normalizeTestInputs } from './utils/testInputs'
 import { startVersionPolling } from './utils/versionCheck'
 import { githubRepositoryBookUrl } from './utils/bookSource'
@@ -2671,6 +2673,7 @@ export default function App() {
       storeTraceSession(createTraceSession({
         id: traceTableSessionId,
         source: { path: capturedSourcePath, filesystemId: capturedFsId },
+        eventLimit: TRACE_TABLE_EVENT_LIMIT,
       }))
       setConsoleTab('trace-table')
     }
@@ -2761,9 +2764,17 @@ export default function App() {
         if (!current || data.sessionId !== current.id) return
         try {
           const normalized = adaptTraceWorkerBatch(current, data as TraceWorkerBatchMessage, capturedSourcePath)
-          storeTraceSession(mergeTraceBatch(current, normalized))
+          const merged = mergeTraceBatch(current, normalized)
+          storeTraceSession(maybeAppendTraceCheckpoint(merged))
         } catch (error) {
           finishTraceSession('error', `Trace table recording failed: ${String(error)}`)
+        }
+      } else if (data.type === 'trace-table-limit-reached') {
+        const limitReached = data as TraceWorkerLimitReachedMessage
+        const current = traceSessionRef.current
+        if (current?.id === limitReached.sessionId) {
+          storeTraceSession(finalizeTraceWorkerLimitReached(current, limitReached))
+          setCodeStatus(`Trace event limit of ${limitReached.eventLimit.toLocaleString()} reached; execution stopped.`)
         }
       } else if (data.type === 'trace-table-end') {
         const ended = data as TraceWorkerEndMessage
@@ -2834,7 +2845,8 @@ export default function App() {
         if (data.turtleSvg) { setTurtleSvg(data.turtleSvg); setDiagramView('turtle'); addToTurtleHistory(data.turtleSvg) }
         const startedMode = workerStartModeRef.current
         const wasRunMode = startedMode === 'run'
-        const label = wasRunMode ? '[RUN FINISHED]' : startedMode === 'debug' ? '[DEBUG FINISHED]' : '[TRACE FINISHED]'
+        const traceLimitReached = startedMode === 'trace' && traceSessionRef.current?.status === 'limit-reached'
+        const label = wasRunMode ? '[RUN FINISHED]' : startedMode === 'debug' ? '[DEBUG FINISHED]' : traceLimitReached ? '[TRACE LIMIT REACHED]' : '[TRACE FINISHED]'
         appendOutput(`\n${label}`)
         setInputRequest(null); setInputValue(''); setIsRunning(false); setActiveRuntime('')
         if (workerStartModeRef.current === 'trace') {
@@ -2860,6 +2872,7 @@ export default function App() {
         setCodeStatus(
           wasRunMode ? 'Worker runtime finished.' :
           startedMode === 'debug' ? 'Debug runtime finished.' :
+          traceLimitReached ? `Trace event limit of ${traceSessionRef.current?.retention?.eventLimit.toLocaleString() ?? TRACE_TABLE_EVENT_LIMIT.toLocaleString()} reached; execution stopped.` :
           'Trace runtime finished.'
         )
         if (wasRunMode) {
@@ -2905,6 +2918,7 @@ export default function App() {
         breakpoints: initialBreakpoints,
         traceTableEnabled: choice === 'trace',
         traceTableSessionId,
+        traceTableEventLimit: TRACE_TABLE_EVENT_LIMIT,
         pauseOnFirstLine: choice === 'trace',
       })
     } catch (error) {

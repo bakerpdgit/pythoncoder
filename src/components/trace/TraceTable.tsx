@@ -25,6 +25,8 @@ import {
 } from '../../utils/traceTablePreferences'
 import { TraceTableColumnDesigner, type TraceTableColumnDesignerResult } from './TraceTableColumnDesigner'
 
+const TRACE_TABLE_ROW_CHUNK_SIZE = 200
+
 const SESSION_STATUS_LABELS: Record<TraceSession['status'], string> = {
   recording: 'Recording',
   paused: 'Paused',
@@ -49,6 +51,7 @@ export const TraceTable = ({ session }: TraceTableProps) => {
   const [functionFilter, setFunctionFilter] = useState('')
   const [callFilter, setCallFilter] = useState('')
   const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'failed'>('idle')
+  const [renderedRowLimit, setRenderedRowLimit] = useState(TRACE_TABLE_ROW_CHUNK_SIZE)
 
   useEffect(() => {
     const restored = refreshTraceTableCachedLabels(getStoredTraceTablePreferences(session.source), session.variables)
@@ -79,6 +82,7 @@ export const TraceTable = ({ session }: TraceTableProps) => {
     () => resolveTraceTableColumnOrder(preferences, session.variables),
     [preferences, session.variables],
   )
+  const displayedColumnOrderKey = displayedColumnOrder.join('\u0000')
   const displayedVariableIds = useMemo(
     () => resolveTraceTableColumnIds(preferences, session.variables),
     [preferences, session.variables],
@@ -108,6 +112,15 @@ export const TraceTable = ({ session }: TraceTableProps) => {
     ...(functionFilter ? { functionName: functionFilter } : {}),
     ...(callFilter ? { callNumber: Number(callFilter) } : {}),
   }), [callFilter, functionFilter, projection.rows])
+  // Keep `visibleRows` authoritative for counts and export; only cap the DOM work.
+  const renderedRows = useMemo(
+    () => visibleRows.slice(0, renderedRowLimit),
+    [renderedRowLimit, visibleRows],
+  )
+
+  useEffect(() => {
+    setRenderedRowLimit(TRACE_TABLE_ROW_CHUNK_SIZE)
+  }, [callFilter, displayedColumnOrderKey, functionFilter, preferenceKey, preferences.rowMode, showContext])
 
   useEffect(() => {
     if (functionFilter && !filterOptions.functions.some(option => option.value === functionFilter)) {
@@ -208,7 +221,12 @@ export const TraceTable = ({ session }: TraceTableProps) => {
       </div>
 
       {session.error && (
-        <div className="border-b border-red-900/50 bg-red-900/50 px-3 py-1.5 text-xs text-red-200" role="alert">
+        <div
+          className={`border-b px-3 py-1.5 text-xs ${session.status === 'limit-reached'
+            ? 'border-sky-700/50 bg-sky-500/10 text-sky-100'
+            : 'border-red-900/50 bg-red-900/50 text-red-200'}`}
+          role={session.status === 'limit-reached' ? 'status' : 'alert'}
+        >
           {session.error}
         </div>
       )}
@@ -299,7 +317,7 @@ export const TraceTable = ({ session }: TraceTableProps) => {
               </tr>
             </thead>
             <tbody>
-              {visibleRows.map((row, rowIndex) => (
+              {renderedRows.map((row, rowIndex) => (
                 <tr key={row.id} className={rowIndex % 2 === 0 ? 'bg-slate-800/40' : undefined}>
                   <th scope="row" title={`Trace ${row.sequences.length === 1 ? 'event' : 'events'} ${row.sequences.join(', ')}`}
                     className="max-w-64 border-b border-r border-slate-700/60 px-3 py-2 font-medium text-slate-400">
@@ -357,6 +375,22 @@ export const TraceTable = ({ session }: TraceTableProps) => {
               </button>
             )}
           </div>
+        </div>
+      )}
+      {hasTableData && visibleRows.length > TRACE_TABLE_ROW_CHUNK_SIZE && (
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-700 bg-slate-950/40 px-3 py-2">
+          <p className="text-xs text-slate-400" role="status" aria-live="polite">
+            Showing {renderedRows.length.toLocaleString()} of {visibleRows.length.toLocaleString()} matching rows.
+          </p>
+          {renderedRows.length < visibleRows.length && (
+            <button
+              type="button"
+              onClick={() => setRenderedRowLimit(current => current + TRACE_TABLE_ROW_CHUNK_SIZE)}
+              className="rounded-md border border-slate-600 px-2.5 py-1 text-xs font-medium text-slate-200 hover:border-sky-500 hover:text-sky-100"
+            >
+              Show {Math.min(TRACE_TABLE_ROW_CHUNK_SIZE, visibleRows.length - renderedRows.length).toLocaleString()} more rows
+            </button>
+          )}
         </div>
       )}
       <TraceTableColumnDesigner

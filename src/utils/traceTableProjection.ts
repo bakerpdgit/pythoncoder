@@ -105,6 +105,8 @@ export interface TraceTableRowAnnotation {
 
 export interface TraceTableProjectionRow {
   id: string
+  /** Stable one-based position in the unfiltered projection. */
+  stepNumber?: number
   /** Distinguishes lifecycle-only and overflow rows from ordinary line rows. */
   kind: TraceTableRowKind
   /** First contributing event, useful as a stable sort and scroll anchor. */
@@ -535,12 +537,15 @@ export function projectTraceTable(
   }
   const context = metadataContext(session)
 
+  const rows = options.showLine
+    ? projectEveryLine(session, selected, context, options.includeAnnotations ?? false)
+    : projectCompact(session, selected, metaColumnIds.length > 0, context, options.includeAnnotations ?? false)
+  rows.forEach((row, index) => { row.stepNumber = index + 1 })
+
   return {
     columns,
     metadataColumns,
     displayColumns,
-    rows: options.showLine
-      ? projectEveryLine(session, selected, context, options.includeAnnotations ?? false)
-      : projectCompact(session, selected, metaColumnIds.length > 0, context, options.includeAnnotations ?? false),
+    rows,
   }
 }

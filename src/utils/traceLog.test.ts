@@ -13,6 +13,7 @@ import {
   globalTraceVariableId,
   localTraceVariableId,
   mergeTraceBatch,
+  maybeAppendTraceCheckpoint,
   reconstructTraceState,
   reduceTraceLog,
   traceBindingKey,
@@ -55,6 +56,11 @@ describe('trace variable identities', () => {
 })
 
 describe('mergeTraceBatch', () => {
+  it('requires a positive safe event retention limit', () => {
+    expect(() => createTraceSession({ id: 'bad', source: { path: 'main.py' }, eventLimit: 0 })).toThrow('positive safe integer')
+    expect(() => createTraceSession({ id: 'bad', source: { path: 'main.py' }, eventLimit: Number.MAX_VALUE })).toThrow('positive safe integer')
+  })
+
   it('keeps explicit same-value writes even when there is no value delta', () => {
     const variableId = globalTraceVariableId('x')
     let session = createTraceSession({ id: 'session-1', source: { path: 'main.py' }, startedAt: 10 })
@@ -149,7 +155,18 @@ describe('mergeTraceBatch', () => {
 
     expect(mergeTraceBatch(merged, batch(0, [event(0)]))).toBe(merged)
     expect(() => mergeTraceBatch(merged, batch(2, []))).toThrow('Missing trace batch 1')
-    expect(() => mergeTraceBatch(merged, batch(1, [event(0)]))).toThrow('not strictly increasing')
+    expect(() => mergeTraceBatch(merged, batch(1, [event(0)]))).toThrow('not contiguous; expected 1')
+    expect(() => mergeTraceBatch(merged, batch(1, [event(2)]))).toThrow('not contiguous; expected 1')
+    expect(() => mergeTraceBatch(initial, batch(0, [event(1)]))).toThrow('not contiguous; expected 0')
+    expect(() => mergeTraceBatch(initial, batch(0, [event(0), event(2)]))).toThrow('not contiguous; expected 1')
+  })
+
+  it('rejects a batch which would silently exceed the configured retention bound', () => {
+    let session = createTraceSession({ id: 'session-1', source: { path: 'main.py' }, eventLimit: 2 })
+    session = mergeTraceBatch(session, batch(0, [event(0), event(1)]))
+
+    expect(session.retention).toMatchObject({ eventLimit: 2, retainedEventCount: 2, droppedEventCount: 0 })
+    expect(() => mergeTraceBatch(session, batch(1, [event(2)]))).toThrow('exceeds the 2 event retention limit')
   })
 })
 
@@ -194,6 +211,22 @@ describe('reconstruction and checkpoints', () => {
     session = appendTraceCheckpoint(session, 0)
 
     expect(session.checkpoints[0]).toEqual({ eventCount: 0, throughSequence: null, bindings: [] })
+  })
+
+  it('periodically checkpoints only after enough successfully merged events', () => {
+    let session = createTraceSession({ id: 'session-1', source: { path: 'main.py' } })
+    session = mergeTraceBatch(session, batch(0, [event(0), event(1)]))
+    const beforeInterval = maybeAppendTraceCheckpoint(session, 3)
+    expect(beforeInterval).toBe(session)
+
+    session = mergeTraceBatch(session, batch(1, [event(2)]))
+    const checkpointed = maybeAppendTraceCheckpoint(session, 3)
+    expect(checkpointed.checkpoints).toHaveLength(1)
+    expect(checkpointed.checkpoints[0]).toMatchObject({ eventCount: 3, throughSequence: 2 })
+
+    const unchanged = maybeAppendTraceCheckpoint(checkpointed, 3)
+    expect(unchanged).toBe(checkpointed)
+    expect(() => maybeAppendTraceCheckpoint(checkpointed, 0)).toThrow('positive integer')
   })
 })
 
