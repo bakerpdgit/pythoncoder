@@ -68,6 +68,12 @@ export interface TraceWriteMarker extends TraceBinding {
   kind: TraceWriteKind
   changed: boolean
   outcome: 'value' | 'deleted'
+  /**
+   * Value immediately after this write. This is distinct from binding deltas:
+   * several writes can occur on one source line while its delta stores only
+   * the final binding state.
+   */
+  value?: InspectorNode
   /** Optional nested path affected by a mutation, e.g. `["score"]` or `.name`. */
   path?: string[]
 }

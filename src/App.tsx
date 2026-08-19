@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo, useDeferredValue, startTransition } from 'react'
+import { useState, useEffect, useRef, useMemo, useDeferredValue, startTransition, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import TracerWorker from './workers/tracer.worker.ts?worker'
 import TesterWorker from './workers/tester.worker.ts?worker'
 import Editor, { type Monaco, loader } from '@monaco-editor/react'
@@ -49,6 +49,7 @@ import { OutlinePanel } from './components/diagrams/OutlinePanel'
 import { TurtleScrubber } from './components/TurtleScrubber'
 import { InspectorPane } from './components/InspectorPane'
 import { ConsoleTerminal, type ConsoleTerminalHandle } from './components/ConsoleTerminal'
+import { TraceTable } from './components/trace/TraceTable'
 import { clampDiagramFontSize } from './components/diagrams/diagramLayout'
 import {
   TRACE_CMD_STEP_INTO, TRACE_CMD_STEP_OVER, TRACE_CMD_STEP_OUT_BLOCK, TRACE_CMD_CONTINUE,
@@ -227,8 +228,8 @@ export default function App() {
   const [isRuntimeMenuOpen, setIsRuntimeMenuOpen] = useState(false)
   const [isQuickSettingsOpen, setIsQuickSettingsOpen] = useState(false)
   const [fixedInputsText, setFixedInputsText] = useState<string>('')
-  // Active tab of the console panel. Only shows as tabs when fixed inputs are on.
-  const [consoleTab, setConsoleTab] = useState<'console' | 'inputs' | 'tests'>('console')
+  // Active tab of the console panel. Trace Table appears after a Trace session starts.
+  const [consoleTab, setConsoleTab] = useState<'console' | 'inputs' | 'tests' | 'trace-table'>('console')
   const [popupInputValue, setPopupInputValue] = useState('')
   const [diagramView, setDiagramView] = useState<DiagramView>('outline')
   const [outlineExpandedIds, setOutlineExpandedIds] = useState<Set<string>>(() => new Set())
@@ -450,6 +451,7 @@ export default function App() {
   const hasConsoleAndStructure = visiblePanels.output && visiblePanels.diagram
   const hasBookPanel = !!bookNavState
   const isBookEditMode = !!bookEditSession
+  const hasConsoleTabs = appSettings.useFixedInputs || (isBookEditMode && !!activeBookChallenge) || traceSession !== null
   const bookName = editManifest?.name ?? null
 
   // ── Derived: is the active challenge a testable task? ─────────────────────
@@ -1006,6 +1008,11 @@ export default function App() {
   const handleEditorChange = (value: string | undefined) => {
     if (applyingEditorValueRef.current) return
     const nextValue = value ?? ''
+    if (traceSessionRef.current) {
+      traceSessionRef.current = null
+      setTraceSession(null)
+      if (consoleTab === 'trace-table') setConsoleTab('console')
+    }
     traceWorkerSourceRef.current = { ...traceWorkerSourceRef.current, code: nextValue }
     setCodeText(nextValue)
     setCodeStatus(nextValue.trim() ? 'Code edited in the browser.' : 'Editor is empty. Load or type Python.')
@@ -1022,6 +1029,22 @@ export default function App() {
     })) return true
     setCodeStatus('Stop the running program before changing code or switching files.')
     return false
+  }
+
+  const handleConsoleTabKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+    const tabs = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
+      .filter(tab => !tab.disabled)
+    if (!tabs.length) return
+    const currentIndex = Math.max(0, tabs.indexOf(document.activeElement as HTMLButtonElement))
+    const nextIndex = event.key === 'Home'
+      ? 0
+      : event.key === 'End'
+        ? tabs.length - 1
+        : (currentIndex + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length
+    event.preventDefault()
+    tabs[nextIndex].focus()
+    tabs[nextIndex].click()
   }
 
   const replaceProgrammaticEditorCode = (
@@ -1059,7 +1082,7 @@ export default function App() {
     savedCodeRef.current = cleanCode
     setCurrentLine(-1); setCurrentFunc(''); setCurrentClass(''); setSimState(null)
     setInputRequest(null); setInputValue(''); setOutputLog(''); setActiveRuntime('')
-    traceSessionRef.current = null; setTraceSession(null)
+    traceSessionRef.current = null; setTraceSession(null); setConsoleTab('console')
     setMainThreadStatus('Main-thread runtime is ready.')
     setIsInsightEditing(false); setShowExportDialog(false)
 
@@ -1691,7 +1714,7 @@ export default function App() {
     savedCodeRef.current = ''
     setCurrentLine(-1); setCurrentFunc(''); setCurrentClass(''); setSimState(null)
     setInputRequest(null); setInputValue(''); setOutputLog(''); setActiveRuntime('')
-    traceSessionRef.current = null; setTraceSession(null)
+    traceSessionRef.current = null; setTraceSession(null); setConsoleTab('console')
     mainThreadMountedPathsRef.current = []
     setHtmlPreview(null)
     return true
@@ -2649,6 +2672,7 @@ export default function App() {
         id: traceTableSessionId,
         source: { path: capturedSourcePath, filesystemId: capturedFsId },
       }))
+      setConsoleTab('trace-table')
     }
 
     const hasTurtleForMode = codeUsesTurtle(capturedCode)
@@ -4095,22 +4119,28 @@ exec(code_obj, globals())
               <div className="flex flex-col overflow-hidden min-h-0 flex-shrink-0"
                 style={{ height: viewMode === 'developer' && hasConsoleAndStructure ? `${rightColSplit}%` : '100%' }}>
                 <div className="bg-slate-900 py-2 px-3 border-b border-slate-700 flex-shrink-0 flex items-center justify-between gap-2">
-                  {(appSettings.useFixedInputs || (isBookEditMode && !!activeBookChallenge)) ? (
-                    <div className="flex rounded overflow-hidden border border-slate-700 text-[11px]">
-                      <button type="button" onClick={() => setConsoleTab('console')}
+                  {hasConsoleTabs ? (
+                    <div className="flex rounded overflow-hidden border border-slate-700 text-[11px]" role="tablist" aria-label="Console views" onKeyDown={handleConsoleTabKeyDown}>
+                      <button id="console-tab-console" type="button" role="tab" aria-selected={consoleTab === 'console'} aria-controls="console-panel-console" tabIndex={consoleTab === 'console' ? 0 : -1} onClick={() => setConsoleTab('console')}
                         className={`px-2.5 py-1 font-bold uppercase tracking-wider ${consoleTab === 'console' ? 'bg-teal-700 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}>
                         Console
                       </button>
                       {appSettings.useFixedInputs && (
-                        <button type="button" onClick={() => setConsoleTab('inputs')}
+                        <button id="console-tab-inputs" type="button" role="tab" aria-selected={consoleTab === 'inputs'} aria-controls="console-panel-inputs" tabIndex={consoleTab === 'inputs' ? 0 : -1} onClick={() => setConsoleTab('inputs')}
                           className={`px-2.5 py-1 font-bold uppercase tracking-wider ${consoleTab === 'inputs' ? 'bg-teal-700 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}>
                           Inputs
                         </button>
                       )}
                       {isBookEditMode && activeBookChallenge && (
-                        <button type="button" onClick={() => setConsoleTab('tests')}
+                        <button id="console-tab-tests" type="button" role="tab" aria-selected={consoleTab === 'tests'} aria-controls="console-panel-tests" tabIndex={consoleTab === 'tests' ? 0 : -1} onClick={() => setConsoleTab('tests')}
                           className={`px-2.5 py-1 font-bold uppercase tracking-wider ${consoleTab === 'tests' ? 'bg-amber-700 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}>
                           Tests
+                        </button>
+                      )}
+                      {traceSession && (
+                        <button id="console-tab-trace-table" type="button" role="tab" aria-selected={consoleTab === 'trace-table'} aria-controls="console-panel-trace-table" tabIndex={consoleTab === 'trace-table' ? 0 : -1} onClick={() => setConsoleTab('trace-table')}
+                          className={`px-2.5 py-1 font-bold uppercase tracking-wider ${consoleTab === 'trace-table' ? 'bg-sky-700/60 text-sky-100' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}>
+                          Trace Table
                         </button>
                       )}
                     </div>
@@ -4135,7 +4165,7 @@ exec(code_obj, globals())
                 </div>
                 {/* Inputs tab (fixed inputs) */}
                 {appSettings.useFixedInputs && consoleTab === 'inputs' && (
-                  <div className="flex flex-col flex-1 min-h-0 overflow-hidden bg-slate-900/40 p-3 gap-2">
+                  <div id="console-panel-inputs" role="tabpanel" aria-labelledby="console-tab-inputs" className="flex flex-col flex-1 min-h-0 overflow-hidden bg-slate-900/40 p-3 gap-2">
                     <p className="text-xs text-slate-400 leading-relaxed flex-shrink-0">
                       One input value per line. Fed automatically to <code className="rounded bg-slate-700 px-1 text-emerald-300">input()</code> calls in order.
                     </p>
@@ -4153,7 +4183,7 @@ exec(code_obj, globals())
                 )}
                 {/* Tests tab (book edit mode) */}
                 {isBookEditMode && activeBookChallenge && consoleTab === 'tests' && (
-                  <div className="flex flex-col flex-1 min-h-0 overflow-hidden bg-slate-900/30">
+                  <div id="console-panel-tests" role="tabpanel" aria-labelledby="console-tab-tests" className="flex flex-col flex-1 min-h-0 overflow-hidden bg-slate-900/30">
                     {(activeBookChallenge.isExample === true || activeBookChallenge.isExample === 'True') ? (
                       <div className="flex-1 flex flex-col items-center justify-center gap-3 p-6 text-center">
                         <p className="text-slate-400 text-xs leading-relaxed max-w-xs">
@@ -4175,8 +4205,13 @@ exec(code_obj, globals())
                     )}
                   </div>
                 )}
+                {traceSession && consoleTab === 'trace-table' && (
+                  <div id="console-panel-trace-table" role="tabpanel" aria-labelledby="console-tab-trace-table" className="flex-1 min-h-0 overflow-hidden bg-slate-900/30 p-2">
+                    <TraceTable session={traceSession} />
+                  </div>
+                )}
                 {/* Console content — kept mounted (preserves terminal buffer); hidden when Inputs/Tests tab is active */}
-                <div className={consoleTab !== 'console' ? 'hidden' : 'flex flex-col flex-1 min-h-0 overflow-hidden'}>
+                <div id="console-panel-console" role={hasConsoleTabs ? 'tabpanel' : undefined} aria-labelledby={hasConsoleTabs ? 'console-tab-console' : undefined} className={consoleTab !== 'console' ? 'hidden' : 'flex flex-col flex-1 min-h-0 overflow-hidden'}>
                   {appSettings.inputMode === 'inline-console' ? (
                     <div className="flex-1 min-h-0 overflow-hidden">
                       <ConsoleTerminal

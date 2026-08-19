@@ -70,7 +70,11 @@ function cloneEvent(event: TraceExecutionEvent): TraceExecutionEvent {
     callStack: [...event.callStack],
     loopIteration: event.loopIteration ? { ...event.loopIteration } : undefined,
     bindingDeltas: event.bindingDeltas.map(cloneBindingDelta),
-    writes: event.writes.map(write => ({ ...write, path: write.path ? [...write.path] : undefined })),
+    writes: event.writes.map(write => ({
+      ...write,
+      value: write.value ? cloneInspectorNode(write.value) : undefined,
+      path: write.path ? [...write.path] : undefined,
+    })),
     returnValue: event.returnValue ? cloneInspectorNode(event.returnValue) : undefined,
     exception: event.exception ? { ...event.exception } : undefined,
   }
