@@ -137,6 +137,25 @@ describe('projectTraceTable every-line mode', () => {
 })
 
 describe('projectTraceTable compact mode', () => {
+  it('projects output-only events sparsely in the configured rightmost column', () => {
+    const result = projectTraceTable(session([
+      event(0),
+      event(1, { output: ['Total: 22'] }),
+      event(2),
+      event(3, { output: ['Done'] }),
+    ]), {
+      variableIds: [x],
+      metaColumnIds: ['meta:output', 'meta:call-depth'],
+      columnOrder: ['meta:call-depth', `variable:${x}`, 'meta:output'],
+      showLine: false,
+    })
+
+    expect(result.displayColumns.map(column => column.key)).toEqual([
+      'meta:call-depth', `variable:${x}`, 'meta:output',
+    ])
+    expect(result.rows.map(row => row.output)).toEqual([['Total: 22'], ['Done']])
+  })
+
   it('packs writes to x then y into the same row', () => {
     const result = projectTraceTable(session([
       event(0, { bindingDeltas: [delta(x, 1)], writes: [write(x)] }),

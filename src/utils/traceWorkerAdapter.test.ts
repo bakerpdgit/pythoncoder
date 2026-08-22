@@ -60,6 +60,19 @@ function message(batchSequence: number, events: TraceWorkerEvent[]): TraceWorker
 }
 
 describe('adaptTraceWorkerBatch', () => {
+  it('retains complete output lines on their source event', () => {
+    const normalized = adaptTraceWorkerBatch(
+      createTraceSession({ id: 'trace-1', source: { path: 'main.py' } }),
+      message(0, [event(0, { line: 4, output: ['first', 'second'] })]),
+      'main.py',
+    )
+
+    expect(normalized.events[0]).toMatchObject({
+      location: { line: 4 },
+      output: ['first', 'second'],
+    })
+  })
+
   it('retains same-value writes while delta-compressing snapshots', () => {
     let session = createTraceSession({ id: 'trace-1', source: { path: 'main.py' } })
     const first = value('x', 1, { operation: 'write', changed: true })

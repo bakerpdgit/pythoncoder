@@ -48,6 +48,7 @@ const uniqueIds = <Id extends string>(ids: Id[]): Id[] => [...new Set(ids)]
 const metaColumnDetails: Partial<Record<TraceTableMetaColumnId, string>> = {
   'meta:call-depth': 'The nesting level in the call stack (the module is depth 0).',
   'meta:call-number': 'A stable invocation number that distinguishes recursive and repeated calls.',
+  'meta:output': 'Text printed by the program while each trace step executes.',
 }
 
 const decodeIdPart = (part: string): string => {
@@ -305,9 +306,13 @@ export const TraceTableColumnDesigner = ({
   }
 
   const apply = () => {
+    const leftMetaColumns = TRACE_TABLE_META_COLUMNS
+      .map(column => column.id)
+      .filter(id => id !== 'meta:output' && draftMetaIds.includes(id))
     const columnOrder: TraceTableColumnKey[] = [
-      ...TRACE_TABLE_META_COLUMNS.map(column => column.id).filter(id => draftMetaIds.includes(id)),
+      ...leftMetaColumns,
       ...draftVariableOrder,
+      ...(draftMetaIds.includes('meta:output') ? ['meta:output' as const] : []),
     ]
     const selectedAliases = columnOrder.reduce<Record<string, string>>((result, key) => {
       const variableId = traceTableVariableIdFromColumnKey(key)
@@ -346,7 +351,7 @@ export const TraceTableColumnDesigner = ({
           <div>
             <h2 id={titleId} className="text-base font-semibold text-slate-100">Design trace table columns</h2>
             <p id={descriptionId} className="mt-1 text-sm text-slate-400">
-              Choose variables and call information, then arrange their left-to-right order and edit their column headers.
+              Choose variables and special columns, then arrange the variables' left-to-right order and edit their column headers.
             </p>
           </div>
           <button
@@ -416,7 +421,7 @@ export const TraceTableColumnDesigner = ({
               <div className="mt-3 max-h-80 space-y-4 overflow-y-auto pr-1">
                 {filteredMetaColumns.length > 0 && (
                   <fieldset>
-                    <legend className="mb-1.5 text-xs font-bold uppercase tracking-wide text-slate-400">Call information</legend>
+                    <legend className="mb-1.5 text-xs font-bold uppercase tracking-wide text-slate-400">Special columns</legend>
                     <div className="space-y-1.5">
                       {filteredMetaColumns.map(column => (
                         <label key={column.id} className="flex cursor-pointer items-start gap-2 rounded-md border border-slate-700 bg-slate-800/40 p-2 hover:border-slate-600">
@@ -474,7 +479,7 @@ export const TraceTableColumnDesigner = ({
                 <span className="text-xs text-slate-400" aria-live="polite">{draftVariableOrder.length} selected · top to bottom</span>
               </div>
               <p className="mt-1 text-xs text-slate-500">
-                Move variables up to place them further left. Selected call information is always pinned on the left.
+                Move variables up to place them further left. Call information stays on the left and Output stays on the right.
               </p>
 
               {draftVariableOrder.length > 0 ? (

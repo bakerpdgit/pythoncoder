@@ -111,6 +111,7 @@ export function formatTraceTableMetadata(
 ): string {
   if (columnId === 'meta:function') return row.metadata.functionName
   if (columnId === 'meta:call-depth') return String(row.metadata.callDepth)
+  if (columnId === 'meta:output') return row.output?.join('\n') ?? ''
   return row.metadata.callNumber === null ? '—' : String(row.metadata.callNumber)
 }
 

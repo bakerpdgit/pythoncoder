@@ -81,6 +81,7 @@ function cloneEvent(event: TraceExecutionEvent): TraceExecutionEvent {
     })),
     returnValue: event.returnValue ? cloneInspectorNode(event.returnValue) : undefined,
     exception: event.exception ? { ...event.exception } : undefined,
+    output: event.output ? [...event.output] : undefined,
   }
 }
 

@@ -20,6 +20,7 @@ export type TraceTableMetaColumnId =
   | 'meta:function'
   | 'meta:call-depth'
   | 'meta:call-number'
+  | 'meta:output'
 
 /** One configurable table column after the fixed Step/Line leading columns. */
 export type TraceTableColumnKey = TraceTableMetaColumnId | `variable:${TraceVariableId}`
@@ -35,6 +36,8 @@ export interface TraceTablePreferences {
   variableIds: TraceVariableId[]
   /** Retained as a convenient selection list and for migration from stage 3 preferences. */
   metaColumnIds: TraceTableMetaColumnId[]
+  /** Explicit migration-safe toggle: older saved preferences gain Output by default. */
+  outputColumnVisible: boolean
   /** Mixed left-to-right ordering of metadata and source-variable columns. */
   columnOrder: TraceTableColumnKey[]
   aliases: Record<TraceVariableId, string>
@@ -160,6 +163,8 @@ export interface TraceExecutionEvent {
   returnValue?: InspectorNode
   exception?: { type: string; message: string }
   inputValue?: string
+  /** Complete stdout lines emitted while this source event executed. */
+  output?: string[]
 }
 
 export interface TraceCallActivation {
@@ -321,6 +326,7 @@ export interface TraceWorkerEvent {
   returnValue?: InspectorNode
   exception?: { type: string; message: string }
   inputValue?: string
+  output?: string[]
 }
 
 export interface TraceWorkerBatchMessage {

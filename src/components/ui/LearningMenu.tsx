@@ -25,14 +25,6 @@ export function isTutorialCatalog(value: unknown): value is LearningTutorial[] {
       || ['trace', 'run', 'debug'].includes((item as LearningTutorial).mode as string)))
 }
 
-function repositoryLabel(url: string): string {
-  try {
-    return new URL(url).pathname.replace(/^\/+|\/+$/g, '')
-  } catch {
-    return url
-  }
-}
-
 export function LearningMenu({ menuRef, isOpen, onToggleOpen, onOpenTutorial }: Props) {
   const [tutorials, setTutorials] = useState<LearningTutorial[]>([])
   const [loadError, setLoadError] = useState('')
@@ -101,7 +93,6 @@ export function LearningMenu({ menuRef, isOpen, onToggleOpen, onOpenTutorial }: 
                   </span>
                   <span className="min-w-0">
                     <span className="block text-sm font-medium text-slate-200 group-hover:text-emerald-300">{tutorial.name}</span>
-                    <span className="block truncate text-[11px] text-slate-500">{repositoryLabel(tutorial.github)}</span>
                   </span>
                 </button>
               ))}

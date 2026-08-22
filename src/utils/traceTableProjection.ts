@@ -118,6 +118,8 @@ export interface TraceTableProjectionRow {
   location?: TraceSourceLocation
   /** Sparse by design: a missing selected variable is a blank table cell. */
   cells: Record<TraceVariableId, TraceTableProjectionCell>
+  /** Sparse stdout captured while the contributing source event executed. */
+  output?: string[]
   metadata: TraceTableProjectionRowMetadata
   /** Ordered, structured context contributed by events packed into this row. */
   annotations: TraceTableRowAnnotation[]
@@ -141,6 +143,7 @@ const META_COLUMN_LABELS: Record<TraceTableMetaColumnId, string> = {
   'meta:function': 'Function',
   'meta:call-depth': 'Call depth',
   'meta:call-number': 'Call #',
+  'meta:output': 'Output',
 }
 
 function selectedMetaIdsInOrder(metaColumnIds: TraceTableMetaColumnId[] = []): TraceTableMetaColumnId[] {
@@ -429,6 +432,7 @@ function eventRow(
     line: event.location.line,
     location: event.location,
     cells: {},
+    output: [],
     metadata: rowMetadata(session, event, context),
     annotations: [],
     teachingNote: null,
@@ -447,6 +451,7 @@ function compactRow(
     sequence: event.sequence,
     sequences: [],
     cells: {},
+    output: [],
     metadata: rowMetadata(session, event, context),
     annotations: [],
     teachingNote: null,
@@ -462,6 +467,7 @@ function projectEveryLine(
   selected: ReadonlySet<TraceVariableId>,
   context: ProjectionMetadataContext,
   includeAnnotations: boolean,
+  includeOutput: boolean,
 ): TraceTableProjectionRow[] {
   const bindings = new Map<string, TraceBindingState>()
   const rows: TraceTableProjectionRow[] = []
@@ -472,12 +478,14 @@ function projectEveryLine(
     const selectedWrites = event.writes.filter(write => selected.has(write.variableId))
     const metadata = rowMetadata(session, event, context)
     const annotations = includeAnnotations ? annotationsForProjectedEvent(event, metadata, pendingReturns) : []
+    const output = includeOutput ? event.output ?? [] : []
     // Every-line mode continues to mean one row per completed source line.
     // Lifecycle events only join it when they carry a selected parameter/write,
     // preserving the pre-metadata Step/Line semantics.
-    if (event.kind !== 'line-completed' && selectedWrites.length === 0 && annotations.length === 0) continue
+    if (event.kind !== 'line-completed' && selectedWrites.length === 0 && annotations.length === 0 && output.length === 0) continue
 
     let row = eventRow(session, event, context)
+    ;(row.output ??= []).push(...output)
     appendAnnotations(row, annotations)
     selectedWrites.forEach((write, writeIndex) => {
       if (row.cells[write.variableId]) {
@@ -499,6 +507,7 @@ function projectCompact(
   includeMetadata: boolean,
   context: ProjectionMetadataContext,
   includeAnnotations: boolean,
+  includeOutput: boolean,
 ): TraceTableProjectionRow[] {
   const bindings = new Map<string, TraceBindingState>()
   const rows: TraceTableProjectionRow[] = []
@@ -540,6 +549,16 @@ function projectCompact(
       appendSequence(current, event.sequence)
       selectedWritesPlaced += 1
     })
+
+    const output = includeOutput ? event.output ?? [] : []
+    if (output.length > 0) {
+      if (!current || (current.output?.length ?? 0) > 0) {
+        current = compactRow(session, event, context, event.writes.length)
+        rows.push(current)
+      }
+      ;(current.output ??= []).push(...output)
+      appendSequence(current, event.sequence)
+    }
 
     previousCallStack = event.callStack
   }
@@ -588,10 +607,12 @@ export function projectTraceTable(
     })
   }
   const context = metadataContext(session)
+  const includeOutput = metaColumnIds.includes('meta:output')
+  const includeContextMetadata = metaColumnIds.some(id => id !== 'meta:output')
 
   const rows = options.showLine
-    ? projectEveryLine(session, selected, context, options.includeAnnotations ?? false)
-    : projectCompact(session, selected, metaColumnIds.length > 0, context, options.includeAnnotations ?? false)
+    ? projectEveryLine(session, selected, context, options.includeAnnotations ?? false, includeOutput)
+    : projectCompact(session, selected, includeContextMetadata, context, options.includeAnnotations ?? false, includeOutput)
   rows.forEach((row, index) => { row.stepNumber = index + 1 })
 
   return {
