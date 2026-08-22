@@ -39,7 +39,7 @@ import { getExplanation, getDefinitionKey } from './data/explanations'
 import { ThemeToggleButton } from './components/ui/ThemeToggleButton'
 import { RuntimeSettingsMenu } from './components/ui/RuntimeSettingsMenu'
 import { PanelVisibilityMenu } from './components/ui/PanelVisibilityMenu'
-import { LearningMenu } from './components/ui/LearningMenu'
+import { LearningMenu, type LearningTutorial } from './components/ui/LearningMenu'
 import { DiagramFontControls } from './components/ui/DiagramFontControls'
 import { IconButton } from './components/ui/IconButton'
 import { SettingsDialog } from './components/ui/SettingsDialog'
@@ -1896,10 +1896,11 @@ export default function App() {
     }
   }
 
-  const handleLearningTutorialOpen = (githubUrl: string) => {
+  const handleLearningTutorialOpen = (tutorial: LearningTutorial) => {
     setIsLearningMenuOpen(false)
+    if (tutorial.mode) setRunModeChoice(tutorial.mode)
     try {
-      void openResourceUrl(githubRepositoryBookUrl(githubUrl))
+      void openResourceUrl(tutorial.book ?? githubRepositoryBookUrl(tutorial.github))
     } catch (e) {
       setCodeStatus(`Failed to open tutorial: ${e instanceof Error ? e.message : String(e)}`)
     }
