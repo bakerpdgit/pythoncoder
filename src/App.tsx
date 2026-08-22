@@ -18,7 +18,7 @@ import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides, getStored
 import { triggerDownload, getBaseFileStem } from './utils/download'
 import { buildCommentExport, buildDocstringExport, replaceExistingDocstring, getDefinitionNote, getDefaultDefinitionNote, sanitizeNoteText } from './utils/export'
 import { loadMainThreadPyodide, resetMainThreadPyodide, PYGAME_MAIN_THREAD_BOOTSTRAP, TURTLE_CANVAS_BOOTSTRAP, TURTLE_SVG_BOOTSTRAP, SVG_TURTLE_WORKER_SETUP } from './utils/mainThread'
-import { fetchBookManifest, getOrCreateChallengeFs, getHiddenPathsForFs, isBookUrl, isBookRef, BOOK_FS_PREFIX, BOOK_SRC_PREFIX } from './utils/bookLoader'
+import { fetchBookManifest, findFirstBookChallenge, getOrCreateChallengeFs, getHiddenPathsForFs, isBookUrl, isBookRef, BOOK_FS_PREFIX, BOOK_SRC_PREFIX } from './utils/bookLoader'
 import {
   ensureDefaultFilesystem, getAllFiles, syncFilesFromPyodide, writeFile,
   isTextMime, guessMimeType, mountFilesToPyodide, readFilesFromPyodide,
@@ -81,7 +81,7 @@ import { isRuntimeSourceLocked, RuntimeStartGuard } from './utils/runtimeStartGu
 import {
   beginTraceInputTabHandoff, completeTraceInputTabHandoff, type ConsolePanelTab,
 } from './utils/traceInputTab'
-import { getRunModeFromSearch, type WorkerRunMode } from './utils/urlRunMode'
+import { getRunModeFromSearch, getShowFirstFromSearch, type WorkerRunMode } from './utils/urlRunMode'
 import { useDialogs } from './components/dialogs/DialogProvider'
 import {
   readDirectoryToMap, writeFileToFolderHandle, mkdirInFolderHandle,
@@ -516,7 +516,10 @@ export default function App() {
       const bookParam = params.get('book')
       if (bookParam) {
         try {
-          await openResourceUrl(decodeURIComponent(bookParam))
+          const openedBookUrl = await openResourceUrl(decodeURIComponent(bookParam))
+          if (openedBookUrl && getShowFirstFromSearch(window.location.search)) {
+            await handleOpenFirstBookChallenge(openedBookUrl)
+          }
           return
         } catch { /* fall through to default */ }
       }
@@ -1846,11 +1849,11 @@ export default function App() {
     storeTraceSession({ ...current, status })
   }
 
-  const handleBookOpen = async (url: string) => {
-    if (!canSwitchCodeSource()) return
+  const handleBookOpen = async (url: string): Promise<boolean> => {
+    if (!canSwitchCodeSource()) return false
     try {
       const manifest = await fetchBookManifest(url)
-      if (!canSwitchCodeSource()) return
+      if (!canSwitchCodeSource()) return false
       const newState: BookNavState = {
         rootUrl: url,
         currentBookUrl: url,
@@ -1859,8 +1862,10 @@ export default function App() {
       }
       setBookNavState(newState)
       persistBookNavState(newState)
+      return true
     } catch (e) {
       setCodeStatus(`Failed to open book: ${e instanceof Error ? e.message : String(e)}`)
+      return false
     }
   }
 
@@ -1868,16 +1873,16 @@ export default function App() {
   // wizards and the ?book= querystring. A book.json URL opens directly as a book; any
   // other URL is fetched as a ZIP and opened as a book (if it contains book.json) or a
   // plain filesystem otherwise.
-  const openResourceUrl = async (rawUrl: string) => {
-    if (!canSwitchCodeSource()) return
+  const openResourceUrl = async (rawUrl: string): Promise<string | null> => {
+    if (!canSwitchCodeSource()) return null
     const url = rawUrl.trim()
-    if (!url) return
+    if (!url) return null
     hideTeacherToolsPanel()
     try {
       if (isBookUrl(url)) {
-        await handleBookOpen(url)
+        const opened = await handleBookOpen(url)
         revealFilesystemPanel()
-        return
+        return opened ? url : null
       }
       // Re-fetch fresh (avoids stale duplicates when the same link is reopened).
       const existing = (await listFilesystems()).find(f => f.name === url)
@@ -1885,14 +1890,19 @@ export default function App() {
       const fsId = await loadFilesystemFromUrl(url)
       const bookEntry = await getEntryByPath(fsId, '/book.json')
       if (bookEntry) {
-        await handleBookOpen(`vfs://fs:${fsId}/book.json`)
+        const bookUrl = `vfs://fs:${fsId}/book.json`
+        const opened = await handleBookOpen(bookUrl)
+        revealFilesystemPanel()
+        return opened ? bookUrl : null
       } else {
-        if (!handleFilesystemForcedChange(fsId)) return
+        if (!handleFilesystemForcedChange(fsId)) return null
         await autoOpenMainPy(fsId)
       }
       revealFilesystemPanel()
+      return null
     } catch (e) {
       setCodeStatus(`Failed to open from URL: ${e instanceof Error ? e.message : String(e)}`)
+      return null
     }
   }
 
@@ -1950,6 +1960,24 @@ export default function App() {
         setCodeStatus(`Failed to load challenge: ${e instanceof Error ? e.message : String(e)}`)
       }
     }
+  }
+
+  const handleOpenFirstBookChallenge = async (rootBookUrl: string) => {
+    const target = await findFirstBookChallenge(rootBookUrl)
+    if (!target) {
+      setCodeStatus('This learning book does not contain any examples or activities.')
+      return
+    }
+
+    const newState: BookNavState = {
+      rootUrl: rootBookUrl,
+      currentBookUrl: target.bookUrl,
+      breadcrumb: target.breadcrumb,
+      activeChallengeId: target.challenge.id,
+    }
+    setBookNavState(newState)
+    persistBookNavState(newState)
+    await handleEnterChallenge(target.bookUrl, target.challenge)
   }
 
   const handleCloseBook = () => {
