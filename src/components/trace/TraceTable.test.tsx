@@ -6,7 +6,11 @@ import type { InspectorNode } from '../../types'
 import type { TraceSession } from '../../types/traceTable'
 import { triggerDownload } from '../../utils/download'
 import { projectTraceTable, type TraceTableProjection, type TraceTableProjectionRow } from '../../utils/traceTableProjection'
-import { resetTraceTablePreferencesForNewSession } from '../../utils/traceTablePreferences'
+import {
+  DEFAULT_TRACE_TABLE_PREFERENCES,
+  persistTraceTablePreferences,
+  resetTraceTablePreferencesForNewSession,
+} from '../../utils/traceTablePreferences'
 import { TraceTable } from './TraceTable'
 
 vi.mock('../../utils/traceTableProjection', () => ({
@@ -81,6 +85,12 @@ const projectionWithRows = (rows: TraceTableProjectionRow[]): TraceTableProjecti
 describe('TraceTable', () => {
   beforeEach(() => {
     localStorage.clear()
+    persistTraceTablePreferences(session.source, {
+      ...DEFAULT_TRACE_TABLE_PREFERENCES,
+      metaColumnIds: [],
+      outputColumnVisible: false,
+      columnOrder: [],
+    })
     download.mockClear()
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
@@ -141,6 +151,40 @@ describe('TraceTable', () => {
       variableIds: ['second', 'first'], metaColumnIds: [],
       columnOrder: ['variable:second', 'variable:first'], showLine: false, includeAnnotations: true,
     })
+  })
+
+  it('shows Output by default at the right, renders a bounded preview, and allows removal', async () => {
+    localStorage.clear()
+    const user = userEvent.setup()
+    const longOutput = `Result: ${'1234567890'.repeat(30)}`
+    project.mockImplementation((_session, options) => ({
+      columns: [],
+      metadataColumns: [{ id: 'meta:output', label: 'Output' }],
+      displayColumns: [{ kind: 'metadata', key: 'meta:output', metadataId: 'meta:output', label: 'Output' }],
+      rows: [{
+        id: 'output', kind: 'line', sequence: 5, sequences: [5], line: 8, cells: {}, output: [longOutput],
+        metadata: { functionName: '<module>', callDepth: 0, callId: 1, callNumber: null },
+        annotations: [], teachingNote: null,
+      }],
+      ...options,
+    }) as unknown as ReturnType<typeof projectTraceTable>)
+
+    render(<TraceTable session={{ ...session, variables: {} }} />)
+
+    expect(project).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({
+      metaColumnIds: ['meta:output'],
+      columnOrder: ['meta:output'],
+    }))
+    const headers = screen.getAllByRole('columnheader').map(header => header.getAttribute('aria-label') ?? header.textContent)
+    expect(headers).toEqual(['Step', 'Output', 'Add variable column'])
+    expect(screen.getByRole('tooltip')).toHaveTextContent(longOutput)
+    expect(screen.getByText(/…$/)).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Remove Output' }))
+    expect(project).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({
+      metaColumnIds: [],
+      columnOrder: [],
+    }))
   })
 
   it('switches from compact rows to every-line rows', async () => {
@@ -305,7 +349,7 @@ describe('TraceTable', () => {
 
     await user.click(screen.getByRole('button', { name: 'Context' }))
     expect(screen.getByRole('button', { name: 'Context' })).toHaveAttribute('aria-pressed', 'false')
-    expect(screen.getByText('No variable writes were captured for this trace.')).toBeInTheDocument()
+    expect(screen.getByText('No selected variable writes or output were captured for this trace.')).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Context' }))
     expect(screen.getByText('Entered unused (call #1).')).toBeInTheDocument()
@@ -419,7 +463,7 @@ describe('TraceTable', () => {
     const callHeader = within(table).getByRole('columnheader', { name: 'Call #' })
     const xHeader = within(table).getByRole('columnheader', { name: 'x' })
     const yHeader = within(table).getByRole('columnheader', { name: 'y' })
-    expect(callHeader).toHaveAttribute('data-pinned', 'true')
+    expect(callHeader).toHaveAttribute('data-pinned', 'left')
     expect(callHeader).toHaveAttribute('draggable', 'false')
     expect(screen.queryByRole('button', { name: 'Remove Call #' })).not.toBeInTheDocument()
 
@@ -502,20 +546,20 @@ describe('TraceTable', () => {
       }],
     })
     const { unmount } = render(<TraceTable session={session} />)
-    const valueCell = screen.getByRole('cell', { name: 'list • 1 items' })
-    expect(valueCell).toHaveAttribute('title', 'list • 1 items')
+    const valueCell = screen.getByText('list • 1 items').closest('td')
+    expect(valueCell).not.toBeNull()
 
     await user.click(screen.getByRole('button', { name: 'Expand x' }))
-    expect(valueCell).toHaveTextContent('list [list • 1 items]')
+    expect(valueCell).toHaveTextContent('[list • 1 items]')
     expect(screen.getByRole('button', { name: 'Expand x' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Contract x' })).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Expand x' }))
-    expect(valueCell).toHaveTextContent('list [list [7]]')
+    expect(valueCell).toHaveTextContent('[[7]]')
     expect(screen.queryByRole('button', { name: 'Expand x' })).not.toBeInTheDocument()
 
     unmount()
     render(<TraceTable session={session} />)
-    expect(screen.getByRole('cell', { name: 'list [list [7]]' })).toHaveAttribute('title', 'list • 1 items')
+    expect(screen.getAllByText('[[7]]').length).toBeGreaterThan(0)
   })
 
   it('resizes variable columns with an accessible keyboard or drag handle and persists the width', async () => {

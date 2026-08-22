@@ -272,6 +272,7 @@ export function adaptTraceWorkerBatch(
       returnValue: event.returnValue,
       exception: event.exception,
       inputValue: event.inputValue,
+      output: event.output ? [...event.output] : undefined,
     }
   })
 

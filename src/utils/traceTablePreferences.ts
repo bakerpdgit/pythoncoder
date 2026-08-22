@@ -14,8 +14,9 @@ export const DEFAULT_TRACE_TABLE_PREFERENCES: TraceTablePreferences = {
   rowMode: 'compact',
   columnMode: 'auto',
   variableIds: [],
-  metaColumnIds: [],
-  columnOrder: [],
+  metaColumnIds: ['meta:output'],
+  outputColumnVisible: true,
+  columnOrder: ['meta:output'],
   aliases: {},
   columnWidths: {},
   displayDepths: {},
@@ -31,6 +32,7 @@ export interface TraceTableMetaColumnDefinition {
 export const TRACE_TABLE_META_COLUMNS: readonly TraceTableMetaColumnDefinition[] = [
   { id: 'meta:call-depth', defaultLabel: 'Call depth' },
   { id: 'meta:call-number', defaultLabel: 'Call #' },
+  { id: 'meta:output', defaultLabel: 'Output' },
 ]
 
 const TRACE_TABLE_META_COLUMN_IDS = new Set<TraceTableMetaColumnId>(
@@ -79,20 +81,24 @@ const canonicalColumnOrder = (
   variableIds: TraceVariableId[],
   metaColumnIds: TraceTableMetaColumnId[],
   persistedColumnOrder: TraceTableColumnKey[],
+  outputColumnVisible: boolean,
 ): TraceTableColumnKey[] => {
   const selectedMetadata = new Set<TraceTableMetaColumnId>([
     ...metaColumnIds,
     ...persistedColumnOrder.filter(isTraceTableMetaColumnId),
   ])
+  if (outputColumnVisible) selectedMetadata.add('meta:output')
+  else selectedMetadata.delete('meta:output')
   const orderedMetadata = TRACE_TABLE_META_COLUMNS
     .map(column => column.id)
-    .filter(id => selectedMetadata.has(id))
+    .filter(id => id !== 'meta:output' && selectedMetadata.has(id))
   const orderedVariables = persistedColumnOrder
     .flatMap(key => traceTableVariableIdFromColumnKey(key) ?? [])
   const variables = uniqueIds([...orderedVariables, ...variableIds])
   return [
     ...orderedMetadata,
     ...variables.map(traceTableVariableColumnKey),
+    ...(selectedMetadata.has('meta:output') ? ['meta:output' as const] : []),
   ]
 }
 
@@ -139,8 +145,9 @@ const normaliseDisplayDepths = (value: unknown): Record<TraceVariableId, number>
 const copyDefaultPreferences = (): TraceTablePreferences => ({
   ...DEFAULT_TRACE_TABLE_PREFERENCES,
   variableIds: [],
-  metaColumnIds: [],
-  columnOrder: [],
+  metaColumnIds: [...DEFAULT_TRACE_TABLE_PREFERENCES.metaColumnIds],
+  outputColumnVisible: true,
+  columnOrder: [...DEFAULT_TRACE_TABLE_PREFERENCES.columnOrder],
   aliases: {},
   columnWidths: {},
   displayDepths: {},
@@ -157,7 +164,12 @@ export const normaliseTraceTablePreferences = (value: unknown): TraceTablePrefer
   const variableIds = normaliseIdList(value.variableIds)
   const metaColumnIds = normaliseMetaIdList(value.metaColumnIds)
   const persistedColumnOrder = normaliseColumnOrder(value.columnOrder)
-  const columnOrder = canonicalColumnOrder(variableIds, metaColumnIds, persistedColumnOrder)
+  // Preferences written before Output existed have no explicit toggle and
+  // migrate to the new default. Once a learner removes it, false is retained.
+  const outputColumnVisible = typeof value.outputColumnVisible === 'boolean'
+    ? value.outputColumnVisible
+    : true
+  const columnOrder = canonicalColumnOrder(variableIds, metaColumnIds, persistedColumnOrder, outputColumnVisible)
   return {
     rowMode: value.rowMode === 'every-line' ? 'every-line' : 'compact',
     columnMode: value.columnMode === 'custom' ? 'custom' : 'auto',
@@ -165,6 +177,7 @@ export const normaliseTraceTablePreferences = (value: unknown): TraceTablePrefer
     // v1 preference records predate metadata columns, so a missing field
     // intentionally migrates to an empty selection.
     metaColumnIds: columnOrder.filter(isTraceTableMetaColumnId),
+    outputColumnVisible,
     // Metadata is pinned before source variables. Legacy mixed orders are
     // migrated while retaining the user's relative variable order.
     columnOrder,
@@ -188,9 +201,10 @@ export const resolveTraceTableColumnOrder = (
 ): TraceTableColumnKey[] => {
   const normalised = normaliseTraceTablePreferences(preferences)
   const orderedVariables = orderedCurrentIds(variables)
-  const metadata = normalised.metaColumnIds
+  const metadata = normalised.metaColumnIds.filter(id => id !== 'meta:output')
+  const output = normalised.outputColumnVisible ? ['meta:output' as const] : []
   const storedVariables = normalised.columnOrder.filter(key => traceTableVariableIdFromColumnKey(key) !== null)
-  if (normalised.columnMode === 'custom') return [...metadata, ...storedVariables]
+  if (normalised.columnMode === 'custom') return [...metadata, ...storedVariables, ...output]
 
   const current = new Set(orderedVariables)
   const stored = storedVariables.filter(key => current.has(traceTableVariableIdFromColumnKey(key) as TraceVariableId))
@@ -199,6 +213,7 @@ export const resolveTraceTableColumnOrder = (
     ...metadata,
     ...stored,
     ...orderedVariables.filter(id => !included.has(id)).map(traceTableVariableColumnKey),
+    ...output,
   ]
 }
 

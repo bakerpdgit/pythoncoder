@@ -54,14 +54,39 @@ const formatInspectorAtDepth = (node: InspectorNode, depth: number): string => {
   if (depth <= 0 || children.length === 0) return summary
   const contents = children.map(child => `${child.label}: ${formatInspectorAtDepth(child.value, depth - 1)}`)
   if (node.truncated) contents.push('…')
-  if (node.kind === 'sequence') return `${node.type} [${contents.map(value => value.replace(/^[^:]+:\s*/, '')).join(', ')}]`
+  if (node.kind === 'sequence') {
+    const values = contents.map(value => value.replace(/^[^:]+:\s*/, '')).join(', ')
+    if (node.type === 'tuple') return `(${values})`
+    if (node.type === 'set' || node.type === 'frozenset') return `{${values}}`
+    return `[${values}]`
+  }
+  if (node.kind === 'mapping') return `{${contents.join(', ')}}`
   return `${node.type} {${contents.join(', ')}}`
 }
 
 const pinMetadataColumns = (order: TraceTableColumnKey[]): TraceTableColumnKey[] => [
-  ...order.filter(isTraceTableMetaColumnId),
+  ...order.filter(key => isTraceTableMetaColumnId(key) && key !== 'meta:output'),
   ...order.filter(key => !isTraceTableMetaColumnId(key)),
+  ...order.filter(key => key === 'meta:output'),
 ]
+
+const compactCellText = (value: string, limit = 180): string => value.length <= limit
+  ? value
+  : `${value.slice(0, limit - 1)}…`
+
+const TraceCellHoverPreview = ({ display, full }: { display: string; full: string }) => {
+  const compact = compactCellText(display)
+  return (
+  <div className="group relative min-w-0" tabIndex={0} aria-label={full}>
+    <span className="block overflow-hidden text-ellipsis whitespace-nowrap">{compact}</span>
+    {full && full !== compact && (
+      <div role="tooltip" className="pointer-events-auto invisible absolute left-0 top-full z-50 mt-1 max-h-48 min-w-64 max-w-xl overflow-auto whitespace-pre-wrap break-words rounded-md border border-slate-600 bg-slate-950 p-2 text-left text-xs font-normal text-slate-100 opacity-0 shadow-2xl group-hover:visible group-hover:opacity-100 group-focus:visible group-focus:opacity-100">
+        {full}
+      </div>
+    )}
+  </div>
+  )
+}
 
 const SESSION_STATUS_LABELS: Record<TraceSession['status'], string> = {
   recording: 'Recording',
@@ -231,6 +256,7 @@ export const TraceTable = ({ session }: TraceTableProps) => {
       columnMode: result.autoSelect ? 'auto' : 'custom',
       variableIds: result.variableIds,
       metaColumnIds: result.metaColumnIds,
+      outputColumnVisible: result.metaColumnIds.includes('meta:output'),
       columnOrder: result.columnOrder,
       aliases: result.aliases,
       columnWidths: result.columnWidths,
@@ -240,13 +266,14 @@ export const TraceTable = ({ session }: TraceTableProps) => {
   }
 
   const customiseVariableOrder = (variableIds: TraceVariableId[], aliases = preferences.aliases) => {
-    const metadataOrder = displayedColumnOrder.filter(isTraceTableMetaColumnId)
+    const metadataOrder = displayedColumnOrder.filter(key => isTraceTableMetaColumnId(key) && key !== 'meta:output')
+    const outputOrder = preferences.outputColumnVisible ? ['meta:output' as const] : []
     updatePreferences(refreshTraceTableCachedLabels({
       ...preferences,
       columnMode: 'custom',
       variableIds,
-      metaColumnIds: metadataOrder,
-      columnOrder: [...metadataOrder, ...variableIds.map(traceTableVariableColumnKey)],
+      metaColumnIds: [...metadataOrder, ...outputOrder],
+      columnOrder: [...metadataOrder, ...variableIds.map(traceTableVariableColumnKey), ...outputOrder],
       aliases,
     }, session.variables))
   }
@@ -268,6 +295,13 @@ export const TraceTable = ({ session }: TraceTableProps) => {
     delete aliases[variableId]
     customiseVariableOrder(displayedVariableIds.filter(id => id !== variableId), aliases)
   }
+
+  const removeOutputColumn = () => updatePreferences({
+    ...preferences,
+    outputColumnVisible: false,
+    metaColumnIds: preferences.metaColumnIds.filter(id => id !== 'meta:output'),
+    columnOrder: preferences.columnOrder.filter(key => key !== 'meta:output'),
+  })
 
   const quickAddVariable = (variableId: TraceVariableId, headerLabel: string) => {
     const variable = session.variables[variableId]
@@ -520,7 +554,7 @@ export const TraceTable = ({ session }: TraceTableProps) => {
                       key={column.key}
                       scope="col"
                       aria-label={label}
-                      data-pinned={column.kind === 'metadata' ? 'true' : undefined}
+                      data-pinned={column.kind === 'metadata' ? (column.metadataId === 'meta:output' ? 'right' : 'left') : undefined}
                       draggable={column.kind === 'variable'}
                       onDragStart={event => {
                         if (column.kind !== 'variable') return
@@ -539,18 +573,22 @@ export const TraceTable = ({ session }: TraceTableProps) => {
                         if (sourceId) reorderVariable(sourceId, column.variableId)
                         setDraggedVariableId(null)
                       }}
-                      title={column.kind === 'variable' ? 'Drag horizontally to reorder this variable column.' : 'Special column pinned to the left.'}
+                      title={column.kind === 'variable'
+                        ? 'Drag horizontally to reorder this variable column.'
+                        : column.metadataId === 'meta:output'
+                          ? 'Output is pinned to the right.'
+                          : 'Special column pinned to the left.'}
                       style={{ width, minWidth: width, maxWidth: width }}
-                      className={`relative sticky top-0 z-30 border-b border-slate-700 bg-slate-900 px-3 py-2 font-semibold text-slate-300 ${draggedVariableId === (column.kind === 'variable' ? column.variableId : null) ? 'opacity-60' : ''}`}
+                      className={`relative sticky top-0 z-30 border-b border-slate-700 bg-slate-900 px-3 py-2 font-semibold text-slate-300 ${column.kind === 'variable' && draggedVariableId === column.variableId ? 'opacity-60' : ''}`}
                     >
                       <div className="flex items-center justify-between gap-2">
                         <span className="truncate">{label}</span>
-                        {column.kind === 'variable' && (
+                        {(column.kind === 'variable' || column.metadataId === 'meta:output') && (
                           <button
                             type="button"
                             aria-label={`Remove ${label}`}
                             title={`Remove ${label} from the trace table`}
-                            onClick={() => removeVariable(column.variableId)}
+                            onClick={() => column.kind === 'variable' ? removeVariable(column.variableId) : removeOutputColumn()}
                             className="shrink-0 rounded px-1 text-sm font-normal text-slate-500 hover:bg-slate-700 hover:text-red-200"
                           >×</button>
                         )}
@@ -603,9 +641,12 @@ export const TraceTable = ({ session }: TraceTableProps) => {
                   {projection.displayColumns.map(column => {
                     if (column.kind === 'metadata') {
                       const value = formatTraceTableMetadata(row, column.metadataId)
+                      const isOutput = column.metadataId === 'meta:output'
                       return (
-                        <td key={column.key} style={{ width: preferences.columnWidths[column.key], maxWidth: preferences.columnWidths[column.key] }} className="whitespace-nowrap border-b border-slate-700/60 px-3 py-2 font-medium text-sky-100">
-                          {value}
+                        <td key={column.key} style={{ width: preferences.columnWidths[column.key], maxWidth: preferences.columnWidths[column.key] }} className={`relative border-b border-slate-700/60 px-3 py-2 font-medium hover:z-40 focus-within:z-40 ${isOutput ? 'trace-table-output-cell text-amber-300' : 'whitespace-nowrap text-sky-100'}`}>
+                          {isOutput && value
+                            ? <TraceCellHoverPreview display={value} full={value} />
+                            : value}
                         </td>
                       )
                     }
@@ -618,8 +659,11 @@ export const TraceTable = ({ session }: TraceTableProps) => {
                       return <td key={column.variableId} style={{ width: preferences.columnWidths[column.key], maxWidth: preferences.columnWidths[column.key] }} className="border-b border-slate-700/60 px-3 py-2 font-medium text-red-200">Deleted</td>
                     }
                     return (
-                      <td key={column.variableId} style={{ width: preferences.columnWidths[column.key], maxWidth: preferences.columnWidths[column.key] }} className="max-w-64 border-b border-slate-700/60 px-3 py-2 text-emerald-300" title={formatTraceTableInspectorSummary(cell.state.value)}>
-                        <span className="block break-words">{formatInspectorAtDepth(cell.state.value, preferences.displayDepths[column.variableId] ?? 0)}</span>
+                      <td key={column.variableId} style={{ width: preferences.columnWidths[column.key], maxWidth: preferences.columnWidths[column.key] }} className="relative max-w-64 border-b border-slate-700/60 px-3 py-2 text-emerald-300 hover:z-40 focus-within:z-40">
+                        <TraceCellHoverPreview
+                          display={formatInspectorAtDepth(cell.state.value, preferences.displayDepths[column.variableId] ?? 0)}
+                          full={formatInspectorAtDepth(cell.state.value, MAX_TRACE_DISPLAY_DEPTH)}
+                        />
                       </td>
                     )
                   })}
@@ -643,7 +687,7 @@ export const TraceTable = ({ session }: TraceTableProps) => {
               ? 'Choose columns to add variables to this trace table.'
               : eventCount === 0
                 ? 'Run code to capture trace events.'
-                : 'No variable writes were captured for this trace.'}</p>
+                : 'No selected variable writes or output were captured for this trace.'}</p>
             {projection.displayColumns.length === 0 && preferences.columnMode === 'custom' && (
               <div className="mt-3 flex justify-center gap-2">
                 <button ref={quickAddVisibleButtonRef} type="button" onClick={event => openQuickAdd(event.currentTarget)} className="rounded-md border border-sky-600 px-3 py-1.5 text-xs font-medium text-sky-100 hover:bg-sky-500/10">

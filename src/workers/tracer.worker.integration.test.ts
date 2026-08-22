@@ -17,6 +17,7 @@ type WireEvent = {
   deletes?: Array<{ name: string; sourceId: string; operation: string }>
   loopBoundary?: { loopId: string; loopKind: string; iteration: number } | null
   exception?: { type: string; message: string }
+  output?: string[]
 }
 
 type WireBatch = { protocolVersion: number; events: WireEvent[]; catalogue: Array<{ name: string; sourceId: string }> }
@@ -70,6 +71,7 @@ stop_requested = ${options.stopRequested === true ? 'True' : 'False'}
 stop_acks = 0
 input_reads = 0
 limit_acks = []
+pending_trace_output = []
 def js_trace_table_batch(payload):
     if ${options.rejectBatch === true ? 'True' : 'False'}:
         raise RuntimeError("bridge rejected trace batch")
@@ -100,6 +102,10 @@ def js_trace_table_stop_ack():
         stop_acks = 1
 def js_trace_table_limit_reached(event_count, event_limit, last_sequence):
     limit_acks.append({"eventCount": event_count, "eventLimit": event_limit, "lastSequence": last_sequence})
+def js_trace_table_take_output():
+    output = pending_trace_output[:]
+    pending_trace_output.clear()
+    return json.dumps(output)
 
 initial_breakpoints = {}
 pause_on_first_line = ${options.pauseOnFirstLine === true ? 'True' : 'False'}
@@ -108,6 +114,10 @@ trace_table_event_limit = ${options.eventLimit ?? 10_000}
 user_code_str = ${JSON.stringify(code)}
 
 ${setupCode}
+
+def traced_print(*values, sep=' ', end='\\n', **_kwargs):
+    pending_trace_output.append(sep.join(str(value) for value in values) + (end if end != '\\n' else ''))
+user_namespace['print'] = traced_print
 
 run_error = None
 try:
@@ -147,6 +157,15 @@ function events(result: RecorderResult): WireEvent[] {
 }
 
 describe.skipIf(!pythonAvailable)('tracer worker embedded Python recorder', () => {
+  it('attaches printed output to the exact completed source statement', () => {
+    const result = record('x = 1\nprint("Total:", x)\ny = 2\n')
+    const printedEvent = events(result).find(event => event.line === 2 && event.type === 'statement')
+
+    expect(result.error).toBeNull()
+    expect(printedEvent?.output).toEqual(['Total: 1'])
+    expect(events(result).filter(event => event.line !== 2).flatMap(event => event.output ?? [])).toEqual([])
+  })
+
   it('records an explicit same-value assignment in its actual JSON wire payload', () => {
     const result = record('x = 1\nx = 1\n')
     const xWrites = events(result).flatMap(event => event.writes ?? []).filter(write => write.name === 'x')

@@ -119,6 +119,18 @@ describe('trace table filtering', () => {
 })
 
 describe('trace table CSV export', () => {
+  it('exports complete multi-line Output cells in their configured position', () => {
+    const outputRow = row('1', '<module>', null, { output: ['first line', 'second line'] })
+    const csv = exportTraceTableCsv(projection({
+      columns: [],
+      metadataColumns: [{ id: 'meta:output', label: 'Output' }],
+      displayColumns: [{ kind: 'metadata', key: 'meta:output', metadataId: 'meta:output', label: 'Output' }],
+      rows: [outputRow],
+    }), { leadingColumn: 'step' })
+
+    expect(csv).toBe('Step,Output\r\nStep 1,"first line\nsecond line"')
+  })
+
   it('uses visible rows and mixed display order, resolves aliases, and keeps blank/deleted cells', () => {
     const deleted: TraceTableProjectionCell = {
       ...cell('message', primitive('unused')),

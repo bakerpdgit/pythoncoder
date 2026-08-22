@@ -10,6 +10,7 @@ const PYODIDE_URL = `${PYODIDE_BASE_URL}/pyodide.js`
 // to warm the runtime before the user presses Debug, Trace, or Run.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let pyodidePromise: Promise<any> | null = null
+let traceStdoutCapture: ((text: string) => void) | null = null
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const ensurePyodide = (): Promise<any> => {
@@ -42,7 +43,10 @@ const ensurePyodide = (): Promise<any> => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return (self as any).loadPyodide({
       indexURL: `${PYODIDE_BASE_URL}/`,
-      stdout: (text: string) => self.postMessage({ type: 'print', text }),
+      stdout: (text: string) => {
+        self.postMessage({ type: 'print', text })
+        traceStdoutCapture?.(text)
+      },
       stderr: (text: string) => self.postMessage({ type: 'error', error: text }),
     })
   })()
@@ -786,6 +790,12 @@ def trace_table_flush():
     trace_table_batch = []
     trace_table_catalogue_batch = []
 
+def trace_table_take_output():
+    try:
+        return json.loads(str(js_trace_table_take_output()))
+    except Exception:
+        return []
+
 def trace_table_record(event_type, frame, **details):
     global trace_table_sequence
     trace_table_sequence += 1
@@ -951,6 +961,7 @@ def trace_table_complete_statement(frame, next_line=None, completion="line"):
         deletes=deletes,
         failed=failed,
         loopBoundary=loop_boundary,
+        output=trace_table_take_output(),
         variables=trace_table_capture_active(frame),
     )
 
@@ -1363,6 +1374,7 @@ self.onmessage = async function (e: MessageEvent) {
   let traceTableStopAcknowledged = false
   let traceTableLimitReached = false
   let traceTableTransportError: string | null = null
+  const pendingTraceOutput: string[] = []
 
   // This callback never blocks the Python worker. Debugger pauses continue to
   // use js_trace_callback + SharedArrayBuffer; trace-table history is delivered
@@ -1394,6 +1406,10 @@ self.onmessage = async function (e: MessageEvent) {
   })
 
   pyodide.globals.set('js_trace_stop_requested', () => Atomics.load(int32View, 751) === 1)
+  pyodide.globals.set('js_trace_table_take_output', () => {
+    const output = pendingTraceOutput.splice(0)
+    return JSON.stringify(output)
+  })
   pyodide.globals.set('js_trace_table_stop_ack', () => {
     if (traceTableStopAcknowledged) return
     traceTableStopAcknowledged = true
@@ -1550,11 +1566,13 @@ self.onmessage = async function (e: MessageEvent) {
     await pyodide.runPythonAsync(SETUP_CODE)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     pyodide.globals.set('watch_expressions', (pyodide as any).toPy((e.data.watches ?? []) as string[]))
+    traceStdoutCapture = traceTableEnabled ? text => pendingTraceOutput.push(text) : null
     await pyodide.runPythonAsync(`
 code_obj = compile(user_code_str, "simulation.py", "exec")
 exec(code_obj, user_namespace, user_namespace)
     `)
     await pyodide.runPythonAsync('trace_table_flush()')
+    traceStdoutCapture = null
     if (traceTableTransportError) throw new Error(`Trace table transport failed: ${traceTableTransportError}`)
     const updatedFiles = collectUpdatedFiles()
     let finalTurtleSvg = ''
@@ -1565,6 +1583,7 @@ exec(code_obj, user_namespace, user_namespace)
     if (traceTableEnabled) self.postMessage({ type: 'trace-table-end', sessionId: traceTableSessionId, status: 'done', batchCount: traceTableBatchIndex })
     self.postMessage({ type: 'done', files: updatedFiles })
   } catch (err) {
+    traceStdoutCapture = null
     // Flush ordinary runtime/stop failures, but never retry a transport batch
     // after the bridge has failed: its delivered prefix is the only history
     // the terminal acknowledgement may claim as complete.

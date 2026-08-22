@@ -28,12 +28,27 @@ const variable = (id: string, firstSeenSequence: number, defaultLabel = id): Tra
 describe('trace table preferences', () => {
   beforeEach(() => localStorage.clear())
 
+  it('defaults Output on at the right and preserves an explicit removal', () => {
+    expect(resolveTraceTableColumnOrder(DEFAULT_TRACE_TABLE_PREFERENCES, {
+      x: variable('x', 1),
+    })).toEqual(['variable:x', 'meta:output'])
+
+    expect(resolveTraceTableColumnOrder({
+      ...DEFAULT_TRACE_TABLE_PREFERENCES,
+      metaColumnIds: [],
+      outputColumnVisible: false,
+      columnOrder: [],
+    }, { x: variable('x', 1) })).toEqual(['variable:x'])
+  })
+
   it('persists source choices without leaking them across filesystem/path pairs', () => {
     const preferences: TraceTablePreferences = {
       ...DEFAULT_TRACE_TABLE_PREFERENCES,
       rowMode: 'every-line' as const,
       columnMode: 'custom' as const,
+      outputColumnVisible: false,
       variableIds: ['global:score'],
+      metaColumnIds: [],
       columnOrder: ['variable:global:score'],
       aliases: { 'global:score': 'Points' },
     }
@@ -55,8 +70,9 @@ describe('trace table preferences', () => {
     }))
     expect(getStoredTraceTablePreferences(source)).toEqual({
       rowMode: 'compact', columnMode: 'custom', variableIds: ['x', 'y'],
-      metaColumnIds: [],
-      columnOrder: ['variable:x', 'variable:y'],
+      metaColumnIds: ['meta:output'],
+      outputColumnVisible: true,
+      columnOrder: ['variable:x', 'variable:y', 'meta:output'],
       aliases: { x: 'X value' }, columnWidths: {}, displayDepths: {}, cachedDefaultLabels: { y: 'Prior y' },
     })
   })
@@ -82,7 +98,7 @@ describe('trace table preferences', () => {
       aliases: {}, cachedDefaultLabels: {},
     }
     expect(resolveTraceTableColumnOrder(legacy as typeof DEFAULT_TRACE_TABLE_PREFERENCES, { x: variable('x', 1) }))
-      .toEqual(['variable:x', 'variable:unseen'])
+      .toEqual(['variable:x', 'variable:unseen', 'meta:output'])
 
     const mixed: TraceTablePreferences = {
       ...DEFAULT_TRACE_TABLE_PREFERENCES,
@@ -92,7 +108,7 @@ describe('trace table preferences', () => {
       columnOrder: ['variable:x', 'meta:function', 'variable:y', 'meta:call-depth'],
     }
     expect(resolveTraceTableColumnOrder(mixed, { x: variable('x', 1), y: variable('y', 2) }))
-      .toEqual(['meta:call-depth', 'variable:x', 'variable:y'])
+      .toEqual(['meta:call-depth', 'variable:x', 'variable:y', 'meta:output'])
   })
 
   it('pins metadata left and appends newly discovered variables in auto mode', () => {
@@ -103,7 +119,7 @@ describe('trace table preferences', () => {
     expect(resolveTraceTableColumnOrder(preferences, {
       x: variable('x', 1),
       y: variable('y', 2),
-    })).toEqual(['meta:call-number', 'variable:x', 'variable:y'])
+    })).toEqual(['meta:call-number', 'variable:x', 'variable:y', 'meta:output'])
   })
 
   it('normalises persisted column widths and nested display depths', () => {
@@ -166,8 +182,9 @@ describe('trace table preferences', () => {
       rowMode: 'every-line',
       columnMode: 'auto',
       variableIds: [],
-      metaColumnIds: ['meta:call-number'],
-      columnOrder: ['meta:call-number'],
+      metaColumnIds: ['meta:call-number', 'meta:output'],
+      outputColumnVisible: true,
+      columnOrder: ['meta:call-number', 'meta:output'],
       aliases: { 'meta:call-number': 'Call' },
       columnWidths: { 'meta:call-number': 110 },
       displayDepths: {},
