@@ -6,6 +6,19 @@ html[data-theme="light"] .trace-table-teaching-note {
   color: #92400e;
 }
 
+/* Paint the sticky table header as one opaque stacking layer. Keeping the
+   background on the row group as well as its cells prevents Chromium's table
+   compositor from exposing scrolling body text between sticky cell layers. */
+.trace-table-sticky-header,
+.trace-table-sticky-header > tr > th {
+  background-color: #0f172a;
+}
+
+html[data-theme="light"] .trace-table-sticky-header,
+html[data-theme="light"] .trace-table-sticky-header > tr > th {
+  background-color: #f8fbff !important;
+}
+
 body {
   font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
   background: #0f172a;

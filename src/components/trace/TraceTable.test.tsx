@@ -129,6 +129,11 @@ describe('TraceTable', () => {
     render(<TraceTable session={session} />)
 
     const table = screen.getByRole('table', { name: 'Trace event history' })
+    const stickyHeader = table.querySelector('thead')
+    expect(stickyHeader).toHaveClass('trace-table-sticky-header', 'sticky', 'z-30', 'isolate')
+    for (const header of within(table).getAllByRole('columnheader')) {
+      expect(header).toHaveClass('z-30', 'bg-slate-900')
+    }
     expect(within(table).getByRole('columnheader', { name: 'Step' })).toBeInTheDocument()
     expect(within(table).getByRole('columnheader', { name: 'y' })).toBeInTheDocument()
     expect(within(table).getByRole('columnheader', { name: 'x' })).toBeInTheDocument()
