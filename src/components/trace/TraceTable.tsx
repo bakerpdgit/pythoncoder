@@ -503,9 +503,9 @@ export const TraceTable = ({ session }: TraceTableProps) => {
           }}
         >
           <table className="w-full min-w-max border-separate border-spacing-0 text-left text-xs" aria-label="Trace event history">
-            <thead>
+            <thead className="trace-table-sticky-header sticky top-0 z-30 isolate">
               <tr>
-                <th scope="col" className="sticky top-0 z-10 border-b border-r border-slate-700 bg-slate-900 px-3 py-2 font-semibold text-slate-300">
+                <th scope="col" className="sticky top-0 z-30 border-b border-r border-slate-700 bg-slate-900 px-3 py-2 font-semibold text-slate-300">
                   {preferences.rowMode === 'every-line' ? 'Line' : 'Step'}
                 </th>
                 {projection.displayColumns.map(column => {
@@ -541,7 +541,7 @@ export const TraceTable = ({ session }: TraceTableProps) => {
                       }}
                       title={column.kind === 'variable' ? 'Drag horizontally to reorder this variable column.' : 'Special column pinned to the left.'}
                       style={{ width, minWidth: width, maxWidth: width }}
-                      className={`relative sticky top-0 z-10 border-b border-slate-700 bg-slate-900 px-3 py-2 font-semibold text-slate-300 ${draggedVariableId === (column.kind === 'variable' ? column.variableId : null) ? 'opacity-60' : ''}`}
+                      className={`relative sticky top-0 z-30 border-b border-slate-700 bg-slate-900 px-3 py-2 font-semibold text-slate-300 ${draggedVariableId === (column.kind === 'variable' ? column.variableId : null) ? 'opacity-60' : ''}`}
                     >
                       <div className="flex items-center justify-between gap-2">
                         <span className="truncate">{label}</span>
@@ -585,7 +585,7 @@ export const TraceTable = ({ session }: TraceTableProps) => {
                     </th>
                   )
                 })}
-                <th scope="col" aria-label="Add variable column" className="sticky top-0 z-10 w-10 border-b border-slate-700 bg-slate-900 px-2 py-2 text-center">
+                <th scope="col" aria-label="Add variable column" className="sticky top-0 z-30 w-10 border-b border-slate-700 bg-slate-900 px-2 py-2 text-center">
                   <button ref={quickAddVisibleButtonRef} type="button" aria-label="Add variable column" title="Quickly add a variable column" onClick={event => openQuickAdd(event.currentTarget)} className="rounded px-2 py-1 text-base font-medium text-sky-100 hover:bg-slate-700">+</button>
                 </th>
               </tr>
