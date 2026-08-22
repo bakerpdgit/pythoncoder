@@ -39,7 +39,7 @@ import { getExplanation, getDefinitionKey } from './data/explanations'
 import { ThemeToggleButton } from './components/ui/ThemeToggleButton'
 import { RuntimeSettingsMenu } from './components/ui/RuntimeSettingsMenu'
 import { PanelVisibilityMenu } from './components/ui/PanelVisibilityMenu'
-import { LearningMenu } from './components/ui/LearningMenu'
+import { LearningMenu, type LearningTutorial } from './components/ui/LearningMenu'
 import { DiagramFontControls } from './components/ui/DiagramFontControls'
 import { IconButton } from './components/ui/IconButton'
 import { SettingsDialog } from './components/ui/SettingsDialog'
@@ -81,6 +81,7 @@ import { isRuntimeSourceLocked, RuntimeStartGuard } from './utils/runtimeStartGu
 import {
   beginTraceInputTabHandoff, completeTraceInputTabHandoff, type ConsolePanelTab,
 } from './utils/traceInputTab'
+import { getRunModeFromSearch, type WorkerRunMode } from './utils/urlRunMode'
 import { useDialogs } from './components/dialogs/DialogProvider'
 import {
   readDirectoryToMap, writeFileToFolderHandle, mkdirInFolderHandle,
@@ -123,8 +124,6 @@ const PYTHON_KEYWORDS = new Set([
   'if', 'import', 'in', 'is', 'lambda', 'nonlocal', 'not', 'or', 'pass', 'raise',
   'return', 'try', 'while', 'with', 'yield',
 ])
-
-type WorkerRunMode = 'trace' | 'run' | 'debug'
 
 interface TraceWorkerStartSource {
   filesystemId: string
@@ -250,7 +249,9 @@ export default function App() {
   const bpMenuRef = useRef<HTMLDivElement | null>(null)
   const [isBpToolMenuOpen, setIsBpToolMenuOpen] = useState(false)
   const bpToolMenuRef = useRef<HTMLDivElement | null>(null)
-  const [runModeChoice, setRunModeChoice] = useState<WorkerRunMode>('debug')
+  const [runModeChoice, setRunModeChoice] = useState<WorkerRunMode>(
+    () => getRunModeFromSearch(window.location.search),
+  )
   const [isRunDropdownOpen, setIsRunDropdownOpen] = useState(false)
   const [editorFontSize, setEditorFontSize] = useState(() => getStoredEditorFontSize())
   const [consoleFontSize, setConsoleFontSize] = useState(() => getStoredConsoleFontSize())
@@ -1895,10 +1896,11 @@ export default function App() {
     }
   }
 
-  const handleLearningTutorialOpen = (githubUrl: string) => {
+  const handleLearningTutorialOpen = (tutorial: LearningTutorial) => {
     setIsLearningMenuOpen(false)
+    if (tutorial.mode) setRunModeChoice(tutorial.mode)
     try {
-      void openResourceUrl(githubRepositoryBookUrl(githubUrl))
+      void openResourceUrl(tutorial.book ?? githubRepositoryBookUrl(tutorial.github))
     } catch (e) {
       setCodeStatus(`Failed to open tutorial: ${e instanceof Error ? e.message : String(e)}`)
     }

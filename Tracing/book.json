@@ -1,0 +1,41 @@
+{
+  "name": "Tracing",
+  "id": "tracing",
+  "children": [
+    {
+      "id": "tracing-running-total",
+      "name": "1. A running total",
+      "guide": "01_running_total.md",
+      "py": "01_running_total.py",
+      "isExample": true
+    },
+    {
+      "id": "tracing-largest-value",
+      "name": "2. Finding the largest value",
+      "guide": "02_largest_value.md",
+      "py": "02_largest_value.py",
+      "isExample": true
+    },
+    {
+      "id": "tracing-bubble-sort",
+      "name": "3. Bubble sort",
+      "guide": "03_bubble_sort.md",
+      "py": "03_bubble_sort.py",
+      "isExample": true
+    },
+    {
+      "id": "tracing-binary-search",
+      "name": "4. Binary search",
+      "guide": "04_binary_search.md",
+      "py": "04_binary_search.py",
+      "isExample": true
+    },
+    {
+      "id": "tracing-merge-sort",
+      "name": "5. Recursive merge sort",
+      "guide": "05_merge_sort.md",
+      "py": "05_merge_sort.py",
+      "isExample": true
+    }
+  ]
+}

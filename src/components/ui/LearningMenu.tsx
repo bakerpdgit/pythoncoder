@@ -1,22 +1,28 @@
 import { useEffect, useState, type RefObject } from 'react'
+import type { WorkerRunMode } from '../../utils/urlRunMode'
 
-interface LearningTutorial {
+export interface LearningTutorial {
   name: string
   github: string
+  book?: string
+  mode?: WorkerRunMode
 }
 
 interface Props {
   menuRef: RefObject<HTMLDivElement>
   isOpen: boolean
   onToggleOpen: () => void
-  onOpenTutorial: (githubUrl: string) => void
+  onOpenTutorial: (tutorial: LearningTutorial) => void
 }
 
-function isTutorialCatalog(value: unknown): value is LearningTutorial[] {
+export function isTutorialCatalog(value: unknown): value is LearningTutorial[] {
   return Array.isArray(value) && value.every(item =>
     typeof item === 'object' && item !== null
     && typeof (item as LearningTutorial).name === 'string'
-    && typeof (item as LearningTutorial).github === 'string')
+    && typeof (item as LearningTutorial).github === 'string'
+    && ((item as LearningTutorial).book === undefined || typeof (item as LearningTutorial).book === 'string')
+    && ((item as LearningTutorial).mode === undefined
+      || ['trace', 'run', 'debug'].includes((item as LearningTutorial).mode as string)))
 }
 
 function repositoryLabel(url: string): string {
@@ -82,9 +88,9 @@ export function LearningMenu({ menuRef, isOpen, onToggleOpen, onOpenTutorial }: 
             <div className="space-y-1">
               {tutorials.map(tutorial => (
                 <button
-                  key={tutorial.github}
+                  key={tutorial.book ?? tutorial.github}
                   type="button"
-                  onClick={() => onOpenTutorial(tutorial.github)}
+                  onClick={() => onOpenTutorial(tutorial)}
                   className="group flex w-full items-start gap-3 rounded-md px-2 py-2 text-left transition-colors hover:bg-slate-900/70"
                   title={`Open ${tutorial.name}`}
                 >
