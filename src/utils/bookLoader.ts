@@ -1,4 +1,4 @@
-import type { BookAdditionalFile, BookChild, BookChallenge, BookManifest, BookRef } from '../types'
+import type { BookAdditionalFile, BookChild, BookChallenge, BookManifest, BookRef, BreadcrumbEntry } from '../types'
 import { listFilesystems, createFilesystem, writeFile, guessMimeType, deleteFilesystem, getEntryByPath } from './virtualFS'
 import { fetchResourceBuffer, fetchResourceText } from './bookSource'
 
@@ -47,6 +47,43 @@ export async function fetchBookManifest(url: string): Promise<BookManifest> {
   } catch {
     throw new Error(`Cannot parse book.json from ${url}`)
   }
+}
+
+export interface FirstBookChallengeTarget {
+  bookUrl: string
+  breadcrumb: BreadcrumbEntry[]
+  challenge: BookChallenge
+}
+
+/** Find the first enterable example/activity in book order, including sub-books. */
+export async function findFirstBookChallenge(
+  rootBookUrl: string,
+  loadManifest: (url: string) => Promise<BookManifest> = fetchBookManifest,
+): Promise<FirstBookChallengeTarget | null> {
+  const visited = new Set<string>()
+
+  const visit = async (
+    bookUrl: string,
+    breadcrumb: BreadcrumbEntry[],
+  ): Promise<FirstBookChallengeTarget | null> => {
+    if (visited.has(bookUrl)) return null
+    visited.add(bookUrl)
+
+    const manifest = await loadManifest(bookUrl)
+    for (const child of manifest.children) {
+      if (!isBookRef(child)) return { bookUrl, breadcrumb, challenge: child }
+
+      const childUrl = resolveBookUrl(bookUrl, child.bookLink)
+      const target = await visit(
+        childUrl,
+        [...breadcrumb, { name: child.name, bookUrl }],
+      )
+      if (target) return target
+    }
+    return null
+  }
+
+  return visit(rootBookUrl, [])
 }
 
 function normPath(p: string): string {

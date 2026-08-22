@@ -15,3 +15,15 @@ export function getRunModeFromSearch(
     ? requested
     : fallback
 }
+
+/**
+ * Whether a URL-opened learning book should immediately enter its first
+ * example. A bare `?showFirst` is treated as enabled for concise shared links.
+ */
+export function getShowFirstFromSearch(search: string): boolean {
+  const params = new URLSearchParams(search)
+  if (!params.has('showFirst')) return false
+
+  const requested = params.get('showFirst')?.trim().toLowerCase() ?? ''
+  return requested === '' || requested === '1' || requested === 'true' || requested === 'yes'
+}
