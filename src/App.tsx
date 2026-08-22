@@ -81,6 +81,7 @@ import { isRuntimeSourceLocked, RuntimeStartGuard } from './utils/runtimeStartGu
 import {
   beginTraceInputTabHandoff, completeTraceInputTabHandoff, type ConsolePanelTab,
 } from './utils/traceInputTab'
+import { getRunModeFromSearch, type WorkerRunMode } from './utils/urlRunMode'
 import { useDialogs } from './components/dialogs/DialogProvider'
 import {
   readDirectoryToMap, writeFileToFolderHandle, mkdirInFolderHandle,
@@ -123,8 +124,6 @@ const PYTHON_KEYWORDS = new Set([
   'if', 'import', 'in', 'is', 'lambda', 'nonlocal', 'not', 'or', 'pass', 'raise',
   'return', 'try', 'while', 'with', 'yield',
 ])
-
-type WorkerRunMode = 'trace' | 'run' | 'debug'
 
 interface TraceWorkerStartSource {
   filesystemId: string
@@ -250,7 +249,9 @@ export default function App() {
   const bpMenuRef = useRef<HTMLDivElement | null>(null)
   const [isBpToolMenuOpen, setIsBpToolMenuOpen] = useState(false)
   const bpToolMenuRef = useRef<HTMLDivElement | null>(null)
-  const [runModeChoice, setRunModeChoice] = useState<WorkerRunMode>('debug')
+  const [runModeChoice, setRunModeChoice] = useState<WorkerRunMode>(
+    () => getRunModeFromSearch(window.location.search),
+  )
   const [isRunDropdownOpen, setIsRunDropdownOpen] = useState(false)
   const [editorFontSize, setEditorFontSize] = useState(() => getStoredEditorFontSize())
   const [consoleFontSize, setConsoleFontSize] = useState(() => getStoredConsoleFontSize())
