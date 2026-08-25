@@ -1,6 +1,7 @@
 /// <reference lib="webworker" />
 
 import { TRACE_TABLE_EVENT_LIMIT } from '../types/traceTable'
+import { pyodideSkipDirs } from '../utils/pyodideFs'
 
 const PYODIDE_BASE_URL = 'https://cdn.jsdelivr.net/pyodide/v0.29.3/full'
 const PYODIDE_URL = `${PYODIDE_BASE_URL}/pyodide.js`
@@ -1555,6 +1556,7 @@ self.onmessage = async function (e: MessageEvent) {
   function collectUpdatedFiles(): Array<{ path: string; content: ArrayBuffer; mimeType: string }> {
     const results: Array<{ path: string; content: ArrayBuffer; mimeType: string }> = []
     const visited = new Set<string>()
+    const skipDirs = pyodideSkipDirs(mountedPaths)
     const dirsToScan = new Set<string>([vfsCwd])
     for (const p of mountedPaths) {
       const d = p.substring(0, p.lastIndexOf('/')) || '/'
@@ -1566,6 +1568,7 @@ self.onmessage = async function (e: MessageEvent) {
       for (const name of entries) {
         if (name === '.' || name === '..') continue
         const full = dir === '/' ? `/${name}` : `${dir}/${name}`
+        if (skipDirs.has(full)) continue
         if (visited.has(full)) continue; visited.add(full)
         try {
           const stat = pyodide.FS.stat(full)

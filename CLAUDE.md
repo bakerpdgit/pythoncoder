@@ -69,6 +69,7 @@ src/
     htmlPreview.ts            # HTML file preview helpers
     stdctx.ts                 # sys.stdctx / sys.stdaud (Python bootstrap + renderers)
     vfsMediaUrl.ts            # deduped blob URLs for VFS-backed media (stdaud, drawImage)
+    pyodideFs.ts              # which Pyodide MEMFS dirs are off-limits when syncing back
     testMatcher.ts            # Challenge test evaluation
     download.ts               # File download helpers
     export.ts                 # Note/docstring export formatting
@@ -198,6 +199,22 @@ These are set in:
     module-level loop. A `time.sleep` inside a `def` still blocks.
   - **tester worker** — draws and audio are discarded and sleeps skipped, so a
     canvas challenge's output assertions still run, and run fast.
+
+### File sync boundaries
+
+- After a run, both runtimes walk the working directory to pick up files the
+  program created or changed. The working directory is usually `/` — and so is
+  the root of Pyodide's own Emscripten filesystem, which holds `/lib`, `/dev`,
+  `/home`, `/proc` and `/tmp`. An unguarded walk therefore swept Pyodide's whole
+  standard library (a ~2 MB `/lib/python313.zip`) into the user's filesystem on
+  every run, where it showed up in the file browser and in every "download as
+  zip".
+- `utils/pyodideFs.ts` holds the guard. `pyodideSkipDirs(mountedPaths)` returns
+  the system directories to skip, minus any the app actually mounted files into
+  — a learning book is allowed to contain a folder called `lib`. Both
+  `collectUpdatedFiles` (`workers/tracer.worker.ts`) and `readFilesFromPyodide`
+  (`utils/virtualFS.ts`) consult it. Programs can still *read* the stdlib; it
+  just never syncs back.
 
 ### File sync must not retype files
 

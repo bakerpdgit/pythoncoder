@@ -1,5 +1,6 @@
 import type { VFSEntry, VFSFile, VFSFilesystem } from '../types'
 import { fetchResourceBuffer, MIN_PLAUSIBLE_ZIP_BYTES } from './bookSource'
+import { pyodideSkipDirs } from './pyodideFs'
 
 const DB_NAME = 'pythoncoder-vfs'
 
@@ -332,6 +333,7 @@ export function mountFilesToPyodide(
 export function readFilesFromPyodide(pyodide: any, mountedPaths: string[], cwd: string): VFSFile[] {
   const results: VFSFile[] = []
   const visited = new Set<string>()
+  const skipDirs = pyodideSkipDirs(mountedPaths)
 
   function walk(dirPath: string) {
     let entries: string[]
@@ -339,6 +341,7 @@ export function readFilesFromPyodide(pyodide: any, mountedPaths: string[], cwd: 
     for (const name of entries) {
       if (name === '.' || name === '..') continue
       const fullPath = dirPath === '/' ? `/${name}` : `${dirPath}/${name}`
+      if (skipDirs.has(fullPath)) continue
       if (visited.has(fullPath)) continue
       visited.add(fullPath)
       try {
