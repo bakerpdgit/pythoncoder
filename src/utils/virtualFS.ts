@@ -182,7 +182,7 @@ export function writeFile(fsId: string, path: string, content: ArrayBuffer, mime
         if (existing) {
           req = store.put({ ...existing, content, mimeType: mimeType ?? existing.mimeType, size: content.byteLength, modifiedAt: Date.now() })
         } else {
-          req = store.add({ id: crypto.randomUUID(), fsId, parentPath, path, name, type: 'file', content, mimeType: mimeType ?? 'text/plain', size: content.byteLength, modifiedAt: Date.now() })
+          req = store.add({ id: crypto.randomUUID(), fsId, parentPath, path, name, type: 'file', content, mimeType: mimeType ?? guessMimeType(name), size: content.byteLength, modifiedAt: Date.now() })
         }
         req.onsuccess = () => resolve()
         req.onerror = () => reject(req.error)
@@ -248,7 +248,12 @@ export async function getAllFiles(fsId: string): Promise<VFSFile[]> {
 
 export async function syncFilesFromPyodide(fsId: string, updatedFiles: VFSFile[]): Promise<void> {
   for (const file of updatedFiles) {
-    await writeFile(fsId, file.path, file.content, file.mimeType)
+    // A blank or catch-all type means "no opinion" — writeFile then keeps the
+    // type the entry already had rather than downgrading a .wav to text.
+    const mimeType = file.mimeType && file.mimeType !== 'application/octet-stream'
+      ? file.mimeType
+      : undefined
+    await writeFile(fsId, file.path, file.content, mimeType)
   }
 }
 

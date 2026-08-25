@@ -1,4 +1,4 @@
-export type ConsolePanelTab = 'console' | 'inputs' | 'tests' | 'trace-table'
+export type ConsolePanelTab = 'console' | 'inputs' | 'tests' | 'trace-table' | 'canvas'
 
 export interface TraceInputTabHandoff {
   nextTab: ConsolePanelTab

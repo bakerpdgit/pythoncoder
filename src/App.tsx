@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo, useDeferredValue, startTransition, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import { useState, useEffect, useRef, useMemo, useCallback, useDeferredValue, startTransition, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import TracerWorker from './workers/tracer.worker.ts?worker'
 import TesterWorker from './workers/tester.worker.ts?worker'
 import Editor, { type Monaco, loader } from '@monaco-editor/react'
@@ -12,12 +12,12 @@ if (import.meta.env.DEV) {
 import type { editor as MonacoEditor } from 'monaco-editor'
 import {
   buildPythonStructureModel, analyzePythonClasses, analyzePythonFunctions,
-  analyzePythonOutline, cleanCodeText, codeUsesPygame, codeUsesTurtle, getExpandableOutlineIds,
+  analyzePythonOutline, cleanCodeText, codeUsesPygame, codeUsesSpongeLibs, codeUsesStdctx, codeUsesTurtle, getExpandableOutlineIds,
 } from './utils/codeAnalysis'
 import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides, getStoredSettings, persistSettings, getStoredBookNavState, persistBookNavState, getStoredFixedInputs, persistFixedInputs, getStoredEditorFontSize, persistEditorFontSize, getStoredConsoleFontSize, persistConsoleFontSize, getStoredWatches, persistWatches, getStoredNamedLayouts, persistNamedLayouts, getStoredCompletions, persistCompletion, getStoredLayoutPrefs, persistLayoutPrefs, defaultPanelsForView, MINIMAL_VISIBLE_PANELS } from './utils/storage'
 import { triggerDownload, getBaseFileStem } from './utils/download'
 import { buildCommentExport, buildDocstringExport, replaceExistingDocstring, getDefinitionNote, getDefaultDefinitionNote, sanitizeNoteText } from './utils/export'
-import { loadMainThreadPyodide, resetMainThreadPyodide, PYGAME_MAIN_THREAD_BOOTSTRAP, TURTLE_CANVAS_BOOTSTRAP, TURTLE_SVG_BOOTSTRAP, SVG_TURTLE_WORKER_SETUP } from './utils/mainThread'
+import { loadMainThreadPyodide, resetMainThreadPyodide, PYGAME_MAIN_THREAD_BOOTSTRAP, TURTLE_CANVAS_BOOTSTRAP, TURTLE_SVG_BOOTSTRAP, SVG_TURTLE_WORKER_SETUP, STDCTX_MAIN_THREAD_BOOTSTRAP } from './utils/mainThread'
 import { fetchBookManifest, findFirstBookChallenge, getOrCreateChallengeFs, getHiddenPathsForFs, isBookUrl, isBookRef, BOOK_FS_PREFIX, BOOK_SRC_PREFIX } from './utils/bookLoader'
 import {
   ensureDefaultFilesystem, getAllFiles, syncFilesFromPyodide, writeFile,
@@ -49,6 +49,9 @@ import { OutlinePanel } from './components/diagrams/OutlinePanel'
 import { TurtleScrubber } from './components/TurtleScrubber'
 import { InspectorPane } from './components/InspectorPane'
 import { ConsoleTerminal, type ConsoleTerminalHandle } from './components/ConsoleTerminal'
+import { CanvasPane, type CanvasPaneHandle } from './components/CanvasPane'
+import { STDCTX_KEY_BUFFER_SIZE, STDCTX_WORKER_BOOTSTRAP, keyToVirtualKeyCode, processAudioCommand, type StdaudCommand, type StdctxCommand } from './utils/stdctx'
+import { createVfsMediaUrlCache, isDirectMediaUrl } from './utils/vfsMediaUrl'
 import { TraceTable } from './components/trace/TraceTable'
 import { clampDiagramFontSize } from './components/diagrams/diagramLayout'
 import {
@@ -191,6 +194,8 @@ export default function App() {
   const [turtleScrubStep, setTurtleScrubStep] = useState(0)
   const [turtleScrubPlaying, setTurtleScrubPlaying] = useState(false)
   const [turtleScrubSpeed, setTurtleScrubSpeed] = useState(400)
+  // Latched once a stdctx program has drawn, so the Canvas tab stays available.
+  const [hasCanvasOutput, setHasCanvasOutput] = useState(false)
   const [isConsolePresentationMode, setIsConsolePresentationMode] = useState(false)
   const [runtimePreference, setRuntimePreference] = useState<RuntimeKey>('trace-worker')
   const [appSettings, setAppSettings] = useState<AppSettings>(() => getStoredSettings())
@@ -307,6 +312,16 @@ export default function App() {
   const activeBookChallengeRef = useRef<BookChallenge | null>(null)
   const challengeLoadIdRef = useRef(0)
   const sabRef = useRef<SabRef | null>(null)
+  const canvasPaneRef = useRef<CanvasPaneHandle | null>(null)
+  // Key state shared with the trace worker so stdctx.check_key() can read it
+  // while the worker is blocked inside Python.
+  const stdctxKeyBufferRef = useRef<Uint8Array | null>(null)
+  // Main-thread runtime equivalent: no SharedArrayBuffer needed there.
+  const stdctxPressedKeysRef = useRef<Set<number>>(new Set())
+  const stdaudRef = useRef<HTMLAudioElement | null>(null)
+  // Blob URLs for VFS-backed media, shared by sys.stdaud and stdctx.drawImage
+  // and deduped per file so a load() loop cannot mint a copy per iteration.
+  const vfsMediaCacheRef = useRef(createVfsMediaUrlCache())
   const consoleTermRef = useRef<ConsoleTerminalHandle | null>(null)
   const inputModeRef = useRef(appSettings.inputMode)
   const runDropdownRef = useRef<HTMLDivElement>(null)
@@ -410,6 +425,7 @@ export default function App() {
   // ── Derived state ────────────────────────────────────────────────────────
 
   const isPygameLocked = codeUsesPygame(codeText)
+  const usesStdctx = codeUsesStdctx(codeText)
   const isTurtleLocked = codeUsesTurtle(codeText) && appSettings.turtleMode === 'pyo-js-turtle'
   const selectedRuntime: RuntimeKey = (isPygameLocked || isTurtleLocked) ? 'main-thread' : runtimePreference
   const resolvedRuntime = isRunning ? activeRuntime : selectedRuntime
@@ -461,7 +477,10 @@ export default function App() {
   const hasConsoleAndStructure = visiblePanels.output && visiblePanels.diagram
   const hasBookPanel = !!bookNavState
   const isBookEditMode = !!bookEditSession
-  const hasConsoleTabs = appSettings.useFixedInputs || (isBookEditMode && !!activeBookChallenge) || traceSession !== null
+  // The Canvas tab appears as soon as the code mentions stdctx, and stays put
+  // afterwards so the drawing survives an edit that removes the import.
+  const showCanvasTab = usesStdctx || hasCanvasOutput
+  const hasConsoleTabs = appSettings.useFixedInputs || (isBookEditMode && !!activeBookChallenge) || traceSession !== null || showCanvasTab
   const bookName = editManifest?.name ?? null
 
   // ── Derived: is the active challenge a testable task? ─────────────────────
@@ -1793,6 +1812,99 @@ export default function App() {
     })
   }
 
+  // ── stdctx canvas ─────────────────────────────────────────────────────────
+
+  /** Replay one JSON batch of stdctx draw commands on the Canvas tab. */
+  const drawStdctxCommands = (commandsJson: unknown) => {
+    let commands: StdctxCommand[]
+    try {
+      const parsed = JSON.parse(String(commandsJson ?? '[]'))
+      if (!Array.isArray(parsed)) return
+      commands = parsed as StdctxCommand[]
+    } catch {
+      return
+    }
+    if (commands.length === 0) return
+    setHasCanvasOutput(true)
+    canvasPaneRef.current?.draw(commands)
+  }
+
+  /** Wipe the canvas at the start of a stdctx run and reveal its tab. */
+  const beginStdctxRun = (focusCanvasTab: boolean) => {
+    setHasCanvasOutput(true)
+    stdctxPressedKeysRef.current.clear()
+    // The pane only exists while the Console Output panel is on screen.
+    setVisiblePanels(p => (p.output ? p : { ...p, output: true }))
+    canvasPaneRef.current?.clear()
+    if (focusCanvasTab) setConsoleTab('canvas')
+    // The canvas must own focus for stdctx.check_key() to see arrow keys.
+    window.setTimeout(() => canvasPaneRef.current?.focus(), 0)
+  }
+
+  /**
+   * Turn what a program passed to `sys.stdaud.load()` into something the
+   * browser can fetch: a blob URL for a virtual-filesystem file, or the string
+   * itself when it is already a real URL.
+   */
+  const resolveStdaudSource = (source: string): Promise<string> =>
+    vfsMediaCacheRef.current.resolve(source, {
+      fsId: activeFilesystemId,
+      cwd: currentWorkingDir,
+      defaultMimeType: 'audio/mpeg',
+      onMissing: src => appendOutput(`
+[stdaud] file not found: ${src}`),
+    })
+
+  /** The same resolution for `stdctx.drawImage()`, kept synchronous for real URLs. */
+  const resolveStdctxImageUri = useCallback((uri: string): string | Promise<string> => {
+    if (isDirectMediaUrl(uri)) return uri
+    return vfsMediaCacheRef.current.resolve(uri, {
+      fsId: activeFilesystemId,
+      cwd: currentWorkingDir,
+      onMissing: src => appendOutput(`
+[stdctx] image not found: ${src}`),
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeFilesystemId, currentWorkingDir])
+
+  // load() has to resolve a file before play() runs, and the two arrive as
+  // separate messages, so audio commands are applied strictly in order.
+  const stdaudQueueRef = useRef<Promise<void>>(Promise.resolve())
+
+  const handleStdaudCommand = (commandJson: unknown) => {
+    let command: StdaudCommand
+    try {
+      command = JSON.parse(String(commandJson ?? '{}')) as StdaudCommand
+    } catch {
+      return
+    }
+    stdaudQueueRef.current = stdaudQueueRef.current
+      .then(async () => {
+        const audio = stdaudRef.current
+        if (!audio) return
+        const resolved = command.action === 'load'
+          ? await resolveStdaudSource(String(command.source ?? ''))
+          : ''
+        processAudioCommand(audio, command, () => resolved)
+      })
+      .catch(() => { /* a bad clip must not wedge the queue */ })
+  }
+
+  const resetStdaud = () => {
+    const audio = stdaudRef.current
+    if (audio) { audio.pause(); audio.removeAttribute('src'); audio.load() }
+    vfsMediaCacheRef.current.releaseAll()
+  }
+
+  const setStdctxKeyState = (key: string, isDown: boolean) => {
+    const code = keyToVirtualKeyCode(key)
+    if (code === undefined || code <= 0 || code >= STDCTX_KEY_BUFFER_SIZE) return
+    if (isDown) stdctxPressedKeysRef.current.add(code)
+    else stdctxPressedKeysRef.current.delete(code)
+    const buffer = stdctxKeyBufferRef.current
+    if (buffer) Atomics.store(buffer, code, isDown ? 1 : 0)
+  }
+
   // ── Runtime execution ─────────────────────────────────────────────────────
 
   const addToTurtleHistory = (svg: string) => {
@@ -1826,6 +1938,10 @@ export default function App() {
   }
 
   const resetExecutionState = () => {
+    // A run that does not use stdctx retires the Canvas tab; beginStdctxRun
+    // (called straight after, for the runs that do) puts it back.
+    setHasCanvasOutput(false)
+    setConsoleTab(prev => (prev === 'canvas' ? 'console' : prev))
     setCurrentLine(-1); setCurrentFunc(''); setCurrentClass(''); setSimState(null)
     setWatchValues({})
     setInputRequest(null); setInputValue('')
@@ -2723,6 +2839,8 @@ export default function App() {
     }
 
     const hasTurtleForMode = codeUsesTurtle(capturedCode)
+    const usesStdctxForRun = codeUsesStdctx(capturedCode)
+    const usesSpongeLibsForRun = codeUsesSpongeLibs(capturedCode)
     const isSvgTurtleRun = (choice === 'run') && hasTurtleForMode && appSettings.turtleMode === 'basthon-svg'
 
     workerRunModeRef.current = choice
@@ -2736,6 +2854,8 @@ export default function App() {
 
     resetExecutionState()
     resetTurtleHistory()
+    if (usesSpongeLibsForRun) resetStdaud()
+    if (usesStdctxForRun) beginStdctxRun(choice !== 'trace')
     setIsRunning(true); setActiveRuntime('trace-worker')
     setCodeStatus(
       choice === 'run' ? 'Worker runtime starting...' :
@@ -2750,6 +2870,9 @@ export default function App() {
       sabRef.current = { sab, int32: new Int32Array(sab), uint8: new Uint8Array(sab) }
       sabRef.current.int32[750] = -1  // sentinel: -1 = watches not yet written by main thread
       sabRef.current.int32[751] = 0   // cooperative trace-table stop request
+      stdctxKeyBufferRef.current = usesSpongeLibsForRun
+        ? new Uint8Array(new SharedArrayBuffer(STDCTX_KEY_BUFFER_SIZE))
+        : null
 
       // Claim the background-warmed worker when available. If the user clicked
       // before warm-up completed, the queued init message simply shares the same
@@ -2777,6 +2900,7 @@ export default function App() {
       worker.terminate()
       if (workerRef.current === worker) workerRef.current = null
       sabRef.current = null
+      stdctxKeyBufferRef.current = null
       window.setTimeout(prepareTraceWorker, 0)
     }
 
@@ -2869,6 +2993,8 @@ export default function App() {
         }
       } else if (data.type === 'print') {
         appendOutput(data.text)
+      } else if (data.type === 'stderr') {
+        appendOutput('[stderr] ' + data.text)
       } else if (data.type === 'error') {
         if (data.files?.length) {
           void syncFilesFromPyodide(capturedFsId, data.files).then(() => setVfsReloadTrigger(t => t + 1))
@@ -2938,6 +3064,10 @@ export default function App() {
         const svg = data.svg || ''
         setTurtleSvg(svg)
         if (svg) { setDiagramView('turtle'); addToTurtleHistory(svg) }
+      } else if (data.type === 'stdctx_draw') {
+        drawStdctxCommands(data.commands)
+      } else if (data.type === 'stdaud') {
+        handleStdaudCommand(data.command)
       }
     }
 
@@ -2964,6 +3094,8 @@ export default function App() {
         files: vfsFiles,
         cwd: capturedCwd,
         svgTurtleBootstrap,
+        stdctxBootstrap: usesSpongeLibsForRun ? STDCTX_WORKER_BOOTSTRAP : '',
+        stdctxKeyBuffer: stdctxKeyBufferRef.current?.buffer ?? null,
         watches: watchesRef.current,
         breakpoints: initialBreakpoints,
         traceTableEnabled: choice === 'trace',
@@ -2997,6 +3129,8 @@ export default function App() {
     const turtleMode = shouldRunTurtle ? appSettings.turtleMode : null
     const shouldRunTurtleCanvas = turtleMode === 'pyo-js-turtle'
     const shouldRunTurtleSvg = turtleMode === 'basthon-svg'
+    const shouldRunSpongeLibs = !shouldRunPygame && !shouldRunTurtle && codeUsesSpongeLibs(codeText)
+    const shouldRunStdctx = shouldRunSpongeLibs && codeUsesStdctx(codeText)
 
     mainThreadStopRequestedRef.current = false
     if (shouldRunPygame) enterPygamePresentationMode()
@@ -3007,6 +3141,8 @@ export default function App() {
     resetExecutionState()
     resetTurtleHistory()
     if (shouldRunPygame || shouldRunTurtleCanvas) clearMainThreadCanvas()
+    if (shouldRunSpongeLibs) resetStdaud()
+    if (shouldRunStdctx) beginStdctxRun(true)
     setIsRunning(true); setActiveRuntime('main-thread')
     setCodeStatus('Main-thread runtime starting...')
     setMainThreadStatus(
@@ -3048,7 +3184,11 @@ export default function App() {
 
       setMainThreadStatus(shouldRunPygame ? 'Loading pygame dependencies from imports...' : 'Loading packages from imports...')
       if (!shouldRunTurtleCanvas && !shouldRunTurtleSvg) {
+        // Same as the trace worker: don't report a SyntaxWarning once per parse,
+        // and never against Pyodide's anonymous "<unknown>" import scan.
+        await pyodide.runPythonAsync('import warnings; warnings.simplefilter("ignore", SyntaxWarning)')
         await pyodide.loadPackagesFromImports(codeText)
+        await pyodide.runPythonAsync('warnings.simplefilter("once", SyntaxWarning)')
       }
       if (runId !== mainThreadRunIdRef.current) return
 
@@ -3084,6 +3224,13 @@ export default function App() {
         }
         execGlobalsObj.js_turtle_poll_keys = () => pyodide.toPy(turtlePendingKeys.splice(0))
       }
+      if (shouldRunSpongeLibs) {
+        execGlobalsObj.js_stdctx_send = (commandsJson: string) => drawStdctxCommands(commandsJson)
+        execGlobalsObj.js_stdctx_check_key = (keyCode: number) => stdctxPressedKeysRef.current.has(Number(keyCode))
+        // Only the worker needs a blocking sleep; here the AST rewrite awaits instead.
+        execGlobalsObj.js_stdctx_sleep = () => undefined
+        execGlobalsObj.js_stdaud_send = (commandJson: string) => handleStdaudCommand(commandJson)
+      }
       if (shouldRunTurtleSvg) {
         execGlobalsObj.js_turtle_update_svg = (svg: string) => {
           const svgStr = String(svg ?? '')
@@ -3101,6 +3248,8 @@ export default function App() {
           await pyodide.runPythonAsync(TURTLE_CANVAS_BOOTSTRAP, { globals: execGlobals })
         } else if (shouldRunTurtleSvg) {
           await pyodide.runPythonAsync(TURTLE_SVG_BOOTSTRAP, { globals: execGlobals })
+        } else if (shouldRunSpongeLibs) {
+          await pyodide.runPythonAsync(STDCTX_MAIN_THREAD_BOOTSTRAP, { globals: execGlobals })
         } else {
           await pyodide.runPythonAsync(`
 import builtins
@@ -3437,6 +3586,8 @@ exec(code_obj, globals())
 
   return (
     <div className="h-screen w-screen flex flex-col overflow-hidden text-sm">
+      {/* sys.stdaud playback target — always mounted so a clip survives layout changes */}
+      <audio ref={stdaudRef} className="hidden" preload="auto" crossOrigin="anonymous" />
       {/* Header */}
       <div className="relative z-40 bg-slate-800 border-b border-slate-700 flex justify-between items-center px-6 py-1.5 shadow-md">
         <div className="flex items-center gap-3">
@@ -4213,6 +4364,12 @@ exec(code_obj, globals())
                           Trace Table
                         </button>
                       )}
+                      {showCanvasTab && (
+                        <button id="console-tab-canvas" type="button" role="tab" aria-selected={consoleTab === 'canvas'} aria-controls="console-panel-canvas" tabIndex={consoleTab === 'canvas' ? 0 : -1} onClick={() => { setConsoleTab('canvas'); window.setTimeout(() => canvasPaneRef.current?.focus(), 0) }}
+                          className={`px-2.5 py-1 font-bold uppercase tracking-wider ${consoleTab === 'canvas' ? 'bg-teal-700 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}>
+                          Canvas
+                        </button>
+                      )}
                     </div>
                   ) : (
                     <div className="font-bold uppercase tracking-wider text-xs text-teal-400">Console Output</div>
@@ -4278,6 +4435,18 @@ exec(code_obj, globals())
                 {traceSession && consoleTab === 'trace-table' && (
                   <div id="console-panel-trace-table" role="tabpanel" aria-labelledby="console-tab-trace-table" className="flex-1 min-h-0 overflow-hidden bg-slate-900/30 p-2">
                     <TraceTable session={traceSession} />
+                  </div>
+                )}
+                {/* Canvas tab (sys.stdctx) — kept mounted so the drawing survives tab switches */}
+                {showCanvasTab && (
+                  <div id="console-panel-canvas" role="tabpanel" aria-labelledby="console-tab-canvas"
+                    className={consoleTab !== 'canvas' ? 'hidden' : 'flex flex-col flex-1 min-h-0 overflow-hidden'}>
+                    <CanvasPane
+                      ref={canvasPaneRef}
+                      onKeyDown={key => setStdctxKeyState(key, true)}
+                      onKeyUp={key => setStdctxKeyState(key, false)}
+                      resolveImageUri={resolveStdctxImageUri}
+                    />
                   </div>
                 )}
                 {/* Console content — kept mounted (preserves terminal buffer); hidden when Inputs/Tests tab is active */}

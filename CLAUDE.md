@@ -67,6 +67,8 @@ src/
     virtualFS.ts              # IndexedDB-backed virtual filesystem (multiple named FSes)
     bookLoader.ts             # Learning "book" manifest/challenge loading
     htmlPreview.ts            # HTML file preview helpers
+    stdctx.ts                 # sys.stdctx / sys.stdaud (Python bootstrap + renderers)
+    vfsMediaUrl.ts            # deduped blob URLs for VFS-backed media (stdaud, drawImage)
     testMatcher.ts            # Challenge test evaluation
     download.ts               # File download helpers
     export.ts                 # Note/docstring export formatting
@@ -78,6 +80,7 @@ src/
     FileSystemPanel.tsx       # Virtual filesystem browser + local-folder connect/sync
     BookPanel.tsx             # Learning book navigation + challenge runner
     ConsoleTerminal.tsx       # xterm-based interactive console (inline-console input mode)
+    CanvasPane.tsx            # stdctx canvas (Canvas tab of the console panel)
     TurtleScrubber.tsx        # Turtle SVG history scrubber
     HtmlPreviewDialog.tsx     # Sandboxed HTML preview
     TestResultsBar.tsx        # Challenge test results
@@ -150,6 +153,71 @@ These are set in:
   rename, delete) are **mirrored to disk** through `syncToLocalFolder` in
   `App.tsx`. There is no inbound file-watching (the API can't); a manual
   "Reload from folder" button re-reads disk. Permissions reset on page reload.
+
+### stdctx canvas and stdaud audio
+
+- `sys.stdctx` (canvas) and `sys.stdaud` (audio) are carried over from Python
+  Sponge, so older funchallenge books that do `from sys import stdctx` keep
+  working. stdctx mirrors the HTML5 Canvas 2D API; every call becomes a JSON
+  command replayed against a `<canvas>` in a **Canvas tab** of the console panel.
+- The Python source and the JS renderers all live in `utils/stdctx.ts`;
+  `CanvasPane.tsx` hosts the canvas. One bootstrap installs both objects, gated
+  on `codeUsesSpongeLibs`; the Canvas tab needs `codeUsesStdctx` specifically, so
+  an audio-only program does not grow one.
+- The canvas starts at Sponge's fixed 500x400. `stdctx.resize(w, h)` — or
+  assigning `stdctx.width` / `stdctx.height` — sends a `resize` command, which
+  (like the HTML canvas) clears the bitmap. Every run restarts at the default.
+  `CanvasPane` deliberately keeps the canvas dimensions out of React props so a
+  later render cannot undo a resize.
+- Draw calls are sent one per command until the program calls `present()`, which
+  switches it to double buffering (batch until the next `present()`).
+- `sys.stdaud.load(source)` then `.play()` drives a hidden `<audio>` element, and
+  `stdctx.drawImage(uri, ...)` accepts the same kind of source. Both resolve
+  through `utils/vfsMediaUrl.ts`: a real URL passes through untouched, and a
+  virtual-filesystem path becomes a blob URL **cached per (filesystem, path)**.
+  The cache is the point — without it a `load()` in a loop mints a fresh URL,
+  and a copy of the clip, on every iteration. `resetStdaud()` releases the whole
+  cache at the start of each run. Autoplay rejections are swallowed.
+- A blob URL is a short opaque handle, not an encoded copy — that is `data:`,
+  which inflates ~33%. Serving VFS media from `vfs-preview-sw.js` instead would
+  not work here anyway: that worker is scoped to `/__vfs_preview__/`, so it only
+  sees iframe *navigations* into its scope, never subresources of the app page.
+- `drawImage` keys its image cache on the URI the program passed, never the
+  resolved URL, and holds in-flight and failed URIs so an animation loop starts
+  one load rather than one per frame, and a typo fails once. `CanvasPane.clear()`
+  calls `clearStdctxImageCache()` so each run re-reads its images.
+- Four JS bridges back the Python side: `js_stdctx_send`, `js_stdctx_check_key`,
+  `js_stdctx_sleep` and `js_stdaud_send`, supplied differently per runtime:
+  - **trace worker** — draws go over `postMessage`; `check_key` reads a separate
+    256-byte `SharedArrayBuffer` written by the canvas' key handlers; and
+    `time.sleep` is replaced by an `Atomics.wait` so the worker parks (letting
+    the already-queued draws paint) instead of spinning.
+  - **main thread** — draws call straight into the canvas. Blocking would freeze
+    the tab, so `STDCTX_MAIN_THREAD_BOOTSTRAP` rewrites module-level
+    `time.sleep(x)` into `await asyncio.sleep(x)` and appends a yield to every
+    module-level loop. A `time.sleep` inside a `def` still blocks.
+  - **tester worker** — draws and audio are discarded and sleeps skipped, so a
+    canvas challenge's output assertions still run, and run fast.
+
+### File sync must not retype files
+
+- `syncFilesFromPyodide` writes back everything a run touched. The runtimes have
+  no MIME opinion, so they send an empty `mimeType` and the stored type survives;
+  only a specific type (not blank, not `application/octet-stream`) overwrites it.
+  Before this, every run retyped every file to `text/plain`, which silently broke
+  audio playback and image decoding for anything a program merely read.
+
+### stderr is not a failed run
+
+- Pyodide writes warnings to stderr. The trace worker posts those as a
+  non-fatal `stderr` message that the console shows as `[stderr] …`; only the
+  explicit `error` messages posted from the worker's catch blocks end a run.
+  (Treating any stderr byte as fatal used to kill book challenges over a
+  harmless `SyntaxWarning`.)
+- The user's source is parsed three times per run — Pyodide's import scan, our
+  `ast.parse`, and `compile` — so both runtimes silence `SyntaxWarning` during
+  the import scan (it reports against an anonymous `<unknown>` file) and then
+  set it to `once`, leaving a single warning naming `simulation.py`.
 
 ### Fixed inputs
 

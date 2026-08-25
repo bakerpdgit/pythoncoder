@@ -47,7 +47,10 @@ const ensurePyodide = (): Promise<any> => {
         self.postMessage({ type: 'print', text })
         traceStdoutCapture?.(text)
       },
-      stderr: (text: string) => self.postMessage({ type: 'error', error: text }),
+      // Warnings (and any deliberate sys.stderr writes) land here. They are
+      // console output, not a failed run — only the explicit 'error' messages
+      // posted from the catch blocks below terminate the worker.
+      stderr: (text: string) => self.postMessage({ type: 'stderr', text }),
     })
   })()
 
@@ -1364,6 +1367,14 @@ self.onmessage = async function (e: MessageEvent) {
   }
 
   const useSvgTurtle = Boolean(e.data.svgTurtleBootstrap)
+  const stdctxBootstrap = String(e.data.stdctxBootstrap ?? '')
+  // stdctx key state is a separate SharedArrayBuffer so the tightly packed
+  // trace SAB layout above stays untouched.
+  const stdctxKeys: Uint8Array | null = e.data.stdctxKeyBuffer
+    ? new Uint8Array(e.data.stdctxKeyBuffer as SharedArrayBuffer)
+    : null
+  // Private buffer used only to park the worker for stdctx's time.sleep().
+  const stdctxSleepView = new Int32Array(new SharedArrayBuffer(4))
   const traceTableEnabled = Boolean(e.data.traceTableEnabled ?? e.data.pauseOnFirstLine)
   const traceTableSessionId = String(e.data.traceTableSessionId ?? `trace-${Date.now()}-${Math.random().toString(36).slice(2)}`)
   const requestedTraceTableEventLimit = Number(e.data.traceTableEventLimit ?? TRACE_TABLE_EVENT_LIMIT)
@@ -1487,6 +1498,28 @@ self.onmessage = async function (e: MessageEvent) {
     return cmd
   })
 
+  // ── stdctx bridge ────────────────────────────────────────────────────────
+  pyodide.globals.set('js_stdctx_send', (commandsJson: string) => {
+    self.postMessage({ type: 'stdctx_draw', commands: String(commandsJson) })
+  })
+  pyodide.globals.set('js_stdctx_check_key', (keyCode: number) => {
+    if (!stdctxKeys) return false
+    const code = Number(keyCode)
+    if (!Number.isInteger(code) || code < 0 || code >= stdctxKeys.length) return false
+    return Atomics.load(stdctxKeys, code) > 0
+  })
+  pyodide.globals.set('js_stdaud_send', (commandJson: string) => {
+    self.postMessage({ type: 'stdaud', command: String(commandJson) })
+  })
+  pyodide.globals.set('js_stdctx_sleep', (seconds: number) => {
+    const ms = Number(seconds) * 1000
+    if (!Number.isFinite(ms) || ms <= 0) return
+    // Nothing ever notifies this buffer, so the wait always runs to timeout.
+    // Blocking here (rather than spinning) leaves the main thread free to
+    // paint the draw batches already queued by postMessage.
+    Atomics.wait(stdctxSleepView, 0, 0, ms)
+  })
+
   pyodide.globals.set('js_input_callback', (promptText: string) => {
     Atomics.store(int32View, 0, 2)
     self.postMessage({ type: 'input', prompt: promptText })
@@ -1539,7 +1572,10 @@ self.onmessage = async function (e: MessageEvent) {
           if (pyodide.FS.isDir(stat.mode)) { walk(full) }
           else if (pyodide.FS.isFile(stat.mode)) {
             const bytes = pyodide.FS.readFile(full) as Uint8Array
-            results.push({ path: full, content: bytes.buffer.slice(0) as ArrayBuffer, mimeType: 'text/plain' })
+            // No MIME opinion from here: syncFilesFromPyodide keeps whatever the
+            // virtual filesystem already recorded, so a .wav or .png that the
+            // program merely read does not come back typed as text.
+            results.push({ path: full, content: bytes.buffer.slice(0) as ArrayBuffer, mimeType: '' })
           }
         } catch { /* skip */ }
       }
@@ -1550,9 +1586,19 @@ self.onmessage = async function (e: MessageEvent) {
 
   try {
     const userCode: string = e.data.code
+    // The user's source gets parsed three times (Pyodide's import scan, then
+    // our own ast.parse and compile), so a SyntaxWarning would be reported
+    // three times over — once against Pyodide's anonymous "<unknown>" file.
+    // Silence the import scan, then report each distinct warning once against
+    // simulation.py, which is the name the student can actually act on.
+    await pyodide.runPythonAsync('import warnings; warnings.simplefilter("ignore", SyntaxWarning)')
     await pyodide.loadPackagesFromImports(userCode)
+    await pyodide.runPythonAsync('warnings.simplefilter("once", SyntaxWarning)')
     if (useSvgTurtle) {
       await pyodide.runPythonAsync(e.data.svgTurtleBootstrap as string)
+    }
+    if (stdctxBootstrap) {
+      await pyodide.runPythonAsync(stdctxBootstrap)
     }
     const initialBreakpoints = new Map<number, string>()
     for (const breakpoint of (e.data.breakpoints ?? []) as Array<{ line: number; condition: string }>) {

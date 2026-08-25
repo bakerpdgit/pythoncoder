@@ -1,4 +1,5 @@
 import { PYODIDE_BASE_URL } from '../constants'
+import { STDCTX_MAIN_THREAD_CLASS } from './stdctx'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let mainPyodidePromise: Promise<any> | null = null
@@ -1345,3 +1346,104 @@ _turtle_mod.__dict__['Screen']=lambda: _wscreen
 _sys.modules['turtle']=_turtle_mod
 _refresh_svg()
 `
+
+// ── stdctx bootstrap (main thread) ────────────────────────────────────────
+//
+// Same sys.stdctx object as the worker, but blocking would freeze the tab, so
+// module-level `time.sleep(x)` is rewritten to `await asyncio.sleep(x)` and a
+// yield is appended to every module-level loop. That lets animated Python
+// Sponge programs repaint between frames. Sleeps inside a def still block, as
+// a def cannot be made async without changing how user code calls it.
+
+export const STDCTX_MAIN_THREAD_PRELUDE = String.raw`
+import ast, asyncio, builtins, sys as _stdctx_sys
+
+
+def __coder_prompt_input(prompt=""):
+    return js_input_prompt(prompt)
+builtins.input = __coder_prompt_input
+
+
+class _StdctxAsyncifier(ast.NodeTransformer):
+    """Rewrite module-level time.sleep() into an awaited asyncio.sleep()."""
+
+    def _yield(self, delay):
+        return ast.Await(value=ast.Call(
+            func=ast.Attribute(value=ast.Name(id='asyncio', ctx=ast.Load()),
+                               attr='sleep', ctx=ast.Load()),
+            args=[delay], keywords=[]))
+
+    def _is_sleep_call(self, node):
+        if not isinstance(node, ast.Call) or len(node.args) != 1 or node.keywords:
+            return False
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            return func.attr == 'sleep' and isinstance(func.value, ast.Name) and func.value.id == 'time'
+        return isinstance(func, ast.Name) and func.id == 'sleep'
+
+    def visit_Call(self, node):
+        self.generic_visit(node)
+        return node
+
+    def visit_Expr(self, node):
+        self.generic_visit(node)
+        if self._is_sleep_call(node.value):
+            node.value = self._yield(node.value.args[0])
+        return node
+
+    def _tick(self):
+        return ast.Expr(value=self._yield(ast.Constant(value=0)))
+
+    def visit_For(self, node):
+        self.generic_visit(node); node.body.append(self._tick()); return node
+
+    def visit_While(self, node):
+        self.generic_visit(node); node.body.append(self._tick()); return node
+
+    # A def cannot become async here without breaking its callers.
+    def visit_FunctionDef(self, node):
+        return node
+
+    def visit_AsyncFunctionDef(self, node):
+        return node
+
+    def visit_Module(self, node):
+        self.generic_visit(node)
+        star_imports = []
+        other_stmts = []
+        for stmt in node.body:
+            if isinstance(stmt, ast.ImportFrom) and any(a.name == '*' for a in stmt.names):
+                star_imports.append(stmt)
+            else:
+                other_stmts.append(stmt)
+        fn = ast.AsyncFunctionDef(
+            name='__stdctx_user_code__',
+            args=ast.arguments(posonlyargs=[], args=[], vararg=None,
+                               kwonlyargs=[], kw_defaults=[], kwarg=None, defaults=[]),
+            body=other_stmts or [ast.Pass()],
+            decorator_list=[], returns=None)
+        ast.fix_missing_locations(fn)
+        return ast.Module(body=star_imports + [fn], type_ignores=[])
+`
+
+export const STDCTX_MAIN_THREAD_EPILOGUE = String.raw`
+try:
+    __stdctx_tree = ast.parse(__coder_user_code__, filename='simulation.py')
+    __stdctx_tree = _StdctxAsyncifier().visit(__stdctx_tree)
+    ast.fix_missing_locations(__stdctx_tree)
+    __stdctx_ns = {'__name__': '__main__', 'asyncio': asyncio,
+                   'js_input_prompt': js_input_prompt}
+    exec(compile(__stdctx_tree, 'simulation.py', 'exec'), __stdctx_ns)
+    await __stdctx_ns['__stdctx_user_code__']()
+except SystemExit:
+    pass
+except Exception as __e:
+    js_append_main_thread_log(f'[ERROR] {__e}')
+    raise
+finally:
+    _coder_stdctx._present()
+`
+
+/** Full main-thread stdctx program: prelude + sys.stdctx + async-rewritten user code. */
+export const STDCTX_MAIN_THREAD_BOOTSTRAP =
+  STDCTX_MAIN_THREAD_PRELUDE + STDCTX_MAIN_THREAD_CLASS + STDCTX_MAIN_THREAD_EPILOGUE

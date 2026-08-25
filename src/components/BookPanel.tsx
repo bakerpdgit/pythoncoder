@@ -108,7 +108,7 @@ function renderMarkdown(md: string, previewSvg: string | null, previewLoading: b
 // ── Component ───────────────────────────────────────────────────────────────
 
 const BOOK_FONT_SIZES = [11, 12, 13, 14, 16, 18] as const
-const DEFAULT_BOOK_FONT_SIZE = 13
+const DEFAULT_BOOK_FONT_SIZE = 14
 
 function getStoredBookFontSize(): number {
   try {

@@ -1,6 +1,8 @@
 /// <reference lib="webworker" />
 
 import { SVG_TURTLE_WORKER_SETUP } from '../utils/mainThread'
+import { STDCTX_TEST_BOOTSTRAP } from '../utils/stdctx'
+import { codeUsesSpongeLibs } from '../utils/codeAnalysis'
 import { normalizeTestInputs } from '../utils/testInputs'
 
 const PYODIDE_BASE_URL = 'https://cdn.jsdelivr.net/pyodide/v0.29.3/full'
@@ -122,6 +124,17 @@ function mountFiles(files: Array<{ path: string; content: ArrayBuffer }>): void 
   }
 }
 
+// Canvas and audio challenges still have to import cleanly under test. Draw and
+// audio calls are swallowed here (a tester worker has neither) and sleeps are
+// skipped, so an animated stdctx program's output assertions run at full speed.
+function installStdctxForTests(): void {
+  pyodide.globals.set('js_stdctx_send', () => undefined)
+  pyodide.globals.set('js_stdctx_check_key', () => false)
+  pyodide.globals.set('js_stdctx_sleep', () => undefined)
+  pyodide.globals.set('js_stdaud_send', () => undefined)
+  pyodide.runPython(STDCTX_TEST_BOOTSTRAP)
+}
+
 function readFileFromFs(filename: string): string {
   for (const p of [filename, '/' + filename.replace(/^\//, '')]) {
     try {
@@ -190,6 +203,8 @@ self.onmessage = async (e: MessageEvent) => {
     if (hasTurtleTests) {
       pyodide.runPython(SVG_TURTLE_WORKER_SETUP)
     }
+
+    if (codeUsesSpongeLibs(code)) installStdctxForTests()
 
     const results: Array<{
       caseIndex: number

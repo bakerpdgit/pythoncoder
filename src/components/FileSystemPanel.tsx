@@ -87,6 +87,14 @@ export function FileSystemPanel({
   const [showSaveDialog, setShowSaveDialog] = useState(false)
   const [pendingUpload, setPendingUpload] = useState<{ name: string; content: ArrayBuffer; mimeType: string } | null>(null)
   const [imagePreview, setImagePreview] = useState<ImagePreview | null>(null)
+
+  // Single owner for the preview's blob URL: revoked when it is replaced and
+  // when the panel unmounts, which closing alone used to miss.
+  useEffect(() => {
+    const url = imagePreview?.url
+    if (!url) return
+    return () => URL.revokeObjectURL(url)
+  }, [imagePreview?.url])
   const [showFsMenu, setShowFsMenu] = useState(false)
   const [showOpenDialog, setShowOpenDialog] = useState(false)
   const [showNewMenu, setShowNewMenu] = useState(false)
@@ -686,11 +694,11 @@ export function FileSystemPanel({
       )}
       {imagePreview && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80"
-          onClick={() => { URL.revokeObjectURL(imagePreview.url); setImagePreview(null) }}>
+          onClick={() => setImagePreview(null)}>
           <div className="relative max-w-3xl max-h-[90vh] flex flex-col items-center gap-3" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between w-full">
               <span className="text-slate-300 text-sm">{imagePreview.name}</span>
-              <button onClick={() => { URL.revokeObjectURL(imagePreview.url); setImagePreview(null) }}
+              <button onClick={() => setImagePreview(null)}
                 title="Close preview" aria-label="Close preview"
                 className="text-slate-400 hover:text-slate-200">
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">

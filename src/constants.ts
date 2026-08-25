@@ -11,6 +11,11 @@ export const DEFAULT_CODE_FILENAME = 'coder.py'
 
 export const PYGAME_IMPORT_REGEX = /^\s*(?:import\s+pygame\b|from\s+pygame\b)/m
 export const TURTLE_IMPORT_REGEX = /^\s*(?:import\s+turtle\b|from\s+turtle\b)/m
+// stdctx/stdaud are Python Sponge's canvas and audio libraries, reached as
+// `from sys import stdctx` or as `sys.stdctx`. Matching the bare name also
+// covers aliased and indirect uses.
+export const STDCTX_USAGE_REGEX = /\bstdctx\b/
+export const STDAUD_USAGE_REGEX = /\bstdaud\b/
 export const SETTINGS_STORAGE_KEY = 'coder_app_settings'
 
 export const DIAGRAM_FONT_DEFAULT = 11

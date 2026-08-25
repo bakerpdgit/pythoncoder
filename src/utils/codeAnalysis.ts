@@ -1,4 +1,4 @@
-import { PYGAME_IMPORT_REGEX, TURTLE_IMPORT_REGEX } from '../constants'
+import { PYGAME_IMPORT_REGEX, STDAUD_USAGE_REGEX, STDCTX_USAGE_REGEX, TURTLE_IMPORT_REGEX } from '../constants'
 import type {
   StructureModel,
   FunctionDef,
@@ -24,6 +24,18 @@ export const codeUsesPygame = (source: string): boolean =>
 
 export const codeUsesTurtle = (source: string): boolean =>
   TURTLE_IMPORT_REGEX.test(cleanCodeText(source))
+
+export const codeUsesStdctx = (source: string): boolean =>
+  STDCTX_USAGE_REGEX.test(cleanCodeText(source))
+
+export const codeUsesStdaud = (source: string): boolean =>
+  STDAUD_USAGE_REGEX.test(cleanCodeText(source))
+
+/** Either Python Sponge library — one bootstrap installs both. */
+export const codeUsesSpongeLibs = (source: string): boolean => {
+  const cleaned = cleanCodeText(source)
+  return STDCTX_USAGE_REGEX.test(cleaned) || STDAUD_USAGE_REGEX.test(cleaned)
+}
 
 // ── Structure model ────────────────────────────────────────────────────────
 
