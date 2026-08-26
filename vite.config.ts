@@ -6,6 +6,8 @@ import { resolve, extname, join, relative } from 'path'
 // @ts-ignore - plain .mjs helper shared with server.mjs; no type declarations
 import { handleCorsProxy } from './scripts/corsProxy.mjs'
 
+const devPort = Number(process.env.PORT) || 3000
+
 const isolationHeaders = {
   'Cross-Origin-Opener-Policy': 'same-origin',
   'Cross-Origin-Embedder-Policy': 'credentialless',
@@ -106,11 +108,11 @@ export default defineConfig({
     format: 'iife',
   },
   server: {
-    port: 3000,
+    port: devPort,
     headers: { ...isolationHeaders, ...noCacheHtmlHeaders },
   },
   preview: {
-    port: 3000,
+    port: devPort,
     headers: { ...isolationHeaders, ...noCacheHtmlHeaders },
   },
   build: {

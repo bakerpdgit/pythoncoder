@@ -189,10 +189,24 @@ export const DEVELOPER_VISIBLE_PANELS: PanelVisibility = {
 export const defaultPanelsForView = (mode: ViewMode): PanelVisibility =>
   mode === 'minimal' ? { ...MINIMAL_VISIBLE_PANELS } : { ...DEVELOPER_VISIBLE_PANELS }
 
+/** Console/Display splits are percentages of the output region given to the Console. */
+export const DISPLAY_SPLIT_MIN = 15
+export const DISPLAY_SPLIT_MAX = 85
+export const DEFAULT_DISPLAY_SPLIT = 55            // editing: console-leaning
+export const DEFAULT_PRESENTATION_DISPLAY_SPLIT = 30 // full run: visual-leaning
+
 export const DEFAULT_LAYOUT_PREFS: LayoutPrefs = {
   viewMode: 'minimal',
   visiblePanels: { ...MINIMAL_VISIBLE_PANELS },
   leftSidebarCollapsed: true,
+  displaySplit: DEFAULT_DISPLAY_SPLIT,
+  presentationDisplaySplit: DEFAULT_PRESENTATION_DISPLAY_SPLIT,
+}
+
+const sanitiseSplit = (raw: unknown, fallback: number): number => {
+  const n = typeof raw === 'number' ? raw : Number.NaN
+  if (!Number.isFinite(n)) return fallback
+  return Math.max(DISPLAY_SPLIT_MIN, Math.min(DISPLAY_SPLIT_MAX, n))
 }
 
 const sanitisePanels = (raw: unknown): PanelVisibility | null => {
@@ -218,7 +232,13 @@ export const getStoredLayoutPrefs = (): LayoutPrefs => {
     const viewMode: ViewMode = parsed?.viewMode === 'developer' ? 'developer' : 'minimal'
     const panels = sanitisePanels(parsed?.visiblePanels) ?? defaultPanelsForView(viewMode)
     const leftSidebarCollapsed = parsed?.leftSidebarCollapsed === true || (parsed?.leftSidebarCollapsed === undefined && viewMode === 'minimal')
-    return { viewMode, visiblePanels: panels, leftSidebarCollapsed }
+    return {
+      viewMode,
+      visiblePanels: panels,
+      leftSidebarCollapsed,
+      displaySplit: sanitiseSplit(parsed?.displaySplit, DEFAULT_DISPLAY_SPLIT),
+      presentationDisplaySplit: sanitiseSplit(parsed?.presentationDisplaySplit, DEFAULT_PRESENTATION_DISPLAY_SPLIT),
+    }
   } catch {
     return { ...DEFAULT_LAYOUT_PREFS, visiblePanels: { ...DEFAULT_LAYOUT_PREFS.visiblePanels } }
   }

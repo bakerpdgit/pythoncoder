@@ -64,12 +64,12 @@ export const PANEL_OPTIONS = [
   {
     key: 'output',
     label: 'Console Output',
-    description: 'stdout, stderr and runtime messages.',
+    description: 'stdout, stderr and runtime messages, plus the Display pane for visual output.',
   },
   {
     key: 'diagram',
     label: 'Structure',
-    description: 'Outline, hierarchy, UML, turtle and notes tabs.',
+    description: 'Outline, hierarchy, UML and notes tabs.',
   },
   {
     key: 'teacherTools',

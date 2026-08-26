@@ -14,7 +14,7 @@ import {
   buildPythonStructureModel, analyzePythonClasses, analyzePythonFunctions,
   analyzePythonOutline, cleanCodeText, codeUsesPygame, codeUsesStdctx, codeUsesTurtle, codeUsesTurtleKeyboard, detectSpongeLibs, getExpandableOutlineIds,
 } from './utils/codeAnalysis'
-import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides, getStoredSettings, persistSettings, getStoredBookNavState, persistBookNavState, getStoredFixedInputs, persistFixedInputs, getStoredEditorFontSize, persistEditorFontSize, getStoredConsoleFontSize, persistConsoleFontSize, getStoredWatches, persistWatches, getStoredNamedLayouts, persistNamedLayouts, getStoredCompletions, persistCompletion, getStoredLayoutPrefs, persistLayoutPrefs, defaultPanelsForView, MINIMAL_VISIBLE_PANELS } from './utils/storage'
+import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides, getStoredSettings, persistSettings, getStoredBookNavState, persistBookNavState, getStoredFixedInputs, persistFixedInputs, getStoredEditorFontSize, persistEditorFontSize, getStoredConsoleFontSize, persistConsoleFontSize, getStoredWatches, persistWatches, getStoredNamedLayouts, persistNamedLayouts, getStoredCompletions, persistCompletion, getStoredLayoutPrefs, persistLayoutPrefs, defaultPanelsForView, MINIMAL_VISIBLE_PANELS, DEFAULT_DISPLAY_SPLIT, DEFAULT_PRESENTATION_DISPLAY_SPLIT, DISPLAY_SPLIT_MIN, DISPLAY_SPLIT_MAX } from './utils/storage'
 import { triggerDownload, getBaseFileStem } from './utils/download'
 import { buildCommentExport, buildDocstringExport, replaceExistingDocstring, getDefinitionNote, getDefaultDefinitionNote, sanitizeNoteText } from './utils/export'
 import { loadMainThreadPyodide, resetMainThreadPyodide, PYGAME_MAIN_THREAD_BOOTSTRAP, TURTLE_CANVAS_BOOTSTRAP, TURTLE_SVG_BOOTSTRAP, SVG_TURTLE_WORKER_SETUP, STDCTX_MAIN_THREAD_BOOTSTRAP } from './utils/mainThread'
@@ -47,11 +47,11 @@ import { SettingsDialog } from './components/ui/SettingsDialog'
 import { HierarchyChart } from './components/diagrams/HierarchyChart'
 import { UmlDiagram } from './components/diagrams/UmlDiagram'
 import { OutlinePanel } from './components/diagrams/OutlinePanel'
-import { TurtleScrubber } from './components/TurtleScrubber'
+import { DisplayPane } from './components/DisplayPane'
 import { shouldShowTurtleScrubber } from './utils/turtleScrubber'
 import { InspectorPane } from './components/InspectorPane'
 import { ConsoleTerminal, type ConsoleTerminalHandle } from './components/ConsoleTerminal'
-import { CanvasPane, type CanvasPaneHandle } from './components/CanvasPane'
+import { type CanvasPaneHandle } from './components/CanvasPane'
 import { STDCTX_KEY_BUFFER_SIZE, STDCTX_WORKER_BOOTSTRAP, keyToVirtualKeyCode, processAudioCommand, type StdaudCommand, type StdctxCommand } from './utils/stdctx'
 import { createVfsMediaUrlCache, isDirectMediaUrl } from './utils/vfsMediaUrl'
 import { TraceTable } from './components/trace/TraceTable'
@@ -63,7 +63,7 @@ import {
 } from './constants'
 import type {
   Theme, RuntimeKey, PanelVisibility, InputRequest, SabRef, SimState, InspectorPath,
-  StructureModel, DiagramModel, HierarchyModel, OutlineModel, DiagramView, VFSEntry,
+  StructureModel, DiagramModel, HierarchyModel, OutlineModel, DiagramView, DisplaySurface, VFSEntry,
   LocalFolderSyncOp,
   AppSettings, BookNavState, BookChallenge, BookManifest, BookTestCase, BookAdditionalFile, NamedLayout, InspectorNode,
   OverallTestResult, TesterRunOutput, ViewMode, Breakpoint, TurtleMode,
@@ -191,14 +191,20 @@ export default function App() {
   const [mainThreadStatus, setMainThreadStatus] = useState('Main-thread runtime is ready.')
   const [isPygameRunActive, setIsPygameRunActive] = useState(false)
   const [isTurtleCanvasRunActive, setIsTurtleCanvasRunActive] = useState(false)
+  const [isSvgTurtleRunActive, setIsSvgTurtleRunActive] = useState(false)
+  // Latched once a pygame/turtle-canvas run has started, so the final frame stays
+  // on screen after the run ends (mirrors hasCanvasOutput for stdctx).
+  const [hasMainThreadCanvasOutput, setHasMainThreadCanvasOutput] = useState(false)
   const [pendingRestore, setPendingRestore] = useState<(() => void) | null>(null)
   const [turtleSvg, setTurtleSvg] = useState('')
   const [turtleSvgHistory, setTurtleSvgHistory] = useState<string[]>([])
   const [turtleScrubStep, setTurtleScrubStep] = useState(0)
   const [turtleScrubPlaying, setTurtleScrubPlaying] = useState(false)
   const [turtleScrubSpeed, setTurtleScrubSpeed] = useState(400)
-  // Latched once a stdctx program has drawn, so the Canvas tab stays available.
+  // Latched once a stdctx program has drawn, so its Display surface stays available.
   const [hasCanvasOutput, setHasCanvasOutput] = useState(false)
+  // Which visual surface the Display pane shows when a program drives more than one.
+  const [displaySurface, setDisplaySurface] = useState<DisplaySurface>('canvas')
   const [isConsolePresentationMode, setIsConsolePresentationMode] = useState(false)
   const [runtimePreference, setRuntimePreference] = useState<RuntimeKey>('trace-worker')
   const [appSettings, setAppSettings] = useState<AppSettings>(() => getStoredSettings())
@@ -280,6 +286,11 @@ export default function App() {
   const [fsCollapsed, setFsCollapsed] = useState(false)
   const fsCollapsedBeforeRunRef = useRef<boolean | null>(null)
   const [rightColSplit, setRightColSplit] = useState(42)      // % of right col for Console (top)
+  // % of the output region given to the Console; the Display pane takes the rest.
+  // A percentage means something different in a corner panel than on a full
+  // screen, so the presentation layout remembers its own.
+  const [displaySplit, setDisplaySplit] = useState<number>(initialLayoutPrefs.displaySplit)
+  const [presentationDisplaySplit, setPresentationDisplaySplit] = useState<number>(initialLayoutPrefs.presentationDisplaySplit)
   const [bookPanelWidth, setBookPanelWidth] = useState(360)   // px width of book panel
   const [bookPanelCollapsed, setBookPanelCollapsed] = useState(false)
   const [watches, setWatches] = useState<string[]>(() => getStoredWatches())
@@ -297,6 +308,9 @@ export default function App() {
   pendingRestoreRef.current = pendingRestore
   const isConsolePresentationModeRef = useRef(isConsolePresentationMode)
   isConsolePresentationModeRef.current = isConsolePresentationMode
+  // Assigned below, once the derived flag exists — the splitter's mousemove
+  // listener is installed once and would otherwise read a stale closure.
+  const isRunPresentationModeRef = useRef(false)
   const traceWorkerStartGuardRef = useRef(new RuntimeStartGuard<TraceWorkerStartSource>())
   const traceWorkerSourceRef = useRef<TraceWorkerStartSource>({
     filesystemId: activeFilesystemId,
@@ -359,10 +373,10 @@ export default function App() {
   const mainThreadCanvasSnapshotRef = useRef<HTMLCanvasElement | null>(null)
   const mainThreadCanvasWatcherRef = useRef(0)
   const mainThreadStopRequestedRef = useRef<boolean>(false)
-  const pygameLayoutSnapshotRef = useRef<{ visiblePanels: PanelVisibility; leftWidth: number } | null>(null)
-  const consoleLayoutSnapshotRef = useRef<{ visiblePanels: PanelVisibility; leftWidth: number } | null>(null)
-  const turtleLayoutSnapshotRef = useRef<{ visiblePanels: PanelVisibility; leftWidth: number } | null>(null)
-  const svgTurtleLayoutSnapshotRef = useRef<{ visiblePanels: PanelVisibility; leftWidth: number } | null>(null)
+  // The panel set a run took over, kept until the student returns to the editor.
+  // Every run mode presents the same way now that visual output lives in the
+  // output panel, so one snapshot covers all of them.
+  const runLayoutSnapshotRef = useRef<{ visiblePanels: PanelVisibility; leftWidth: number } | null>(null)
   const mainThreadRunIdRef = useRef(0)
   const mainThreadAbandonedRef = useRef(false)
   const noteDraftRef = useRef('')
@@ -385,6 +399,7 @@ export default function App() {
   const localsSecRef = useRef<HTMLDivElement | null>(null)
   const watchesSecRef = useRef<HTMLDivElement | null>(null)
   const rightColRef = useRef<HTMLDivElement | null>(null)
+  const outputPaneRef = useRef<HTMLDivElement | null>(null)
   const inspectorRef = useRef<HTMLDivElement | null>(null)
   const mainThreadMountedPathsRef = useRef<string[]>([])
   const workerRunModeRef = useRef<WorkerRunMode>('debug')
@@ -493,10 +508,29 @@ export default function App() {
   const hasConsoleAndStructure = visiblePanels.output && visiblePanels.diagram
   const hasBookPanel = !!bookNavState
   const isBookEditMode = !!bookEditSession
-  // The Canvas tab appears as soon as the code mentions stdctx, and stays put
-  // afterwards so the drawing survives an edit that removes the import.
-  const showCanvasTab = usesStdctx || hasCanvasOutput
-  const hasConsoleTabs = appSettings.useFixedInputs || (isBookEditMode && !!activeBookChallenge) || traceSession !== null || showCanvasTab
+  const hasConsoleTabs = appSettings.useFixedInputs || (isBookEditMode && !!activeBookChallenge) || traceSession !== null
+
+  // ── Derived: the Display pane ─────────────────────────────────────────────
+  // A surface is offered once it has something to show. The stdctx surface
+  // appears as soon as the code mentions stdctx and stays put afterwards, so the
+  // drawing survives an edit that removes the import; the main-thread canvas is
+  // latched the same way so the last pygame frame outlives the run.
+  const hasCanvasSurface = isPygameRunActive || isTurtleCanvasRunActive || hasMainThreadCanvasOutput
+  const hasTurtleSurface = !!turtleSvg || turtleSvgHistory.length > 0
+  const hasStdctxSurface = usesStdctx || hasCanvasOutput
+  const availableDisplaySurfaces: DisplaySurface[] = [
+    ...(hasCanvasSurface ? ['canvas' as const] : []),
+    ...(hasTurtleSurface ? ['turtle' as const] : []),
+    ...(hasStdctxSurface ? ['stdctx' as const] : []),
+  ]
+  const hasDisplay = availableDisplaySurfaces.length > 0
+  const activeDisplaySurface: DisplaySurface = availableDisplaySurfaces.includes(displaySurface)
+    ? displaySurface
+    : (availableDisplaySurfaces[0] ?? 'canvas')
+  const showDisplayPane = visiblePanels.output && hasDisplay
+  const isRunPresentationMode = isPygameRunActive || isTurtleCanvasRunActive || isSvgTurtleRunActive || isConsolePresentationMode
+  isRunPresentationModeRef.current = isRunPresentationMode
+  const effectiveDisplaySplit = isRunPresentationMode ? presentationDisplaySplit : displaySplit
   const bookName = editManifest?.name ?? null
 
   // ── Derived: is the active challenge a testable task? ─────────────────────
@@ -634,7 +668,7 @@ export default function App() {
     if (!editorRef.current || !visiblePanels.code) return
     const frameId = requestAnimationFrame(() => editorRef.current?.layout())
     return () => cancelAnimationFrame(frameId)
-  }, [leftWidth, fsSidebarWidth, leftSidebarSplit, inspectorSplit, rightColSplit, bookPanelWidth, bookPanelCollapsed, visiblePanels.code, visiblePanels.visualizer, visiblePanels.diagram, visiblePanels.output, visiblePanels.filesystem])
+  }, [leftWidth, fsSidebarWidth, leftSidebarSplit, inspectorSplit, rightColSplit, centerVerticalSplit, structureColWidth, effectiveDisplaySplit, showDisplayPane, bookPanelWidth, bookPanelCollapsed, visiblePanels.code, visiblePanels.visualizer, visiblePanels.diagram, visiblePanels.output, visiblePanels.filesystem])
 
   useEffect(() => {
     if (!visiblePanels.diagram) setShowExportDialog(false)
@@ -647,7 +681,7 @@ export default function App() {
   useEffect(() => { persistConsoleFontSize(consoleFontSize) }, [consoleFontSize])
   useEffect(() => { persistWatches(watches); watchesRef.current = watches }, [watches])
   useEffect(() => { persistNamedLayouts(savedLayouts) }, [savedLayouts])
-  useEffect(() => { persistLayoutPrefs({ viewMode, visiblePanels, leftSidebarCollapsed }) }, [viewMode, visiblePanels, leftSidebarCollapsed])
+  useEffect(() => { persistLayoutPrefs({ viewMode, visiblePanels, leftSidebarCollapsed, displaySplit, presentationDisplaySplit }) }, [viewMode, visiblePanels, leftSidebarCollapsed, displaySplit, presentationDisplaySplit])
 
   useEffect(() => startVersionPolling(() => setUpdateAvailable(true)), [])
 
@@ -755,6 +789,12 @@ export default function App() {
         setCenterVerticalSplit(Math.max(20, Math.min(85, ((e.clientY - rect.top) / rect.height) * 100)))
       } else if (drag.type === 'col-structure') {
         setStructureColWidth(Math.max(240, Math.min(720, drag.startVal + (drag.startX - e.clientX))))
+      } else if (drag.type === 'row-display' && outputPaneRef.current) {
+        const rect = outputPaneRef.current.getBoundingClientRect()
+        const pct = Math.max(DISPLAY_SPLIT_MIN, Math.min(DISPLAY_SPLIT_MAX, ((e.clientY - rect.top) / rect.height) * 100))
+        // The drag writes back to whichever split is currently in effect.
+        if (isRunPresentationModeRef.current) setPresentationDisplaySplit(pct)
+        else setDisplaySplit(pct)
       }
     }
     const onMouseUp = () => { resizeDragRef.current = null; document.body.style.cursor = ''; document.body.style.userSelect = '' }
@@ -1583,6 +1623,8 @@ export default function App() {
     setRightColSplit(42)
     setCenterVerticalSplit(70)
     setStructureColWidth(360)
+    setDisplaySplit(DEFAULT_DISPLAY_SPLIT)
+    setPresentationDisplaySplit(DEFAULT_PRESENTATION_DISPLAY_SPLIT)
     setIsPanelMenuOpen(false)
   }
 
@@ -1602,7 +1644,7 @@ export default function App() {
     if (!name?.trim()) return
     const layout: NamedLayout = {
       name: name.trim(), visiblePanels: { ...visiblePanels }, leftWidth, fsSidebarWidth, leftSidebarSplit, inspectorSplit, rightColSplit, bookPanelWidth,
-      viewMode, leftSidebarCollapsed, centerVerticalSplit, structureColWidth,
+      viewMode, leftSidebarCollapsed, centerVerticalSplit, structureColWidth, displaySplit, presentationDisplaySplit,
     }
     setSavedLayouts(prev => [...prev.filter(l => l.name !== layout.name), layout])
   }
@@ -1619,6 +1661,8 @@ export default function App() {
     if (typeof layout.leftSidebarCollapsed === 'boolean') setLeftSidebarCollapsed(layout.leftSidebarCollapsed)
     if (typeof layout.centerVerticalSplit === 'number') setCenterVerticalSplit(layout.centerVerticalSplit)
     if (typeof layout.structureColWidth === 'number') setStructureColWidth(layout.structureColWidth)
+    if (typeof layout.displaySplit === 'number') setDisplaySplit(layout.displaySplit)
+    if (typeof layout.presentationDisplaySplit === 'number') setPresentationDisplaySplit(layout.presentationDisplaySplit)
     setIsPanelMenuOpen(false)
   }
 
@@ -1651,6 +1695,14 @@ export default function App() {
     const ctx = canvas.getContext('2d')
     if (!ctx) return
     ctx.save(); ctx.fillStyle = '#020617'; ctx.fillRect(0, 0, canvas.width || 960, canvas.height || 540); ctx.restore()
+  }
+
+  /** Wipe the shared canvas at the start of a pygame / turtle-canvas run and reveal its Display surface. */
+  const beginMainThreadCanvasRun = () => {
+    setHasMainThreadCanvasOutput(true)
+    setVisiblePanels(p => (p.output ? p : { ...p, output: true }))
+    setDisplaySurface('canvas')
+    clearMainThreadCanvas()
   }
 
   const focusMainThreadCanvas = () => {
@@ -1688,71 +1740,33 @@ export default function App() {
     mainThreadCanvasWatcherRef.current = requestAnimationFrame(step)
   }
 
-  const enterPygamePresentationMode = () => {
-    if (!pygameLayoutSnapshotRef.current) {
-      pygameLayoutSnapshotRef.current = { visiblePanels: { ...visiblePanels }, leftWidth }
-    }
-    setShowExportDialog(false)
-    setVisiblePanels({ code: false, visualizer: false, diagram: true, notes: false, output: true, filesystem: false, teacherTools: false })
-    setIsPygameRunActive(true)
-  }
-
-  const restorePygamePresentationMode = () => {
-    setIsPygameRunActive(false)
-    const snapshot = pygameLayoutSnapshotRef.current
-    pygameLayoutSnapshotRef.current = null
-    if (!snapshot) return
-    setVisiblePanels(snapshot.visiblePanels)
-    setLeftWidth(snapshot.leftWidth)
-  }
-
-  const enterConsolePresentationMode = () => {
-    if (!consoleLayoutSnapshotRef.current) {
-      consoleLayoutSnapshotRef.current = { visiblePanels: { ...visiblePanels }, leftWidth }
+  /**
+   * Hand the screen over to a run.
+   *
+   * Visual output lives in the Display pane inside the Console panel, so every
+   * kind of run wants the same thing: the output panel and nothing else. `kind`
+   * only decides which run flag to raise (the banner and the Panels menu read
+   * those), and which split the console/display divider uses.
+   */
+  const enterRunPresentationMode = (kind: 'pygame' | 'turtle-canvas' | 'turtle-svg' | 'console') => {
+    if (!runLayoutSnapshotRef.current) {
+      runLayoutSnapshotRef.current = { visiblePanels: { ...visiblePanels }, leftWidth }
     }
     setShowExportDialog(false)
     setVisiblePanels({ code: false, visualizer: false, diagram: false, notes: false, output: true, filesystem: false, teacherTools: false })
-    setIsConsolePresentationMode(true)
+    if (kind === 'pygame') setIsPygameRunActive(true)
+    else if (kind === 'turtle-canvas') setIsTurtleCanvasRunActive(true)
+    else if (kind === 'turtle-svg') setIsSvgTurtleRunActive(true)
+    else setIsConsolePresentationMode(true)
   }
 
-  const restoreConsolePresentationMode = () => {
-    setIsConsolePresentationMode(false)
-    const snapshot = consoleLayoutSnapshotRef.current
-    consoleLayoutSnapshotRef.current = null
-    if (!snapshot) return
-    setVisiblePanels(snapshot.visiblePanels)
-    setLeftWidth(snapshot.leftWidth)
-  }
-
-  const enterTurtleCanvasPresentationMode = () => {
-    if (!turtleLayoutSnapshotRef.current) {
-      turtleLayoutSnapshotRef.current = { visiblePanels: { ...visiblePanels }, leftWidth }
-    }
-    setShowExportDialog(false)
-    setVisiblePanels({ code: false, visualizer: false, diagram: true, notes: false, output: true, filesystem: false, teacherTools: false })
-    setIsTurtleCanvasRunActive(true)
-  }
-
-  const restoreTurtleCanvasPresentationMode = () => {
+  const restoreRunPresentationMode = () => {
+    setIsPygameRunActive(false)
     setIsTurtleCanvasRunActive(false)
-    const snapshot = turtleLayoutSnapshotRef.current
-    turtleLayoutSnapshotRef.current = null
-    if (!snapshot) return
-    setVisiblePanels(snapshot.visiblePanels)
-    setLeftWidth(snapshot.leftWidth)
-  }
-
-  const enterSvgTurtlePresentationMode = () => {
-    if (!svgTurtleLayoutSnapshotRef.current) {
-      svgTurtleLayoutSnapshotRef.current = { visiblePanels: { ...visiblePanels }, leftWidth }
-    }
-    setShowExportDialog(false)
-    setVisiblePanels({ code: false, visualizer: false, diagram: true, notes: false, output: true, filesystem: false, teacherTools: false })
-  }
-
-  const restoreSvgTurtlePresentationMode = () => {
-    const snapshot = svgTurtleLayoutSnapshotRef.current
-    svgTurtleLayoutSnapshotRef.current = null
+    setIsSvgTurtleRunActive(false)
+    setIsConsolePresentationMode(false)
+    const snapshot = runLayoutSnapshotRef.current
+    runLayoutSnapshotRef.current = null
     if (!snapshot) return
     setVisiblePanels(snapshot.visiblePanels)
     setLeftWidth(snapshot.leftWidth)
@@ -1850,14 +1864,14 @@ export default function App() {
     canvasPaneRef.current?.draw(commands)
   }
 
-  /** Wipe the canvas at the start of a stdctx run and reveal its tab. */
-  const beginStdctxRun = (focusCanvasTab: boolean) => {
+  /** Wipe the canvas at the start of a stdctx run and reveal its Display surface. */
+  const beginStdctxRun = () => {
     setHasCanvasOutput(true)
     stdctxPressedKeysRef.current.clear()
-    // The pane only exists while the Console Output panel is on screen.
+    // The Display pane only exists while the Console Output panel is on screen.
     setVisiblePanels(p => (p.output ? p : { ...p, output: true }))
+    setDisplaySurface('stdctx')
     canvasPaneRef.current?.clear()
-    if (focusCanvasTab) setConsoleTab('canvas')
     // The canvas must own focus for stdctx.check_key() to see arrow keys.
     window.setTimeout(() => canvasPaneRef.current?.focus(), 0)
   }
@@ -1941,19 +1955,21 @@ export default function App() {
   /**
    * Show a turtle drawing that has just arrived from a runtime.
    *
-   * Run mode has already switched to the turtle presentation layout, but debug
-   * and trace runs deliberately keep the normal layout — so if the Structure
-   * panel happens to be hidden the drawing has nowhere to appear and the run
-   * looks as though it did nothing. Reveal the panel here, at the one point
-   * every runtime funnels turtle output through.
+   * Run mode has already switched to the presentation layout, but debug and
+   * trace runs deliberately keep the normal layout — so if the Console Output
+   * panel (which hosts the Display pane) happens to be hidden the drawing has
+   * nowhere to appear and the run looks as though it did nothing. Reveal it
+   * here, at the one point every runtime funnels turtle output through.
    */
   const showTurtleSvg = (svg: string) => {
     if (!svg) return
-    setVisiblePanels(p => (p.diagram ? p : { ...p, diagram: true }))
-    setDiagramView('turtle')
+    setVisiblePanels(p => (p.output ? p : { ...p, output: true }))
+    setDisplaySurface('turtle')
     addToTurtleHistory(svg)
   }
 
+  // Clearing the history is enough to retire the turtle surface — the Display
+  // pane falls back to whatever else the program is drawing with.
   const resetTurtleHistory = () => {
     turtleSvgHistoryRef.current = []
     turtleScrubLockedRef.current = false
@@ -1961,24 +1977,16 @@ export default function App() {
     setTurtleScrubStep(0)
     setTurtleScrubPlaying(false)
     setTurtleSvg('')
-    setDiagramView(prev => prev === 'turtle' ? 'hierarchy' : prev)
   }
 
-  const closeScrubberAndClear = () => {
-    turtleSvgHistoryRef.current = []
-    turtleScrubLockedRef.current = false
-    setTurtleSvgHistory([])
-    setTurtleScrubStep(0)
-    setTurtleScrubPlaying(false)
-    setTurtleSvg('')
-    setDiagramView('outline')
-  }
+  const closeScrubberAndClear = resetTurtleHistory
 
   const resetExecutionState = () => {
-    // A run that does not use stdctx retires the Canvas tab; beginStdctxRun
-    // (called straight after, for the runs that do) puts it back.
+    // A run that draws with neither library retires its Display surface;
+    // beginStdctxRun / beginMainThreadCanvasRun (called straight after, for the
+    // runs that do) put them back.
     setHasCanvasOutput(false)
-    setConsoleTab(prev => (prev === 'canvas' ? 'console' : prev))
+    setHasMainThreadCanvasOutput(false)
     setCurrentLine(-1); setCurrentFunc(''); setCurrentClass(''); setSimState(null)
     setWatchValues({})
     setInputRequest(null); setInputValue('')
@@ -2094,8 +2102,8 @@ export default function App() {
     if (restore) {
       restore()
       setPendingRestore(null)
-    } else if (isConsolePresentationModeRef.current) {
-      restoreConsolePresentationMode()
+    } else if (isRunPresentationModeRef.current) {
+      restoreRunPresentationMode()
     }
     return true
   }
@@ -2955,14 +2963,13 @@ export default function App() {
     // Capture runs stay in the editor (no fullscreen console) so the teacher can
     // immediately review the captured test.
     if (choice === 'run' && !captureRunRef.current) {
-      if (isSvgTurtleRun) enterSvgTurtlePresentationMode()
-      else enterConsolePresentationMode()
+      enterRunPresentationMode(isSvgTurtleRun ? 'turtle-svg' : 'console')
     }
 
     resetExecutionState()
     resetTurtleHistory()
     if (usesSpongeLibsForRun) resetStdaud()
-    if (usesStdctxForRun) beginStdctxRun(choice !== 'trace')
+    if (usesStdctxForRun) beginStdctxRun()
     setIsRunning(true); setActiveRuntime('trace-worker')
     setCodeStatus(
       choice === 'run' ? 'Worker runtime starting...' :
@@ -3113,10 +3120,7 @@ export default function App() {
         }
         setCodeStatus('Worker runtime failed.')
         if (workerStartModeRef.current === 'run') {
-          const inSvgMode = svgTurtleLayoutSnapshotRef.current !== null
-          setPendingRestore(() => inSvgMode
-            ? () => { restoreSvgTurtlePresentationMode(); closeScrubberAndClear() }
-            : restoreConsolePresentationMode)
+          setPendingRestore(() => restoreRunPresentationMode)
         }
         workerRunModeRef.current = 'debug'
         workerStartModeRef.current = 'debug'
@@ -3159,10 +3163,7 @@ export default function App() {
           'Trace runtime finished.'
         )
         if (wasRunMode) {
-          const inSvgMode = svgTurtleLayoutSnapshotRef.current !== null
-          setPendingRestore(() => inSvgMode
-            ? () => { restoreSvgTurtlePresentationMode(); closeScrubberAndClear() }
-            : restoreConsolePresentationMode)
+          setPendingRestore(() => restoreRunPresentationMode)
         }
         workerRunModeRef.current = 'debug'
         workerStartModeRef.current = 'debug'
@@ -3242,16 +3243,18 @@ export default function App() {
     const shouldRunStdctx = shouldRunSpongeLibs && spongeLibs.usesStdctx
 
     mainThreadStopRequestedRef.current = false
-    if (shouldRunPygame) enterPygamePresentationMode()
-    else if (shouldRunTurtleCanvas) enterTurtleCanvasPresentationMode()
-    else if (shouldRunTurtleSvg) enterSvgTurtlePresentationMode()
-    else enterConsolePresentationMode()
+    enterRunPresentationMode(
+      shouldRunPygame ? 'pygame'
+      : shouldRunTurtleCanvas ? 'turtle-canvas'
+      : shouldRunTurtleSvg ? 'turtle-svg'
+      : 'console',
+    )
 
     resetExecutionState()
     resetTurtleHistory()
-    if (shouldRunPygame || shouldRunTurtleCanvas) clearMainThreadCanvas()
+    if (shouldRunPygame || shouldRunTurtleCanvas) beginMainThreadCanvasRun()
     if (shouldRunSpongeLibs) resetStdaud()
-    if (shouldRunStdctx) beginStdctxRun(true)
+    if (shouldRunStdctx) beginStdctxRun()
     setIsRunning(true); setActiveRuntime('main-thread')
     setCodeStatus('Main-thread runtime starting...')
     setMainThreadStatus(
@@ -3413,10 +3416,7 @@ exec(code_obj, globals())
       mainThreadStopRequestedRef.current = false
       stopMainThreadCanvasWatcher({ restoreSnapshot: shouldRunPygame || shouldRunTurtleCanvas })
       if (!mainThreadAbandonedRef.current) {
-        const restore = shouldRunPygame ? restorePygamePresentationMode
-          : shouldRunTurtleCanvas ? restoreTurtleCanvasPresentationMode
-          : shouldRunTurtleSvg ? () => { restoreSvgTurtlePresentationMode(); closeScrubberAndClear() }
-          : restoreConsolePresentationMode
+        const restore = restoreRunPresentationMode
         setPendingRestore(() => restore)
       }
       mainThreadAbandonedRef.current = false
@@ -3505,10 +3505,7 @@ exec(code_obj, globals())
       workerRef.current.terminate(); workerRef.current = null; sabRef.current = null
       setCodeStatus('Worker runtime stopped.')
       if (workerStartModeRef.current === 'run') {
-        const inSvgMode = svgTurtleLayoutSnapshotRef.current !== null
-        setPendingRestore(() => inSvgMode
-          ? () => { restoreSvgTurtlePresentationMode(); closeScrubberAndClear() }
-          : restoreConsolePresentationMode)
+        setPendingRestore(() => restoreRunPresentationMode)
       }
       workerRunModeRef.current = 'debug'
       workerStartModeRef.current = 'debug'
@@ -3526,10 +3523,7 @@ exec(code_obj, globals())
       setActiveRuntime('')
       setMainThreadStatus('Main-thread run stopped.')
       appendOutput('\n[INFO] Main-thread run stopped.')
-      const restoreFn = isConsolePresentationMode ? restoreConsolePresentationMode
-        : svgTurtleLayoutSnapshotRef.current ? () => { restoreSvgTurtlePresentationMode(); closeScrubberAndClear() }
-        : null
-      if (restoreFn) setPendingRestore(() => restoreFn)
+      if (runLayoutSnapshotRef.current) setPendingRestore(() => restoreRunPresentationMode)
       return
     }
     setIsRunning(false); setActiveRuntime(''); setCurrentLine(-1); setCurrentFunc(''); setCurrentClass('')
@@ -3542,54 +3536,26 @@ exec(code_obj, globals())
     <div className="flex-1 flex flex-col overflow-hidden min-h-0">
       <div className="bg-slate-900 py-2 px-4 border-b border-slate-700 flex-shrink-0">
         <div className="flex items-center justify-between gap-2">
-          <div className="font-bold uppercase tracking-wider text-xs text-emerald-400">
-            {isPygameRunActive ? 'Pygame Canvas' : isTurtleCanvasRunActive ? 'Turtle Canvas' : 'Structure'}
-          </div>
+          <div className="font-bold uppercase tracking-wider text-xs text-emerald-400">Structure</div>
           <div className="flex items-center gap-2">
-            {!isPygameRunActive && !isTurtleCanvasRunActive && (
-              <div className="flex rounded overflow-hidden border border-slate-700 text-[11px]">
-                {(['outline', 'hierarchy', 'uml', ...(turtleSvg ? ['turtle'] : []), 'notes'] as DiagramView[]).map(view => (
-                  <button type="button" key={view} onClick={() => setDiagramView(view)}
-                    className={`px-2.5 py-1 ${diagramView === view ? 'bg-emerald-700 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}>
-                    {view === 'outline' ? 'Outline' : view === 'hierarchy' ? 'Hierarchy' : view === 'uml' ? 'Class' : view === 'turtle' ? 'Turtle' : 'Notes'}
-                  </button>
-                ))}
-              </div>
-            )}
-            {!isPygameRunActive && !isTurtleCanvasRunActive && diagramView !== 'outline' && diagramView !== 'turtle' && diagramView !== 'notes' && diagramView !== 'inputs' && (
+            <div className="flex rounded overflow-hidden border border-slate-700 text-[11px]">
+              {(['outline', 'hierarchy', 'uml', 'notes'] as DiagramView[]).map(view => (
+                <button type="button" key={view} onClick={() => setDiagramView(view)}
+                  className={`px-2.5 py-1 ${diagramView === view ? 'bg-emerald-700 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}>
+                  {view === 'outline' ? 'Outline' : view === 'hierarchy' ? 'Hierarchy' : view === 'uml' ? 'Class' : 'Notes'}
+                </button>
+              ))}
+            </div>
+            {diagramView !== 'outline' && diagramView !== 'notes' && diagramView !== 'inputs' && (
               <DiagramFontControls fontSize={diagramFontSize} onDecrease={decreaseDiagramFontSize} onIncrease={increaseDiagramFontSize}
                 canDecrease={diagramFontSize > DIAGRAM_FONT_MIN} canIncrease={diagramFontSize < DIAGRAM_FONT_MAX} />
             )}
           </div>
         </div>
       </div>
-      {!isPygameRunActive && !isTurtleCanvasRunActive && diagramView === 'turtle' && showTurtleScrubber && (
-        <TurtleScrubber
-          history={turtleSvgHistory}
-          step={turtleScrubStep}
-          isPlaying={turtleScrubPlaying}
-          speed={turtleScrubSpeed}
-          onStepChange={s => { setTurtleScrubStep(s); turtleScrubLockedRef.current = s < turtleSvgHistory.length - 1 }}
-          onTogglePlay={() => { if (turtleScrubPlaying) { setTurtleScrubPlaying(false) } else { turtleScrubLockedRef.current = true; if (turtleScrubStep >= turtleSvgHistory.length - 1) setTurtleScrubStep(0); setTurtleScrubPlaying(true) } }}
-          onSpeedChange={s => setTurtleScrubSpeed(s)}
-          onClose={() => { setTurtleScrubPlaying(false); closeScrubberAndClear() }}
-        />
-      )}
       <div className="flex-1 overflow-auto p-4 relative min-h-0">
-        <div className={`mx-auto flex h-full w-full max-w-6xl flex-col ${!(isPygameRunActive || isTurtleCanvasRunActive) ? 'hidden' : ''}`}>
-          <div className="flex-1 rounded-xl border border-slate-600 bg-slate-950/80 p-4">
-            <canvas id="canvas" ref={mainThreadCanvasRef}
-              className="mx-auto block max-h-full max-w-full rounded bg-slate-950"
-              style={{ imageRendering: 'pixelated', outline: 'none' }}
-              onPointerDown={() => mainThreadCanvasRef.current?.focus()} />
-          </div>
-        </div>
-        {!(isPygameRunActive || isTurtleCanvasRunActive) && (
-          diagramView === 'turtle' ? (
-            <div className="mx-auto h-full min-h-[280px] flex items-start justify-center">
-              <div dangerouslySetInnerHTML={{ __html: displayedTurtleSvg }} className="max-w-full" />
-            </div>
-          ) : diagramView === 'notes' ? (
+        {(
+          diagramView === 'notes' ? (
             <div className="h-full flex flex-col">
               <div className="flex items-start justify-between gap-3 mb-3">
                 <div>
@@ -3713,7 +3679,7 @@ exec(code_obj, globals())
           <PanelVisibilityMenu menuRef={panelMenuRef} isOpen={isPanelMenuOpen}
             onToggleOpen={() => { setIsLearningMenuOpen(false); setIsRuntimeMenuOpen(false); setIsQuickSettingsOpen(false); setIsPanelMenuOpen(o => !o) }}
             panelOptions={PANEL_OPTIONS} visiblePanels={visiblePanels} onTogglePanel={togglePanelVisibility}
-            buttonHoverClass="hover:border-emerald-400" checkboxAccent="#34d399" disabled={isPygameRunActive || isConsolePresentationMode || isTurtleCanvasRunActive}
+            buttonHoverClass="hover:border-emerald-400" checkboxAccent="#34d399" disabled={isRunPresentationMode}
             onRestoreDefaults={handleRestoreDefaults}
             savedLayouts={savedLayouts}
             onSaveLayout={handleSaveLayout}
@@ -4023,10 +3989,10 @@ exec(code_obj, globals())
       </dialog>
 
       {/* Post-run return bar */}
-      {(pendingRestore || (isConsolePresentationMode && !isRunning)) && (
+      {(pendingRestore || (isRunPresentationMode && !isRunning)) && (
         <div
           className="flex-shrink-0 flex items-center justify-between border-b border-emerald-600/50 bg-emerald-900/30 px-5 py-2.5 cursor-pointer hover:bg-emerald-900/50 transition-colors"
-          onClick={() => { if (pendingRestore) { pendingRestore(); setPendingRestore(null) } else { restoreConsolePresentationMode() } }}
+          onClick={() => { if (pendingRestore) { pendingRestore(); setPendingRestore(null) } else { restoreRunPresentationMode() } }}
           role="button"
         >
           <span className="text-sm text-emerald-100">Execution ended — click here to return to the editor.</span>
@@ -4449,10 +4415,15 @@ exec(code_obj, globals())
             className={`${viewMode === 'minimal' && visiblePanels.code ? 'flex-shrink-0' : 'flex-1'} bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden min-w-0`}
             style={viewMode === 'minimal' && visiblePanels.code ? { height: `calc(${100 - centerVerticalSplit}% - 3px)`, width: '100%' } : undefined}>
 
-            {/* Console Output */}
+            {/* OUTPUT REGION — Console (top) + Display (bottom), one draggable split.
+                Every kind of visual output lands in the Display pane, so the console
+                and the drawing are always on screen together. */}
             {visiblePanels.output && (
-              <div className="flex flex-col overflow-hidden min-h-0 flex-shrink-0"
+              <div ref={outputPaneRef} className="flex flex-col overflow-hidden min-h-0 flex-shrink-0"
                 style={{ height: viewMode === 'developer' && hasConsoleAndStructure ? `${rightColSplit}%` : '100%' }}>
+
+              <div className="flex flex-col overflow-hidden min-h-0 flex-shrink-0"
+                style={{ height: showDisplayPane ? `calc(${effectiveDisplaySplit}% - 3px)` : '100%' }}>
                 <div className="bg-slate-900 py-2 px-3 border-b border-slate-700 flex-shrink-0 flex items-center justify-between gap-2">
                   {hasConsoleTabs ? (
                     <div className="flex rounded overflow-hidden border border-slate-700 text-[11px]" role="tablist" aria-label="Console views" onKeyDown={handleConsoleTabKeyDown}>
@@ -4476,12 +4447,6 @@ exec(code_obj, globals())
                         <button id="console-tab-trace-table" type="button" role="tab" aria-selected={consoleTab === 'trace-table'} aria-controls="console-panel-trace-table" tabIndex={consoleTab === 'trace-table' ? 0 : -1} onClick={() => setConsoleTab('trace-table')}
                           className={`px-2.5 py-1 font-bold uppercase tracking-wider ${consoleTab === 'trace-table' ? 'bg-sky-700/60 text-sky-100' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}>
                           Trace Table
-                        </button>
-                      )}
-                      {showCanvasTab && (
-                        <button id="console-tab-canvas" type="button" role="tab" aria-selected={consoleTab === 'canvas'} aria-controls="console-panel-canvas" tabIndex={consoleTab === 'canvas' ? 0 : -1} onClick={() => { setConsoleTab('canvas'); window.setTimeout(() => canvasPaneRef.current?.focus(), 0) }}
-                          className={`px-2.5 py-1 font-bold uppercase tracking-wider ${consoleTab === 'canvas' ? 'bg-teal-700 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}>
-                          Canvas
                         </button>
                       )}
                     </div>
@@ -4551,18 +4516,6 @@ exec(code_obj, globals())
                     <TraceTable session={traceSession} />
                   </div>
                 )}
-                {/* Canvas tab (sys.stdctx) — kept mounted so the drawing survives tab switches */}
-                {showCanvasTab && (
-                  <div id="console-panel-canvas" role="tabpanel" aria-labelledby="console-tab-canvas"
-                    className={consoleTab !== 'canvas' ? 'hidden' : 'flex flex-col flex-1 min-h-0 overflow-hidden'}>
-                    <CanvasPane
-                      ref={canvasPaneRef}
-                      onKeyDown={key => setStdctxKeyState(key, true)}
-                      onKeyUp={key => setStdctxKeyState(key, false)}
-                      resolveImageUri={resolveStdctxImageUri}
-                    />
-                  </div>
-                )}
                 {/* Console content — kept mounted (preserves terminal buffer); hidden when Inputs/Tests tab is active */}
                 <div id="console-panel-console" role={hasConsoleTabs ? 'tabpanel' : undefined} aria-labelledby={hasConsoleTabs ? 'console-tab-console' : undefined} className={consoleTab !== 'console' ? 'hidden' : 'flex flex-col flex-1 min-h-0 overflow-hidden'}>
                   {appSettings.inputMode === 'inline-console' ? (
@@ -4606,6 +4559,40 @@ exec(code_obj, globals())
                     </div>
                   )}
                 </div>
+              </div>
+
+              {/* Resize handle: console ↔ display */}
+              {showDisplayPane && (
+                <div className="resize-handle-row flex-shrink-0"
+                  onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'row-display', startX: e.clientX, startY: e.clientY, startVal: effectiveDisplaySplit }; document.body.style.cursor = 'row-resize'; document.body.style.userSelect = 'none' }}>
+                  <div className="resize-bar" style={{ height: '3px', width: '48px' }} />
+                </div>
+              )}
+
+              {/* Display pane — stays mounted even with nothing to show, so a run can
+                  start drawing into the canvases before React reveals the pane. */}
+              <div className={showDisplayPane ? 'flex flex-1 flex-col min-h-0 overflow-hidden' : 'hidden'}>
+                <DisplayPane
+                  availableSurfaces={availableDisplaySurfaces}
+                  activeSurface={activeDisplaySurface}
+                  onSelectSurface={setDisplaySurface}
+                  mainThreadCanvasRef={mainThreadCanvasRef}
+                  canvasPaneRef={canvasPaneRef}
+                  onStdctxKeyDown={key => setStdctxKeyState(key, true)}
+                  onStdctxKeyUp={key => setStdctxKeyState(key, false)}
+                  resolveStdctxImageUri={resolveStdctxImageUri}
+                  turtleSvg={displayedTurtleSvg}
+                  turtleHistory={turtleSvgHistory}
+                  showScrubber={showTurtleScrubber}
+                  scrubStep={turtleScrubStep}
+                  scrubPlaying={turtleScrubPlaying}
+                  scrubSpeed={turtleScrubSpeed}
+                  onScrubStepChange={s => { setTurtleScrubStep(s); turtleScrubLockedRef.current = s < turtleSvgHistory.length - 1 }}
+                  onScrubTogglePlay={() => { if (turtleScrubPlaying) { setTurtleScrubPlaying(false) } else { turtleScrubLockedRef.current = true; if (turtleScrubStep >= turtleSvgHistory.length - 1) setTurtleScrubStep(0); setTurtleScrubPlaying(true) } }}
+                  onScrubSpeedChange={s => setTurtleScrubSpeed(s)}
+                  onScrubClose={() => { setTurtleScrubPlaying(false); closeScrubberAndClear() }}
+                />
+              </div>
               </div>
             )}
 

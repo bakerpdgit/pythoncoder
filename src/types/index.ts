@@ -1,6 +1,12 @@
 export type Theme = 'dark' | 'light'
 export type RuntimeKey = 'trace-worker' | 'main-thread'
-export type DiagramView = 'hierarchy' | 'outline' | 'uml' | 'turtle' | 'notes' | 'inputs'
+export type DiagramView = 'hierarchy' | 'outline' | 'uml' | 'notes' | 'inputs'
+/**
+ * A surface of the Display pane — every kind of visual program output.
+ * 'canvas' is the shared main-thread canvas (pygame and the pyo-js turtle),
+ * 'turtle' is the Basthon SVG turtle, 'stdctx' is the sys.stdctx canvas.
+ */
+export type DisplaySurface = 'canvas' | 'turtle' | 'stdctx'
 export type TurtleMode = 'pyo-js-turtle' | 'basthon-svg'
 export type InputMode = 'inline-console' | 'input-bar' | 'popup-dialog'
 export type ViewMode = 'minimal' | 'developer'
@@ -22,6 +28,10 @@ export interface LayoutPrefs {
   viewMode: ViewMode
   visiblePanels: PanelVisibility
   leftSidebarCollapsed: boolean
+  /** % of the output region given to the Console while editing (rest is the Display pane). */
+  displaySplit: number
+  /** The same split during a full-run presentation, where the region fills the screen. */
+  presentationDisplaySplit: number
 }
 
 export interface NamedLayout {
@@ -37,6 +47,8 @@ export interface NamedLayout {
   leftSidebarCollapsed?: boolean
   centerVerticalSplit?: number
   structureColWidth?: number
+  displaySplit?: number
+  presentationDisplaySplit?: number
 }
 
 export interface PanelVisibility {

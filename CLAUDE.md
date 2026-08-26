@@ -81,8 +81,9 @@ src/
     FileSystemPanel.tsx       # Virtual filesystem browser + local-folder connect/sync
     BookPanel.tsx             # Learning book navigation + challenge runner
     ConsoleTerminal.tsx       # xterm-based interactive console (inline-console input mode)
-    CanvasPane.tsx            # stdctx canvas (Canvas tab of the console panel)
-    TurtleScrubber.tsx        # Turtle SVG history scrubber
+    DisplayPane.tsx           # All visual output, directly below the Console
+    CanvasPane.tsx            # stdctx canvas (a surface of the Display pane)
+    TurtleScrubber.tsx        # Turtle SVG history scrubber (Display pane header)
     HtmlPreviewDialog.tsx     # Sandboxed HTML preview
     TestResultsBar.tsx        # Challenge test results
     dialogs/
@@ -200,12 +201,47 @@ These are set in:
   `App.tsx`. There is no inbound file-watching (the API can't); a manual
   "Reload from folder" button re-reads disk. Permissions reset on page reload.
 
+### The Display pane
+
+- **Every** kind of visual output lives in one **Display pane**, rendered directly
+  below the Console inside the Console Output panel, with a draggable divider
+  between them (`DisplayPane.tsx`, wired in the output region of `App.tsx`).
+  Console and drawing are therefore always on screen together — the common case
+  is a program whose console input drives what it draws. The Structure panel is
+  purely static analysis (Outline / Hierarchy / Class / Notes) and owns no
+  program output.
+- Three surfaces share the pane, chosen by `DisplaySurface`
+  (`'canvas' | 'turtle' | 'stdctx'`): the shared main-thread `<canvas id="canvas">`
+  (pygame and the pyo-js turtle), the Basthon SVG turtle, and the stdctx canvas.
+  A surface is offered once it has something to show; a tab strip appears in the
+  Display header **only** when a program drives more than one.
+- All three surfaces stay mounted and are hidden with the `hidden` class, never
+  unmounted — both canvases are driven imperatively through refs, so a remount
+  throws the drawing away. For the same reason `DisplayPane` itself stays mounted
+  while it has nothing to show: a run starts drawing into the canvases before
+  React has flushed the state that reveals the pane.
+- The console/visual divider remembers two percentages, because the same number
+  means different things in a corner panel and on a full screen: `displaySplit`
+  while editing and `presentationDisplaySplit` during a full-run presentation.
+  Both live in `LayoutPrefs` (so they survive a reload — the only sizes that do),
+  in `NamedLayout`, and in **Restore defaults**.
+- Because the Display pane rides inside the output panel, every presentation mode
+  now wants the same panel set — output and nothing else. One
+  `enterRunPresentationMode(kind)` / `restoreRunPresentationMode()` pair over one
+  snapshot ref covers pygame, turtle canvas, SVG turtle and plain console; `kind`
+  only picks which run flag to raise.
+- Debug and trace deliberately keep the normal layout, so `showTurtleSvg`,
+  `beginStdctxRun` and `beginMainThreadCanvasRun` each force `visiblePanels.output`
+  true and select their surface. Without that, a debug run draws into a hidden
+  panel and looks as though it did nothing.
+
 ### stdctx canvas and stdaud audio
 
 - `sys.stdctx` (canvas) and `sys.stdaud` (audio) are carried over from Python
   Sponge, so older funchallenge books that do `from sys import stdctx` keep
   working. stdctx mirrors the HTML5 Canvas 2D API; every call becomes a JSON
-  command replayed against a `<canvas>` in a **Canvas tab** of the console panel.
+  command replayed against a `<canvas>` in the **Display pane** (see *The Display
+  pane* below).
 - The Python source and the JS renderers all live in `utils/stdctx.ts`;
   `CanvasPane.tsx` hosts the canvas. One bootstrap installs both objects.
 - Detection is `detectSpongeLibs(editorSource, files)`, which scans **every
@@ -213,9 +249,9 @@ These are set in:
   drawing in an imported module (`import UI`), so the file on screen never
   mentions stdctx even though the run needs it — checking only the editor left
   those programs with `ImportError: cannot import name 'stdctx' from 'sys'`.
-  The Canvas tab needs stdctx specifically, so an audio-only program does not
+  The stdctx surface needs stdctx specifically, so an audio-only program does not
   grow one.
-- Because that detection happens at run start, the Canvas tab can appear only
+- Because that detection happens at run start, the stdctx surface can appear only
   once a run begins. `CanvasPane` therefore sizes its canvas on attach rather
   than relying on `clear()`: a bare `<canvas>` already reports the HTML default
   of 300x150, so a "size it if unset" guard silently never fires.
