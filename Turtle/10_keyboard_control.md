@@ -16,6 +16,9 @@ Click on the drawing area first so it has the keyboard focus, then:
 
 Press **Stop** when you have finished.
 
+Because it waits for keys, this program always runs on the main thread, so
+**Debug** and **Trace** are not offered for it.
+
 ## Beyond the PLS
 
 `onkey()` and `listen()` are **not** in Edexcel's Programming Language Subset,

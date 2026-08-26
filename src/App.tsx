@@ -12,7 +12,7 @@ if (import.meta.env.DEV) {
 import type { editor as MonacoEditor } from 'monaco-editor'
 import {
   buildPythonStructureModel, analyzePythonClasses, analyzePythonFunctions,
-  analyzePythonOutline, cleanCodeText, codeUsesPygame, codeUsesSpongeLibs, codeUsesStdctx, codeUsesTurtle, getExpandableOutlineIds,
+  analyzePythonOutline, cleanCodeText, codeUsesPygame, codeUsesSpongeLibs, codeUsesStdctx, codeUsesTurtle, codeUsesTurtleKeyboard, getExpandableOutlineIds,
 } from './utils/codeAnalysis'
 import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides, getStoredSettings, persistSettings, getStoredBookNavState, persistBookNavState, getStoredFixedInputs, persistFixedInputs, getStoredEditorFontSize, persistEditorFontSize, getStoredConsoleFontSize, persistConsoleFontSize, getStoredWatches, persistWatches, getStoredNamedLayouts, persistNamedLayouts, getStoredCompletions, persistCompletion, getStoredLayoutPrefs, persistLayoutPrefs, defaultPanelsForView, MINIMAL_VISIBLE_PANELS } from './utils/storage'
 import { triggerDownload, getBaseFileStem } from './utils/download'
@@ -65,7 +65,7 @@ import type {
   StructureModel, DiagramModel, HierarchyModel, OutlineModel, DiagramView, VFSEntry,
   LocalFolderSyncOp,
   AppSettings, BookNavState, BookChallenge, BookManifest, BookTestCase, BookAdditionalFile, NamedLayout, InspectorNode,
-  OverallTestResult, TesterRunOutput, ViewMode, Breakpoint,
+  OverallTestResult, TesterRunOutput, ViewMode, Breakpoint, TurtleMode,
 } from './types'
 import { evaluateAll } from './utils/testMatcher'
 import { createTraceSession, maybeAppendTraceCheckpoint, mergeTraceBatch } from './utils/traceLog'
@@ -429,7 +429,12 @@ export default function App() {
 
   const isPygameLocked = codeUsesPygame(codeText)
   const usesStdctx = codeUsesStdctx(codeText)
-  const isTurtleLocked = codeUsesTurtle(codeText) && appSettings.turtleMode === 'pyo-js-turtle'
+  // Key handlers only work in the canvas renderer, so a program that registers
+  // them runs there whatever the preference says — in the SVG renderer it would
+  // silently draw nothing and exit.
+  const effectiveTurtleMode = (code: string): TurtleMode =>
+    codeUsesTurtleKeyboard(code) ? 'pyo-js-turtle' : appSettings.turtleMode
+  const isTurtleLocked = codeUsesTurtle(codeText) && effectiveTurtleMode(codeText) === 'pyo-js-turtle'
   const selectedRuntime: RuntimeKey = (isPygameLocked || isTurtleLocked) ? 'main-thread' : runtimePreference
   const resolvedRuntime = isRunning ? activeRuntime : selectedRuntime
   const isMainThreadRuntime = resolvedRuntime === 'main-thread'
@@ -1925,6 +1930,22 @@ export default function App() {
     if (!turtleScrubLockedRef.current) setTurtleScrubStep(newHistory.length - 1)
   }
 
+  /**
+   * Show a turtle drawing that has just arrived from a runtime.
+   *
+   * Run mode has already switched to the turtle presentation layout, but debug
+   * and trace runs deliberately keep the normal layout — so if the Structure
+   * panel happens to be hidden the drawing has nowhere to appear and the run
+   * looks as though it did nothing. Reveal the panel here, at the one point
+   * every runtime funnels turtle output through.
+   */
+  const showTurtleSvg = (svg: string) => {
+    if (!svg) return
+    setVisiblePanels(p => (p.diagram ? p : { ...p, diagram: true }))
+    setDiagramView('turtle')
+    addToTurtleHistory(svg)
+  }
+
   const resetTurtleHistory = () => {
     turtleSvgHistoryRef.current = []
     turtleScrubLockedRef.current = false
@@ -2870,7 +2891,7 @@ export default function App() {
     const hasTurtleForMode = codeUsesTurtle(capturedCode)
     const usesStdctxForRun = codeUsesStdctx(capturedCode)
     const usesSpongeLibsForRun = codeUsesSpongeLibs(capturedCode)
-    const isSvgTurtleRun = (choice === 'run') && hasTurtleForMode && appSettings.turtleMode === 'basthon-svg'
+    const isSvgTurtleRun = (choice === 'run') && hasTurtleForMode && effectiveTurtleMode(capturedCode) === 'basthon-svg'
 
     workerRunModeRef.current = choice
     workerStartModeRef.current = choice
@@ -2980,7 +3001,7 @@ export default function App() {
       } else if (data.type === 'trace-table-stop-ack') {
         traceStopAckHandlerRef.current?.(data as TraceWorkerStopAckMessage)
       } else if (data.type === 'trace') {
-        if (data.turtleSvg) { setTurtleSvg(data.turtleSvg); setDiagramView('turtle'); addToTurtleHistory(data.turtleSvg) }
+        if (data.turtleSvg) { setTurtleSvg(data.turtleSvg); showTurtleSvg(data.turtleSvg) }
         const mode = workerRunModeRef.current
         if (mode === 'run') {
           sendTraceCommand(TRACE_CMD_CONTINUE)
@@ -3047,7 +3068,7 @@ export default function App() {
         if (data.files?.length) {
           void syncFilesFromPyodide(capturedFsId, data.files).then(() => setVfsReloadTrigger(t => t + 1))
         }
-        if (data.turtleSvg) { setTurtleSvg(data.turtleSvg); setDiagramView('turtle'); addToTurtleHistory(data.turtleSvg) }
+        if (data.turtleSvg) { setTurtleSvg(data.turtleSvg); showTurtleSvg(data.turtleSvg) }
         const startedMode = workerStartModeRef.current
         const wasRunMode = startedMode === 'run'
         const traceLimitReached = startedMode === 'trace' && traceSessionRef.current?.status === 'limit-reached'
@@ -3092,7 +3113,7 @@ export default function App() {
       } else if (data.type === 'turtle_update') {
         const svg = data.svg || ''
         setTurtleSvg(svg)
-        if (svg) { setDiagramView('turtle'); addToTurtleHistory(svg) }
+        if (svg) { showTurtleSvg(svg) }
       } else if (data.type === 'stdctx_draw') {
         drawStdctxCommands(data.commands)
       } else if (data.type === 'stdaud') {
@@ -3111,7 +3132,7 @@ export default function App() {
       releaseWorker()
     }
 
-    const svgTurtleBootstrap = hasTurtleForMode && appSettings.turtleMode === 'basthon-svg' ? SVG_TURTLE_WORKER_SETUP : ''
+    const svgTurtleBootstrap = hasTurtleForMode && effectiveTurtleMode(capturedCode) === 'basthon-svg' ? SVG_TURTLE_WORKER_SETUP : ''
     const initialBreakpoints = choice === 'run' ? [] : [...breakpointsRef.current.entries()]
       .filter(([, breakpoint]) => breakpoint.enabled)
       .map(([line, breakpoint]) => ({ line, condition: breakpoint.condition.trim() }))
@@ -3155,7 +3176,7 @@ export default function App() {
     mainThreadAbandonedRef.current = false
     const shouldRunPygame = codeUsesPygame(codeText)
     const shouldRunTurtle = !shouldRunPygame && codeUsesTurtle(codeText)
-    const turtleMode = shouldRunTurtle ? appSettings.turtleMode : null
+    const turtleMode = shouldRunTurtle ? effectiveTurtleMode(codeText) : null
     const shouldRunTurtleCanvas = turtleMode === 'pyo-js-turtle'
     const shouldRunTurtleSvg = turtleMode === 'basthon-svg'
     const shouldRunSpongeLibs = !shouldRunPygame && !shouldRunTurtle && codeUsesSpongeLibs(codeText)
@@ -3264,7 +3285,7 @@ export default function App() {
         execGlobalsObj.js_turtle_update_svg = (svg: string) => {
           const svgStr = String(svg ?? '')
           setTurtleSvg(svgStr)
-          if (svgStr) { setDiagramView('turtle'); addToTurtleHistory(svgStr) }
+          if (svgStr) { showTurtleSvg(svgStr) }
         }
       }
       const execGlobals = pyodide.toPy(execGlobalsObj)
@@ -3900,6 +3921,11 @@ exec(code_obj, globals())
       {(isPygameRunActive || isTurtleCanvasRunActive) && (
         <div className="flex-shrink-0 border-b border-sky-700 bg-sky-950/80 px-5 py-2 text-sm text-sky-100 shadow-md">
           {isPygameRunActive ? 'pygame' : 'turtle'} is running in the main page thread. Debugging and live inspection are disabled while it runs. Click inside the canvas panel to focus keyboard controls.
+          {/* Say so when key handlers overrode the turtle-mode preference, rather
+              than quietly using a renderer the user did not pick. */}
+          {isTurtleCanvasRunActive && appSettings.turtleMode === 'basthon-svg' && (
+            <> This program responds to key presses, which the SVG turtle cannot do, so it is running on the turtle canvas.</>
+          )}
         </div>
       )}
 

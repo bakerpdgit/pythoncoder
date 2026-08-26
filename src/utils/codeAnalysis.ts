@@ -1,4 +1,4 @@
-import { PYGAME_IMPORT_REGEX, STDAUD_USAGE_REGEX, STDCTX_USAGE_REGEX, TURTLE_IMPORT_REGEX } from '../constants'
+import { PYGAME_IMPORT_REGEX, STDAUD_USAGE_REGEX, STDCTX_USAGE_REGEX, TURTLE_IMPORT_REGEX, TURTLE_KEYBOARD_REGEX } from '../constants'
 import type {
   StructureModel,
   FunctionDef,
@@ -24,6 +24,12 @@ export const codeUsesPygame = (source: string): boolean =>
 
 export const codeUsesTurtle = (source: string): boolean =>
   TURTLE_IMPORT_REGEX.test(cleanCodeText(source))
+
+/** Turtle code that registers key handlers, which only the canvas renderer runs. */
+export const codeUsesTurtleKeyboard = (source: string): boolean => {
+  const cleaned = cleanCodeText(source)
+  return TURTLE_IMPORT_REGEX.test(cleaned) && TURTLE_KEYBOARD_REGEX.test(cleaned)
+}
 
 export const codeUsesStdctx = (source: string): boolean =>
   STDCTX_USAGE_REGEX.test(cleanCodeText(source))

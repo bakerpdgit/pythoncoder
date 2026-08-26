@@ -11,6 +11,11 @@ export const DEFAULT_CODE_FILENAME = 'coder.py'
 
 export const PYGAME_IMPORT_REGEX = /^\s*(?:import\s+pygame\b|from\s+pygame\b)/m
 export const TURTLE_IMPORT_REGEX = /^\s*(?:import\s+turtle\b|from\s+turtle\b)/m
+// Only the canvas turtle renderer can drive key handlers: the SVG renderer's
+// onkey/listen are no-ops with no event loop behind them, so a program built
+// around them draws nothing and exits. Matching any of these routes the program
+// to the canvas renderer regardless of the turtle-mode preference.
+export const TURTLE_KEYBOARD_REGEX = /\.(?:onkey|onkeypress|onkeyrelease|listen)\s*\(/
 // stdctx/stdaud are Python Sponge's canvas and audio libraries, reached as
 // `from sys import stdctx` or as `sys.stdctx`. Matching the bare name also
 // covers aliased and indirect uses.

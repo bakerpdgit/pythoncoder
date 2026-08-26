@@ -43,6 +43,50 @@ function escHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
+/**
+ * Render a GitHub-flavoured markdown table. `block` is one blank-line-separated
+ * segment that has already been HTML-escaped and had its code spans stashed as
+ * placeholders, so this only has to split on the pipes and wrap the cells.
+ * Returns null when the segment is not a table, leaving it to the paragraph path.
+ */
+export function renderTable(block: string): string | null {
+  const lines = block.split('\n').map(l => l.trim()).filter(Boolean)
+  if (lines.length < 2 || !lines.every(l => l.startsWith('|'))) return null
+
+  const cells = (line: string) =>
+    line.replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim())
+
+  // The second row must be the delimiter: dashes, optionally colon-anchored.
+  const delim = cells(lines[1])
+  if (!delim.length || !delim.every(c => /^:?-+:?$/.test(c))) return null
+
+  // Spelled out rather than built as `text-${…}`: Tailwind scans the source for
+  // literal class names, so an interpolated one is not guaranteed to be emitted.
+  const align = delim.map(c =>
+    c.startsWith(':') && c.endsWith(':') ? 'text-center' : c.endsWith(':') ? 'text-right' : 'text-left')
+  const alignClass = (i: number) => align[i] ?? 'text-left'
+
+  const headCells = cells(lines[0])
+  const head = headCells
+    .map((c, i) => `<th class="border border-slate-600 px-2 py-1 font-semibold ${alignClass(i)}">${c}</th>`)
+    .join('')
+
+  const body = lines.slice(2).map(line => {
+    const row = cells(line)
+    // Pad short rows to the header width so the grid stays rectangular.
+    const padded = Array.from({ length: headCells.length }, (_, i) => row[i] ?? '')
+    const tds = padded
+      .map((c, i) => `<td class="border border-slate-600 px-2 py-1 align-top ${alignClass(i)}">${c}</td>`)
+      .join('')
+    return `<tr>${tds}</tr>`
+  }).join('')
+
+  return '<div class="overflow-x-auto my-3">'
+    + '<table class="book-table border-collapse text-[0.95em]">'
+    + `<thead class="bg-slate-500/20"><tr>${head}</tr></thead>`
+    + `<tbody>${body}</tbody></table></div>`
+}
+
 function renderMarkdown(md: string, previewSvg: string | null, previewLoading: boolean): string {
   const codeBlocks: string[] = []
   const inlineCodes: string[] = []
@@ -76,8 +120,11 @@ function renderMarkdown(md: string, previewSvg: string | null, previewLoading: b
   for (const seg of segments) {
     const s = seg.trim()
     if (!s) continue
+    const table = s.startsWith('|') ? renderTable(s) : null
     if (s.startsWith('<h') || s.startsWith('\x00B') || s.startsWith('\x00TP')) {
       parts.push(s.replace(/\n/g, ' '))
+    } else if (table) {
+      parts.push(table)
     } else {
       parts.push(`<p class="mb-3 leading-relaxed">${s.replace(/\n/g, '<br>')}</p>`)
     }

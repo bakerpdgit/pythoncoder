@@ -58,5 +58,11 @@ links** in the Teacher Tools panel.
 ## A note on turtle mode
 
 The app has two turtle renderers (Settings → Turtle mode). Pages 1-9 work in
-both. Page 10 needs the default **canvas** renderer, because the SVG renderer
-has no keyboard support.
+both. Page 10 needs the **canvas** renderer, because the SVG renderer's
+`onkey()` and `listen()` are no-ops with no event loop behind them.
+
+The app now spots this for itself: a turtle program that registers key handlers
+runs on the canvas renderer whatever the setting says, and notes in the console
+that it has done so. That also means page 10 always runs on the main thread, so
+Debug and Trace are unavailable for it — the same rule that already applies to
+any turtle program in canvas mode.
