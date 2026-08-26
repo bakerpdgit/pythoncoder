@@ -1,0 +1,41 @@
+{
+  "name": "Pygame",
+  "id": "pygame",
+  "children": [
+    {
+      "id": "pygame-bouncing-ball",
+      "name": "1. A ball that bounces",
+      "guide": "01_bouncing_ball.md",
+      "py": "01_bouncing_ball.py",
+      "isExample": true
+    },
+    {
+      "id": "pygame-rects-and-text",
+      "name": "2. Rectangles, collisions and text",
+      "guide": "02_rects_and_text.md",
+      "py": "02_rects_and_text.py",
+      "isExample": true
+    },
+    {
+      "id": "pygame-keyboard-control",
+      "name": "3. Taking control of the keyboard",
+      "guide": "03_keyboard_control.md",
+      "py": "03_keyboard_control.py",
+      "isExample": true
+    },
+    {
+      "id": "pygame-catch-game",
+      "name": "4. A whole game: catch the blocks",
+      "guide": "04_catch_game.md",
+      "py": "04_catch_game.py",
+      "isExample": true
+    },
+    {
+      "id": "pygame-tetris",
+      "name": "5. Tetris",
+      "guide": "05_tetris.md",
+      "py": "05_tetris.py",
+      "isExample": true
+    }
+  ]
+}
