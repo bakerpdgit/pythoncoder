@@ -1,28 +1,13 @@
 import { useEffect, useState, type RefObject } from 'react'
-import type { WorkerRunMode } from '../../utils/urlRunMode'
+import { fetchTutorialCatalog, type LearningTutorial } from '../../utils/tutorialCatalog'
 
-export interface LearningTutorial {
-  name: string
-  github: string
-  book?: string
-  mode?: WorkerRunMode
-}
+export type { LearningTutorial }
 
 interface Props {
   menuRef: RefObject<HTMLDivElement>
   isOpen: boolean
   onToggleOpen: () => void
   onOpenTutorial: (tutorial: LearningTutorial) => void
-}
-
-export function isTutorialCatalog(value: unknown): value is LearningTutorial[] {
-  return Array.isArray(value) && value.every(item =>
-    typeof item === 'object' && item !== null
-    && typeof (item as LearningTutorial).name === 'string'
-    && typeof (item as LearningTutorial).github === 'string'
-    && ((item as LearningTutorial).book === undefined || typeof (item as LearningTutorial).book === 'string')
-    && ((item as LearningTutorial).mode === undefined
-      || ['trace', 'run', 'debug'].includes((item as LearningTutorial).mode as string)))
 }
 
 export function LearningMenu({ menuRef, isOpen, onToggleOpen, onOpenTutorial }: Props) {
@@ -33,14 +18,7 @@ export function LearningMenu({ menuRef, isOpen, onToggleOpen, onOpenTutorial }: 
     const controller = new AbortController()
     const loadCatalog = async () => {
       try {
-        const response = await fetch(`${import.meta.env.BASE_URL}learning-tutorials.json`, {
-          cache: 'no-cache',
-          signal: controller.signal,
-        })
-        if (!response.ok) throw new Error(`HTTP ${response.status}`)
-        const catalog: unknown = await response.json()
-        if (!isTutorialCatalog(catalog)) throw new Error('Invalid tutorial catalog')
-        setTutorials(catalog)
+        setTutorials(await fetchTutorialCatalog(controller.signal))
         setLoadError('')
       } catch (error) {
         if (controller.signal.aborted) return

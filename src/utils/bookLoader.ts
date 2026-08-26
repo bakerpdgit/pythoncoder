@@ -86,6 +86,74 @@ export async function findFirstBookChallenge(
   return visit(rootBookUrl, [])
 }
 
+/**
+ * Where a `?challenge=<id>` link resolved to inside a book tree. `sectionPath`
+ * is the ids of the sub-books traversed to reach it, outermost first, which
+ * lets a contents tree expand down to the target.
+ */
+export type BookTarget =
+  | { kind: 'challenge'; bookUrl: string; breadcrumb: BreadcrumbEntry[]; sectionPath: string[]; challenge: BookChallenge }
+  | { kind: 'section'; bookUrl: string; breadcrumb: BreadcrumbEntry[]; sectionPath: string[] }
+
+/**
+ * Resolve an id from a student link against a whole book tree: an activity id
+ * enters that activity, a sub-book's id opens that section's contents.
+ *
+ * Ids are not guaranteed unique across a tree (and are already assumed unique
+ * by `getChallengeFsName`), so this takes the first depth-first match.
+ */
+export async function findBookTargetById(
+  rootBookUrl: string,
+  id: string,
+  loadManifest: (url: string) => Promise<BookManifest> = fetchBookManifest,
+): Promise<BookTarget | null> {
+  const visited = new Set<string>()
+
+  const visit = async (
+    bookUrl: string,
+    breadcrumb: BreadcrumbEntry[],
+    sectionPath: string[],
+  ): Promise<BookTarget | null> => {
+    if (visited.has(bookUrl)) return null
+    visited.add(bookUrl)
+
+    const manifest = await loadManifest(bookUrl)
+    for (const child of manifest.children) {
+      if (!isBookRef(child)) {
+        if (child.id === id) return { kind: 'challenge', bookUrl, breadcrumb, sectionPath, challenge: child }
+        continue
+      }
+
+      const childUrl = resolveBookUrl(bookUrl, child.bookLink)
+      const childBreadcrumb = [...breadcrumb, { name: child.name, bookUrl }]
+      const childSectionPath = [...sectionPath, child.id]
+      if (child.id === id) {
+        return { kind: 'section', bookUrl: childUrl, breadcrumb: childBreadcrumb, sectionPath }
+      }
+
+      const target = await visit(childUrl, childBreadcrumb, childSectionPath)
+      if (target) return target
+    }
+    return null
+  }
+
+  return visit(rootBookUrl, [], [])
+}
+
+/**
+ * The public URL a book root came from, or null when it only exists in this
+ * browser. A book unzipped from a URL keeps that URL as its filesystem name
+ * (see `loadFilesystemFromUrl`), so it is still shareable; a locally authored
+ * or locally imported book is not.
+ */
+export async function resolveBookShareSource(rootUrl: string): Promise<string | null> {
+  if (/^https?:\/\//i.test(rootUrl)) return rootUrl
+  if (!isVfsUrl(rootUrl)) return null
+  const { fsId } = parseVfsUrl(rootUrl)
+  const fs = (await listFilesystems()).find(f => f.id === fsId)
+  return fs && /^https?:\/\//i.test(fs.name) ? fs.name : null
+}
+
 function normPath(p: string): string {
   return p.replace(/^\.\//, '').replace(/^\//, '')
 }

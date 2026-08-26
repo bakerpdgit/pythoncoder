@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { buildShareLink } from '../../utils/bookSource'
+import { buildShareLink, type ShareLinkOptions } from '../../utils/bookSource'
 
 // Shared building blocks for the "open from the web" wizards (GitHub / Google
 // Drive / other public URL). Styling mirrors the app's other modal dialogs
@@ -20,9 +20,15 @@ export const secondaryBtnClass =
   'px-3 py-1.5 rounded border border-slate-600 text-slate-300 hover:border-slate-400 disabled:opacity-50 transition-colors'
 
 /** A copyable "student link" row: the shareable ?book= URL + a Copy button. */
-export function ShareLinkRow({ resourceUrl }: { resourceUrl: string }) {
+export function ShareLinkRow({
+  resourceUrl, options, label = 'Student link — opens this book directly:',
+}: {
+  resourceUrl: string
+  options?: ShareLinkOptions
+  label?: string
+}) {
   const [copied, setCopied] = useState(false)
-  const link = buildShareLink(resourceUrl)
+  const link = buildShareLink(resourceUrl, options)
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(link)
@@ -32,9 +38,7 @@ export function ShareLinkRow({ resourceUrl }: { resourceUrl: string }) {
   }
   return (
     <div className="mt-3 rounded border border-slate-700 bg-slate-900/60 p-2">
-      <div className="text-[11px] text-slate-400 mb-1">
-        Student link — opens this book directly:
-      </div>
+      <div className="text-[11px] text-slate-400 mb-1">{label}</div>
       <div className="flex items-center gap-2">
         <input readOnly value={link} onFocus={e => e.currentTarget.select()}
           className="flex-1 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-[11px] text-slate-300 focus:outline-none" />

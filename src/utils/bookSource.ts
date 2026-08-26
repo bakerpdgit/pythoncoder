@@ -11,6 +11,8 @@
 //      CORS headers — needed for Google Drive and arbitrary hosts.
 //   3. jsDelivr remains only as a last-resort fallback for GitHub URLs.
 
+import type { WorkerRunMode } from './urlRunMode'
+
 // jsDelivr occasionally caches a 22-byte empty-EOCD ZIP for binary blobs
 // (HTTP 200 but zero files). Treat any suspiciously small payload as a miss.
 export const MIN_PLAUSIBLE_ZIP_BYTES = 64
@@ -41,7 +43,7 @@ function toJsDelivrUrl(url: string): string | null {
   return null
 }
 
-function isGitHubHosted(url: string): boolean {
+export function isGitHubHosted(url: string): boolean {
   return /^https?:\/\/(raw\.githubusercontent\.com|github\.com)\//i.test(url)
 }
 
@@ -97,10 +99,31 @@ export async function fetchResourceText(url: string): Promise<string> {
   return new TextDecoder().decode(await fetchResourceBuffer(url))
 }
 
+export interface ShareLinkOptions {
+  /** `?challenge=` — an activity id, or a sub-book's id to open that section. */
+  challengeId?: string
+  /** `?mode=` — forces the main execution button. */
+  mode?: WorkerRunMode
+  /** `?showFirst` — enter the first activity. Meaningless once `challengeId` is set. */
+  showFirst?: boolean
+}
+
 /**
  * Shareable link a teacher can hand to students: opens this coder site and
  * auto-opens the given book/zip resource. The app decides how to route it.
+ *
+ * `resourceUrl` must be the *root* book — a link that promoted a sub-book to
+ * root would key completion ticks (`${rootUrl}::${challengeId}`) differently
+ * from the same student opening the book normally. Point deeper with
+ * `challengeId` instead.
  */
-export function buildShareLink(resourceUrl: string): string {
-  return `${location.origin}${location.pathname}?book=${encodeURIComponent(resourceUrl)}`
+export function buildShareLink(resourceUrl: string, opts: ShareLinkOptions = {}): string {
+  // encodeURIComponent, not URLSearchParams: the reader double-decodes `book=`
+  // (`params.get()` then `decodeURIComponent`), and URLSearchParams would emit
+  // `+` for spaces, which that reader would turn back into a literal space.
+  const parts = [`book=${encodeURIComponent(resourceUrl)}`]
+  if (opts.challengeId) parts.push(`challenge=${encodeURIComponent(opts.challengeId)}`)
+  else if (opts.showFirst) parts.push('showFirst=1')
+  if (opts.mode) parts.push(`mode=${opts.mode}`)
+  return `${location.origin}${location.pathname}?${parts.join('&')}`
 }

@@ -1,7 +1,8 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { createRef } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { isTutorialCatalog, LearningMenu } from './LearningMenu'
+import { isTutorialCatalog } from '../../utils/tutorialCatalog'
+import { LearningMenu } from './LearningMenu'
 
 const tracingEntry = {
   name: 'Tracing',

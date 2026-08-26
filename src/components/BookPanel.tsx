@@ -33,6 +33,8 @@ interface Props {
   onRenameExercise?: (id: string, name: string) => void
   onToggleExample?: (id: string) => void
   onSaveGuide?: (guidePath: string, markdown: string) => void
+  /** Open the student-link dialog for this book; `id: null` means the whole book. */
+  onCreateStudentLink?: (target: { id: string | null; bookLabel: string }) => void
 }
 
 // ── Markdown renderer ───────────────────────────────────────────────────────
@@ -214,7 +216,7 @@ function CompletedTick() {
 }
 
 export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClose, testResult, isTestRunning, testStatus, onClearTestResult, completedChallenges, isCollapsed, onToggleCollapse,
-  editMode = false, editManifest = null, transientTicks, onAddExercise, onDeleteExercise, onMoveExercise, onRenameExercise, onToggleExample, onSaveGuide }: Props) {
+  editMode = false, editManifest = null, transientTicks, onAddExercise, onDeleteExercise, onMoveExercise, onRenameExercise, onToggleExample, onSaveGuide, onCreateStudentLink }: Props) {
   const dialogs = useDialogs()
   const [manifest, setManifest] = useState<BookManifest | null>(null)
   const [renamingId, setRenamingId] = useState<string | null>(null)
@@ -233,7 +235,28 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
     previous: ChallengeNavTarget | null
     next: ChallengeNavTarget | null
   } | null>(null)
+  const [linkMenu, setLinkMenu] = useState<{ x: number; y: number; id: string | null } | null>(null)
   const previewWorkerRef = useRef<Worker | null>(null)
+
+  // Right-click anywhere in the navigator to build a student link to that spot.
+  // Clamped to the viewport because this panel sits against the right edge.
+  const openLinkMenu = useCallback((e: React.MouseEvent, id: string | null) => {
+    if (!onCreateStudentLink) return
+    e.preventDefault(); e.stopPropagation()
+    setLinkMenu({ x: Math.min(e.clientX, window.innerWidth - 210), y: e.clientY, id })
+  }, [onCreateStudentLink])
+
+  useEffect(() => {
+    if (!linkMenu) return
+    const dismiss = () => setLinkMenu(null)
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setLinkMenu(null) }
+    document.addEventListener('mousedown', dismiss)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', dismiss)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [linkMenu])
 
   useEffect(() => {
     try { localStorage.setItem('aqa_book_font_size', String(bookFontSize)) } catch { /* ignore */ }
@@ -565,6 +588,7 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
               {i > 0 && <span className="text-slate-600 flex-shrink-0">›</span>}
               <button type="button"
                 onClick={() => item.index === -1 ? onNavStateChange({ ...navState, currentBookUrl: navState.rootUrl, breadcrumb: [], activeChallengeId: null }) : navigateToCrumb(item.index)}
+                onContextMenu={e => openLinkMenu(e, null)}
                 className={`truncate hover:text-slate-200 transition-colors min-w-0 ${i === crumbItems.length - 1 ? 'text-slate-200' : 'text-slate-500'}`}
                 title={item.label}>
                 {item.label}
@@ -574,7 +598,8 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
           {navState.activeChallengeId && activeChallenge && (
             <span className="flex items-center gap-0.5 min-w-0">
               <span className="text-slate-600 flex-shrink-0">›</span>
-              <span className="truncate text-slate-200 min-w-0" title={activeChallenge.name}>{activeChallenge.name}</span>
+              <span className="truncate text-slate-200 min-w-0" title={activeChallenge.name}
+                onContextMenu={e => openLinkMenu(e, activeChallenge.id)}>{activeChallenge.name}</span>
             </span>
           )}
         </div>
@@ -695,6 +720,7 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
                   return (
                     <button type="button" key={`${i}-${child.id}`}
                       onClick={() => void navigateInto(child.bookLink, child.name)}
+                      onContextMenu={e => openLinkMenu(e, child.id)}
                       className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-slate-700 transition-colors text-slate-300 hover:text-slate-100">
                       <svg className="w-4 h-4 text-sky-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
@@ -719,7 +745,8 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
                     setRenamingId(null)
                   }
                   return (
-                    <div key={`${i}-${child.id}`} className="group flex items-center gap-1 px-2 py-1.5 hover:bg-slate-700/60 transition-colors">
+                    <div key={`${i}-${child.id}`} onContextMenu={e => openLinkMenu(e, child.id)}
+                      className="group flex items-center gap-1 px-2 py-1.5 hover:bg-slate-700/60 transition-colors">
                       {/* Rename (pencil) */}
                       <button type="button" title="Rename exercise"
                         onClick={() => { setRenamingId(child.id); setRenameDraft(child.name) }}
@@ -772,6 +799,7 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
                 return (
                   <button type="button" key={`${i}-${child.id}`}
                     onClick={() => enterChallenge(child)}
+                    onContextMenu={e => openLinkMenu(e, child.id)}
                     className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-slate-700 transition-colors text-slate-300 hover:text-slate-100">
                     <svg className={`w-4 h-4 flex-shrink-0 ${isExample ? 'text-slate-400' : 'text-emerald-400'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
@@ -798,6 +826,24 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
           )}
         </div>
       </div>
+
+      {linkMenu && (
+        <div className="fixed z-50 bg-slate-800 border border-slate-600 rounded shadow-2xl py-1 text-xs min-w-[200px]"
+          style={{ left: linkMenu.x, top: linkMenu.y }}
+          onMouseDown={e => e.stopPropagation()}>
+          <button type="button"
+            onClick={() => {
+              // The root book's name, not the sub-book currently being browsed —
+              // student links always name the root (completion keys depend on it).
+              const bookLabel = navState.breadcrumb[0]?.name ?? manifest?.name ?? 'This learning book'
+              onCreateStudentLink?.({ id: linkMenu.id, bookLabel })
+              setLinkMenu(null)
+            }}
+            className="w-full text-left px-3 py-1.5 hover:bg-slate-700 text-slate-300 transition-colors">
+            Create student link to here…
+          </button>
+        </div>
+      )}
     </div>
   )
 }

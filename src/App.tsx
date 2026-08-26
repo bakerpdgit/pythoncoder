@@ -18,7 +18,7 @@ import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides, getStored
 import { triggerDownload, getBaseFileStem } from './utils/download'
 import { buildCommentExport, buildDocstringExport, replaceExistingDocstring, getDefinitionNote, getDefaultDefinitionNote, sanitizeNoteText } from './utils/export'
 import { loadMainThreadPyodide, resetMainThreadPyodide, PYGAME_MAIN_THREAD_BOOTSTRAP, TURTLE_CANVAS_BOOTSTRAP, TURTLE_SVG_BOOTSTRAP, SVG_TURTLE_WORKER_SETUP, STDCTX_MAIN_THREAD_BOOTSTRAP } from './utils/mainThread'
-import { fetchBookManifest, findFirstBookChallenge, getOrCreateChallengeFs, getHiddenPathsForFs, isBookUrl, isBookRef, BOOK_FS_PREFIX, BOOK_SRC_PREFIX } from './utils/bookLoader'
+import { fetchBookManifest, findFirstBookChallenge, findBookTargetById, getOrCreateChallengeFs, getHiddenPathsForFs, isBookUrl, isBookRef, BOOK_FS_PREFIX, BOOK_SRC_PREFIX } from './utils/bookLoader'
 import {
   ensureDefaultFilesystem, getAllFiles, syncFilesFromPyodide, writeFile,
   isTextMime, guessMimeType, mountFilesToPyodide, readFilesFromPyodide,
@@ -35,6 +35,7 @@ import * as bookEdit from './utils/bookEditStore'
 import type { BookEditSession } from './utils/bookEditStore'
 import { HtmlPreviewDialog } from './components/HtmlPreviewDialog'
 import { SaveFileDialog } from './components/dialogs/SaveFileDialog'
+import { StudentLinkDialog, type StudentLinkSource } from './components/dialogs/StudentLinkDialog'
 import { getExplanation, getDefinitionKey } from './data/explanations'
 import { ThemeToggleButton } from './components/ui/ThemeToggleButton'
 import { RuntimeSettingsMenu } from './components/ui/RuntimeSettingsMenu'
@@ -219,6 +220,8 @@ export default function App() {
   const [transientTicks, setTransientTicks] = useState<Set<string>>(new Set())
   const [editorTab, setEditorTab] = useState<'starter' | 'solution'>('starter')  // code editor tab in edit mode
   const [showBookJsonEditor, setShowBookJsonEditor] = useState(false)
+  const [studentLinkRequest, setStudentLinkRequest] = useState<
+    { source: StudentLinkSource | null; targetId: string | null } | null>(null)
   const [isVerifyingSolutions, setIsVerifyingSolutions] = useState(false)
   const solutionPathRef = useRef<string | null>(null)          // active challenge's sol.file path
   const captureRunRef = useRef(false)                          // a "capture test case" run is in progress
@@ -536,7 +539,12 @@ export default function App() {
       if (bookParam) {
         try {
           const openedBookUrl = await openResourceUrl(decodeURIComponent(bookParam))
-          if (openedBookUrl && getShowFirstFromSearch(window.location.search)) {
+          // `?challenge=` names one activity (or section) inside the book and
+          // supersedes `?showFirst`.
+          const targetId = params.get('challenge')?.trim()
+          if (openedBookUrl && targetId) {
+            await handleOpenBookTarget(openedBookUrl, targetId)
+          } else if (openedBookUrl && getShowFirstFromSearch(window.location.search)) {
             await handleOpenFirstBookChallenge(openedBookUrl)
           }
           return
@@ -2094,6 +2102,27 @@ export default function App() {
     setBookNavState(newState)
     persistBookNavState(newState)
     await handleEnterChallenge(target.bookUrl, target.challenge)
+  }
+
+  // `?challenge=<id>` — jump straight to one activity (or section) of a book a
+  // teacher linked. A link whose target has since been renamed or removed must
+  // still leave the student somewhere useful, so it falls back to the contents.
+  const handleOpenBookTarget = async (rootBookUrl: string, targetId: string) => {
+    const target = await findBookTargetById(rootBookUrl, targetId).catch(() => null)
+    if (!target) {
+      setCodeStatus('That activity is no longer in this book — showing the contents instead.')
+      return
+    }
+
+    const newState: BookNavState = {
+      rootUrl: rootBookUrl,
+      currentBookUrl: target.bookUrl,
+      breadcrumb: target.breadcrumb,
+      activeChallengeId: target.kind === 'challenge' ? target.challenge.id : null,
+    }
+    setBookNavState(newState)
+    persistBookNavState(newState)
+    if (target.kind === 'challenge') await handleEnterChallenge(target.bookUrl, target.challenge)
   }
 
   const handleCloseBook = () => {
@@ -4555,6 +4584,7 @@ exec(code_obj, globals())
                   onCloseBook={handleCloseBook}
                   onOpenJsonEditor={handleOpenBookJsonEditor}
                   onVerifyAll={() => void handleVerifyAllSolutions()}
+                  onCreateStudentLink={() => setStudentLinkRequest({ source: null, targetId: null })}
                 />
               </div>
             )}
@@ -4581,6 +4611,10 @@ exec(code_obj, globals())
                   onRenameExercise={handleRenameExercise}
                   onToggleExample={(id) => void handleToggleExample(id)}
                   onSaveGuide={handleSaveGuide}
+                  onCreateStudentLink={({ id, bookLabel }) => setStudentLinkRequest({
+                    source: { rootUrl: bookNavState.rootUrl, label: bookLabel },
+                    targetId: id,
+                  })}
                 />
               </div>
             )}
@@ -4596,6 +4630,15 @@ exec(code_obj, globals())
           theme={theme}
           onSave={handleBookJsonSave}
           onClose={() => setShowBookJsonEditor(false)}
+        />
+      )}
+
+      {studentLinkRequest && (
+        <StudentLinkDialog
+          initialSource={studentLinkRequest.source}
+          initialTargetId={studentLinkRequest.targetId}
+          onExportZip={bookEditSession ? () => void handleExportBookZip() : null}
+          onClose={() => setStudentLinkRequest(null)}
         />
       )}
 

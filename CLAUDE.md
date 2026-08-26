@@ -145,6 +145,34 @@ These are set in:
 - Prefer translucent tints (e.g. `bg-slate-500/20`, `bg-emerald-500/10`) for
   subtle selection/highlight states so they work in both themes without overrides.
 
+### Student links (URL parameters)
+
+- The app reads these query parameters at startup (`App.tsx`, `utils/urlRunMode.ts`):
+  `?book=<url>` (a `book.json` or a book ZIP), `?challenge=<id>`, `?showFirst`,
+  `?mode=trace|run|debug`, and `?filesystem=<url>`. `buildShareLink`
+  (`utils/bookSource.ts`) is the only place that composes them.
+- `?challenge=` resolves through `findBookTargetById` (`utils/bookLoader.ts`),
+  which walks the whole tree depth-first: an **activity** id enters that
+  activity, a **sub-book** id opens that section's contents. Ids are not
+  guaranteed unique across a tree — one shipped template reuses one — so it
+  takes the first match, and the link dialog warns when the chosen id is
+  ambiguous.
+- A link always names the **root** book plus an id, never a sub-book as the
+  root. Completion ticks are keyed `${rootUrl}::${challengeId}`, so promoting a
+  sub-book to root would silently give the student a separate tick history.
+- A target that no longer exists must not strand the student: `handleOpenBookTarget`
+  leaves the book open at its contents with a status message.
+- Teachers reach link building two ways, both opening `dialogs/StudentLinkDialog.tsx`:
+  right-clicking a row or breadcrumb in the Book panel, or the **Student links**
+  box in Teacher Tools. The Teacher Tools route builds links from the catalog
+  (`public/learning-tutorials.json`, via `utils/tutorialCatalog.ts`) or a pasted
+  URL **without opening the book** — deliberately, because `openResourceUrl`
+  calls `hideTeacherToolsPanel()` and would pull the panel out from under them.
+- `resolveBookShareSource` decides whether a book can be linked at all. A book
+  unzipped from a URL still can: `loadFilesystemFromUrl` names the filesystem
+  after its source URL. A locally authored or locally imported book cannot, and
+  the dialog shows publishing instructions instead of a useless `vfs://` link.
+
 ### Virtual filesystem & local folders
 
 - `utils/virtualFS.ts` is an IndexedDB-backed store of multiple named filesystems

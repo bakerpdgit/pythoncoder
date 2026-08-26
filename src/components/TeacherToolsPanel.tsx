@@ -11,6 +11,7 @@ interface Props {
   onCloseBook: () => void
   onOpenJsonEditor: () => void
   onVerifyAll: () => void
+  onCreateStudentLink: () => void
 }
 
 function BigButton({ title, desc, onClick, icon }: { title: string; desc: string; onClick: () => void; icon: React.ReactNode }) {
@@ -35,7 +36,7 @@ function BigButton({ title, desc, onClick, icon }: { title: string; desc: string
 export function TeacherToolsPanel({
   isEditing, bookName, folderConnected, isVerifying,
   onNewBook, onOpenZip, onConnectFolder, onExportZip, onReloadFolder,
-  onCloseBook, onOpenJsonEditor, onVerifyAll,
+  onCloseBook, onOpenJsonEditor, onVerifyAll, onCreateStudentLink,
 }: Props) {
   return (
     <div className="flex flex-col overflow-hidden text-xs select-none">
@@ -130,6 +131,16 @@ export function TeacherToolsPanel({
             </button>
           </>
         )}
+
+        {/* Student links — available whether or not a book is being authored,
+            because it can link to any published book without opening it. */}
+        <div className="border-t border-slate-700 pt-2 mt-2">
+          <div className="text-[11px] uppercase tracking-wider text-slate-500 px-0.5 pb-1.5">Student links</div>
+          <BigButton title="Link to a learning book…"
+            desc="Build a link to any learning book — or to one activity inside it — to give to students."
+            onClick={onCreateStudentLink}
+            icon={<path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13.5 6.5l1-1a4 4 0 015.66 5.66l-2.5 2.5a4 4 0 01-5.66 0M10.5 17.5l-1 1a4 4 0 01-5.66-5.66l2.5-2.5a4 4 0 015.66 0" />} />
+        </div>
       </div>
     </div>
   )
