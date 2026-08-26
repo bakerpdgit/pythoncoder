@@ -2158,7 +2158,7 @@ export default function App() {
     }
   }
 
-  const handleEnterChallenge = async (bookUrl: string, challenge: BookChallenge, forceReset = false) => {
+  const handleEnterChallenge = async (bookUrl: string, rootBookUrl: string, challenge: BookChallenge, forceReset = false) => {
     const loadId = ++challengeLoadIdRef.current
     // Stop first: the run being stopped belongs to the activity we are leaving,
     // and saving it back below must not race the runtime's own file sync.
@@ -2174,7 +2174,7 @@ export default function App() {
       setActiveBookChallenge(challenge)
       activeBookChallengeRef.current = challenge
       setTestResult(null)
-      const { fsId, pyFilename, hiddenPaths } = await getOrCreateChallengeFs(bookUrl, challenge, forceReset)
+      const { fsId, pyFilename, hiddenPaths } = await getOrCreateChallengeFs(bookUrl, rootBookUrl, challenge, forceReset)
       if (loadId !== challengeLoadIdRef.current) return
       setActiveFilesystemId(fsId)
       setChallengeHiddenPaths(hiddenPaths)
@@ -2210,7 +2210,7 @@ export default function App() {
     }
     setBookNavState(newState)
     persistBookNavState(newState)
-    await handleEnterChallenge(target.bookUrl, target.challenge)
+    await handleEnterChallenge(target.bookUrl, rootBookUrl, target.challenge)
   }
 
   // `?challenge=<id>` — jump straight to one activity (or section) of a book a
@@ -2231,7 +2231,7 @@ export default function App() {
     }
     setBookNavState(newState)
     persistBookNavState(newState)
-    if (target.kind === 'challenge') await handleEnterChallenge(target.bookUrl, target.challenge)
+    if (target.kind === 'challenge') await handleEnterChallenge(target.bookUrl, rootBookUrl, target.challenge)
   }
 
   const handleCloseBook = async () => {
@@ -4703,7 +4703,7 @@ exec(code_obj, globals())
                   <BookPanel
                     navState={bookNavState}
                     onNavStateChange={handleBookNavStateChange}
-                    onEnterChallenge={(bookUrl, challenge, forceReset) => void handleEnterChallenge(bookUrl, challenge, forceReset)}
+                    onEnterChallenge={(bookUrl, rootBookUrl, challenge, forceReset) => void handleEnterChallenge(bookUrl, rootBookUrl, challenge, forceReset)}
                     onClose={handleCloseBook}
                     testResult={testResult}
                     isTestRunning={isTestRunning}

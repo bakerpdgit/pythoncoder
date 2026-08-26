@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { BookManifest } from '../types'
-import { findBookTargetById, findFirstBookChallenge } from './bookLoader'
+import { bookFileBaseUrls, findBookTargetById, findFirstBookChallenge } from './bookLoader'
 
 describe('findFirstBookChallenge', () => {
   it('returns the first direct example', async () => {
@@ -141,5 +141,58 @@ describe('findBookTargetById', () => {
     }
     const target = await findBookTargetById(rootUrl, 'dup', async url => duplicated[url])
     expect(target?.kind === 'challenge' && target.challenge.name).toBe('First copy')
+  })
+})
+
+describe('bookFileBaseUrls', () => {
+  it('walks from the sub-book up to the root book directory', () => {
+    // Tutorial 4: `lists/book.json` declares a bare "fp_utils.py" that actually
+    // lives beside the root book.json.
+    expect(bookFileBaseUrls(
+      'https://example.test/t4/lists/book.json',
+      'https://example.test/t4/book.json',
+    )).toEqual([
+      'https://example.test/t4/lists/',
+      'https://example.test/t4/',
+    ])
+  })
+
+  it('includes every level of a deeply nested book', () => {
+    expect(bookFileBaseUrls(
+      'https://example.test/t4/a/b/c/book.json',
+      'https://example.test/t4/book.json',
+    )).toEqual([
+      'https://example.test/t4/a/b/c/',
+      'https://example.test/t4/a/b/',
+      'https://example.test/t4/a/',
+      'https://example.test/t4/',
+    ])
+  })
+
+  it('walks a book unzipped into the virtual filesystem the same way', () => {
+    expect(bookFileBaseUrls(
+      'vfs://fs:abc123/lists/book.json',
+      'vfs://fs:abc123/book.json',
+    )).toEqual([
+      'vfs://fs:abc123/lists/',
+      'vfs://fs:abc123/',
+    ])
+  })
+
+  it('is just the book directory for a root-level book', () => {
+    const root = 'https://example.test/t4/book.json'
+    expect(bookFileBaseUrls(root, root)).toEqual(['https://example.test/t4/'])
+  })
+
+  it('never climbs out of the root book', () => {
+    // A sub-book hosted somewhere else entirely gets no fallback at all, so a
+    // missing file can never be answered by an unrelated directory.
+    expect(bookFileBaseUrls(
+      'https://elsewhere.test/other/book.json',
+      'https://example.test/t4/book.json',
+    )).toEqual(['https://elsewhere.test/other/'])
+
+    expect(bookFileBaseUrls('https://example.test/t4/lists/book.json', null))
+      .toEqual(['https://example.test/t4/lists/'])
   })
 })

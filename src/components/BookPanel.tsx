@@ -14,7 +14,7 @@ import { normalizeTestInputs } from '../utils/testInputs'
 interface Props {
   navState: BookNavState
   onNavStateChange: (state: BookNavState) => void
-  onEnterChallenge: (bookUrl: string, challenge: BookChallenge, forceReset?: boolean) => void
+  onEnterChallenge: (bookUrl: string, rootBookUrl: string, challenge: BookChallenge, forceReset?: boolean) => void
   onClose: () => void
   testResult: OverallTestResult | null
   isTestRunning: boolean
@@ -354,7 +354,7 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
     if (!challenge?.guide) { setGuideMarkdown(''); return }
 
     setGuideLoading(true)
-    void fetchGuideContent(navState.currentBookUrl, challenge.guide)
+    void fetchGuideContent(navState.currentBookUrl, challenge.guide, navState.rootUrl)
       .then(md => setGuideMarkdown(md))
       .catch(e => setGuideMarkdown(`_Error loading guide: ${e instanceof Error ? e.message : String(e)}_`))
       .finally(() => setGuideLoading(false))
@@ -489,7 +489,7 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
 
   const enterChallenge = useCallback((challenge: BookChallenge) => {
     onNavStateChange({ ...navState, activeChallengeId: challenge.id })
-    onEnterChallenge(navState.currentBookUrl, challenge)
+    onEnterChallenge(navState.currentBookUrl, navState.rootUrl, challenge)
   }, [navState, onNavStateChange, onEnterChallenge])
 
   const enterChallengeTarget = useCallback((target: ChallengeNavTarget) => {
@@ -499,7 +499,7 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
       breadcrumb: target.breadcrumb,
       activeChallengeId: target.challenge.id,
     })
-    onEnterChallenge(target.bookUrl, target.challenge)
+    onEnterChallenge(target.bookUrl, navState.rootUrl, target.challenge)
   }, [navState, onNavStateChange, onEnterChallenge])
 
   const handleDeleteExercise = useCallback(async (challenge: BookChallenge) => {
@@ -535,7 +535,7 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
       message: 'Reset this challenge? Your edits will be lost.',
       confirmLabel: 'Reset', danger: true,
     }))) return
-    onEnterChallenge(navState.currentBookUrl, challenge, true)
+    onEnterChallenge(navState.currentBookUrl, navState.rootUrl, challenge, true)
     setChallengeHasFs(false)
   }, [navState, manifest, onEnterChallenge, dialogs])
 

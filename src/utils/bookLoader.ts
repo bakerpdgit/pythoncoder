@@ -158,6 +158,45 @@ function normPath(p: string): string {
   return p.replace(/^\.\//, '').replace(/^\//, '')
 }
 
+/**
+ * Where a file a challenge declares lands inside its challenge filesystem. Any
+ * `../` is dropped: the exercise still does a plain `import fp_utils`, so a
+ * shared module from higher up the book has to sit beside the exercise.
+ */
+function challengeFilePath(p: string): string {
+  return normPath(p).replace(/^(?:\.\.\/)+/, '')
+}
+
+function bookDirUrl(bookUrl: string): string {
+  return bookUrl.endsWith('/') ? bookUrl : bookUrl.slice(0, bookUrl.lastIndexOf('/') + 1)
+}
+
+/**
+ * Directories to look in for a file a challenge declares, nearest first: the
+ * sub-book holding the activity, then each enclosing book up to the root.
+ *
+ * Books routinely keep one shared helper module at the top and import it from
+ * activities several sections down (tutorial 4's `fp_utils.py`), declaring it
+ * as a bare `"fp_utils.py"`. Resolving that against the sub-book alone 404s,
+ * and the whole activity then fails to open. The walk is expressed as candidate
+ * *directories* rather than `../` because a book unzipped into the virtual
+ * filesystem resolves URLs by string concatenation, where `../` means nothing.
+ */
+export function bookFileBaseUrls(bookUrl: string, rootBookUrl?: string | null): string[] {
+  const base = bookDirUrl(bookUrl)
+  const bases = [base]
+  const root = rootBookUrl ? bookDirUrl(rootBookUrl) : null
+  if (!root || !base.startsWith(root)) return bases
+  let dir = base
+  while (dir.length > root.length) {
+    const cut = dir.lastIndexOf('/', dir.length - 2)
+    if (cut === -1) break
+    dir = dir.slice(0, cut + 1)
+    bases.push(dir)
+  }
+  return bases
+}
+
 function getStoredHidden(): Record<string, string[]> {
   try {
     const s = localStorage.getItem(HIDDEN_KEY)
@@ -188,23 +227,26 @@ export function getBookFsDisplayName(fsName: string): string {
 
 async function fetchFileIntoFs(
   fsId: string,
-  baseUrl: string,
+  bases: string[],
   relPath: string,
   mime: string
 ): Promise<boolean> {
-  const url = resolveBookUrl(baseUrl, relPath)
-  try {
-    if (isVfsUrl(url)) {
-      const { fsId: srcFsId, path } = parseVfsUrl(url)
-      const entry = await getEntryByPath(srcFsId, path)
-      if (!entry?.content) return false
-      await writeFile(fsId, `/${relPath}`, entry.content, mime)
+  for (const base of bases) {
+    const url = resolveBookUrl(base, relPath)
+    try {
+      if (isVfsUrl(url)) {
+        const { fsId: srcFsId, path } = parseVfsUrl(url)
+        const entry = await getEntryByPath(srcFsId, path)
+        if (!entry?.content) continue
+        await writeFile(fsId, `/${relPath}`, entry.content, mime)
+        return true
+      }
+      const content = await fetchResourceBuffer(url)
+      await writeFile(fsId, `/${relPath}`, content, mime)
       return true
-    }
-    const content = await fetchResourceBuffer(url)
-    await writeFile(fsId, `/${relPath}`, content, mime)
-    return true
-  } catch { return false }
+    } catch { /* fall back to the enclosing book directory */ }
+  }
+  return false
 }
 
 function findExistingChallengeFs(fsList: Array<{ id: string; name: string }>, challengeId: string) {
@@ -216,7 +258,7 @@ async function challengeFsIsComplete(fsId: string, challenge: BookChallenge): Pr
   const expectedPaths = [
     challenge.py,
     ...(challenge.additionalFiles ?? []).map(file => file.filename),
-  ].filter((path): path is string => !!path).map(path => `/${normPath(path)}`)
+  ].filter((path): path is string => !!path).map(path => `/${challengeFilePath(path)}`)
 
   for (const path of expectedPaths) {
     const entry = await getEntryByPath(fsId, path)
@@ -227,6 +269,7 @@ async function challengeFsIsComplete(fsId: string, challenge: BookChallenge): Pr
 
 export async function getOrCreateChallengeFs(
   bookUrl: string,
+  rootBookUrl: string,
   challenge: BookChallenge,
   forceReset = false
 ): Promise<{ fsId: string; pyFilename: string | null; hiddenPaths: string[] }> {
@@ -239,7 +282,7 @@ export async function getOrCreateChallengeFs(
       if (await challengeFsIsComplete(existing.id, challenge)) {
         return {
           fsId: existing.id,
-          pyFilename: challenge.py ? normPath(challenge.py) : null,
+          pyFilename: challenge.py ? challengeFilePath(challenge.py) : null,
           hiddenPaths: getHiddenPathsForFs(existing.id),
         }
       }
@@ -253,21 +296,21 @@ export async function getOrCreateChallengeFs(
   }
 
   const { id: fsId } = await createFilesystem(fsName)
-  const baseUrl = bookUrl.endsWith('/') ? bookUrl : bookUrl.slice(0, bookUrl.lastIndexOf('/') + 1)
+  const bases = bookFileBaseUrls(bookUrl, rootBookUrl)
   const hiddenPaths: string[] = []
 
   try {
     if (challenge.py) {
-      const rel = normPath(challenge.py)
-      if (!(await fetchFileIntoFs(fsId, baseUrl, rel, 'text/x-python'))) {
+      const rel = challengeFilePath(challenge.py)
+      if (!(await fetchFileIntoFs(fsId, bases, rel, 'text/x-python'))) {
         throw new Error(`Could not load the exercise file "${rel}"`)
       }
     }
 
     for (const af of (challenge.additionalFiles ?? []) as BookAdditionalFile[]) {
-      const rel = normPath(af.filename)
+      const rel = challengeFilePath(af.filename)
       const mime = guessMimeType(rel)
-      const ok = await fetchFileIntoFs(fsId, baseUrl, rel, mime)
+      const ok = await fetchFileIntoFs(fsId, bases, rel, mime)
       if (!ok) throw new Error(`Could not load the exercise file "${rel}"`)
       if (!af.visible) hiddenPaths.push(`/${rel}`)
     }
@@ -276,7 +319,7 @@ export async function getOrCreateChallengeFs(
     map[fsId] = hiddenPaths
     saveStoredHidden(map)
 
-    return { fsId, pyFilename: challenge.py ? normPath(challenge.py) : null, hiddenPaths }
+    return { fsId, pyFilename: challenge.py ? challengeFilePath(challenge.py) : null, hiddenPaths }
   } catch (error) {
     // Failed loads must not be reused as valid but empty challenge workspaces.
     await deleteFilesystem(fsId).catch(() => undefined)
@@ -284,16 +327,22 @@ export async function getOrCreateChallengeFs(
   }
 }
 
-export async function fetchGuideContent(bookUrl: string, guide: string): Promise<string> {
-  const baseUrl = bookUrl.endsWith('/') ? bookUrl : bookUrl.slice(0, bookUrl.lastIndexOf('/') + 1)
-  const url = resolveBookUrl(baseUrl, normPath(guide))
-  if (isVfsUrl(url)) {
-    const { fsId, path } = parseVfsUrl(url)
-    const entry = await getEntryByPath(fsId, path)
-    if (!entry?.content) throw new Error(`Cannot load guide from VFS: ${url}`)
-    return new TextDecoder().decode(entry.content)
+export async function fetchGuideContent(bookUrl: string, guide: string, rootBookUrl?: string | null): Promise<string> {
+  const rel = challengeFilePath(guide)
+  let lastError: unknown = null
+  for (const base of bookFileBaseUrls(bookUrl, rootBookUrl)) {
+    const url = resolveBookUrl(base, rel)
+    try {
+      if (isVfsUrl(url)) {
+        const { fsId, path } = parseVfsUrl(url)
+        const entry = await getEntryByPath(fsId, path)
+        if (!entry?.content) throw new Error(`Cannot load guide from VFS: ${url}`)
+        return new TextDecoder().decode(entry.content)
+      }
+      return await fetchResourceText(url)
+    } catch (e) { lastError = e }
   }
-  return fetchResourceText(url)
+  throw lastError instanceof Error ? lastError : new Error(`Could not load the guide "${rel}"`)
 }
 
 export function findChallenge(manifest: BookManifest, challengeId: string): BookChallenge | null {

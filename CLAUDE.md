@@ -174,6 +174,28 @@ These are set in:
   after its source URL. A locally authored or locally imported book cannot, and
   the dialog shows publishing instructions instead of a useless `vfs://` link.
 
+### Shared files live anywhere up the book tree
+
+- A challenge's `py`, `guide` and `additionalFiles` are looked up in the
+  sub-book holding the activity **and then in each enclosing book up to the
+  root** (`bookFileBaseUrls` in `utils/bookLoader.ts`), nearest first.
+- Books keep one helper module at the top and `import` it from activities
+  sections down — tutorial 4 declares a bare `"fp_utils.py"` in `lists/`,
+  `standard_functions/` and `practice_exercises_a/` while the file sits beside
+  the root `book.json`. Resolving only against the sub-book 404s, and because a
+  missing additional file aborts the whole load, the student got
+  "Failed to load challenge" and an empty editor for every activity in those
+  sections.
+- The walk is a list of candidate *directories*, not a `../` prefix, because
+  `resolveBookUrl` concatenates strings for a `vfs://` book (one unzipped into
+  the virtual filesystem), where `../` would mean nothing. A declared `../` is
+  therefore stripped by `challengeFilePath` and answered by the same walk.
+- It never climbs above the root book: a sub-book hosted on a different origin
+  gets no fallback at all.
+- Whatever directory a file is found in, it is written to the challenge
+  filesystem at its declared name (`/fp_utils.py`), because the exercise does a
+  plain `import fp_utils`.
+
 ### Turning the page stops the run
 
 - Every book navigation (`handleBookNavStateChange`, `handleEnterChallenge`,
