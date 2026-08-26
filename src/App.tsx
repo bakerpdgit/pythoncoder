@@ -48,6 +48,7 @@ import { HierarchyChart } from './components/diagrams/HierarchyChart'
 import { UmlDiagram } from './components/diagrams/UmlDiagram'
 import { OutlinePanel } from './components/diagrams/OutlinePanel'
 import { TurtleScrubber } from './components/TurtleScrubber'
+import { shouldShowTurtleScrubber } from './utils/turtleScrubber'
 import { InspectorPane } from './components/InspectorPane'
 import { ConsoleTerminal, type ConsoleTerminalHandle } from './components/ConsoleTerminal'
 import { CanvasPane, type CanvasPaneHandle } from './components/CanvasPane'
@@ -476,6 +477,7 @@ export default function App() {
     ? Object.prototype.hasOwnProperty.call(noteOverrides, GLOBAL_NOTE_KEY)
     : !!activeInsightDefinition && Object.prototype.hasOwnProperty.call(noteOverrides, activeInsightDefinition.key)
   const canExportNotes = structureModel.orderedDefinitions.length > 0 && hasCode
+  const showTurtleScrubber = shouldShowTurtleScrubber(turtleSvgHistory)
   const displayedTurtleSvg = turtleSvgHistory.length > 0 && turtleScrubStep >= 0 && turtleScrubStep < turtleSvgHistory.length
     ? turtleSvgHistory[turtleScrubStep]
     : turtleSvg
@@ -3509,7 +3511,7 @@ exec(code_obj, globals())
           </div>
         </div>
       </div>
-      {!isPygameRunActive && !isTurtleCanvasRunActive && diagramView === 'turtle' && turtleSvgHistory.length > 0 && (
+      {!isPygameRunActive && !isTurtleCanvasRunActive && diagramView === 'turtle' && showTurtleScrubber && (
         <TurtleScrubber
           history={turtleSvgHistory}
           step={turtleScrubStep}
