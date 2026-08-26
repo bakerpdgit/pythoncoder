@@ -168,6 +168,18 @@ export const persistCompletion = (bookRootUrl: string, challengeId: string): voi
   } catch { /* ignore */ }
 }
 
+/** Forget every completion tick for one book (keys are `${rootUrl}::${id}`). */
+export const clearCompletionsForBook = (bookRootUrl: string): void => {
+  try {
+    const completions = getStoredCompletions()
+    const prefix = `${bookRootUrl}::`
+    for (const key of Object.keys(completions)) {
+      if (key.startsWith(prefix)) delete completions[key]
+    }
+    localStorage.setItem(BOOK_COMPLETIONS_KEY, JSON.stringify(completions))
+  } catch { /* ignore */ }
+}
+
 export const persistSettings = (settings: AppSettings): void => {
   try {
     localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings))

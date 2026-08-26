@@ -213,6 +213,32 @@ These are set in:
 - Navigation reads `challengeLoadIdRef` before awaiting and bails if it moved:
   the await is long enough for a second click to land.
 
+### Resetting an activity, or a whole book
+
+- Both live in the Book panel's options (⋯) menu, which is rendered at the
+  contents level too — **Reset book** belongs there, and only **Reset challenge**
+  is challenge-only. Both confirm through `useDialogs()` first; never a native
+  dialog.
+- Reset is never disabled. It used to be gated on "does this activity have a
+  saved filesystem", tested with an exact match on `__book__:<id>` — but
+  `getOrCreateChallengeFs` names them `__book__:<id>:<display name>`, so the
+  check never matched and the menu item was permanently greyed out. Anything
+  matching a challenge filesystem by name must accept both forms
+  (`isChallengeFsName`); resetting an activity that has no saved work is
+  harmless anyway, it just re-fetches.
+- **Reset challenge** re-enters the activity with `forceReset`, which deletes
+  its filesystem and re-creates it from the book's files.
+- **Reset book** (`handleResetBook` in `App.tsx`) walks the whole tree with
+  `collectBookChallengeIds` and deletes every challenge filesystem in it. The
+  activity on screen goes through `handleEnterChallenge(…, true)` instead, so
+  the editor is never left pointing at a filesystem that has just been deleted;
+  the ref holding it outlives a walk back to the contents, so it is only used
+  when `bookNavState.activeChallengeId` agrees.
+- Completion ticks are a separate button in that dialog rather than a silent
+  side effect: starting the exercises again and handing the book to someone else
+  are different wishes. Clearing them is `clearCompletionsForBook`, which only
+  touches keys prefixed with this book's root URL.
+
 ### Virtual filesystem & local folders
 
 - `utils/virtualFS.ts` is an IndexedDB-backed store of multiple named filesystems

@@ -1,6 +1,22 @@
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { BookManifest } from '../types'
-import { bookFileBaseUrls, findBookTargetById, findFirstBookChallenge } from './bookLoader'
+
+const listFilesystems = vi.fn<() => Promise<Array<{ id: string; name: string }>>>()
+const deleteFilesystem = vi.fn<(id: string) => Promise<void>>()
+
+vi.mock('./virtualFS', () => ({
+  listFilesystems: () => listFilesystems(),
+  deleteFilesystem: (id: string) => deleteFilesystem(id),
+  createFilesystem: vi.fn(),
+  writeFile: vi.fn(),
+  guessMimeType: vi.fn(),
+  getEntryByPath: vi.fn(),
+}))
+
+import {
+  bookFileBaseUrls, collectBookChallengeIds, deleteChallengeFilesystems,
+  findBookTargetById, findFirstBookChallenge, isChallengeFsName,
+} from './bookLoader'
 
 describe('findFirstBookChallenge', () => {
   it('returns the first direct example', async () => {
@@ -194,5 +210,83 @@ describe('bookFileBaseUrls', () => {
 
     expect(bookFileBaseUrls('https://example.test/t4/lists/book.json', null))
       .toEqual(['https://example.test/t4/lists/'])
+  })
+})
+
+describe('collectBookChallengeIds', () => {
+  const rootUrl = 'https://example.test/root/book.json'
+  const lessonsUrl = 'https://example.test/root/lessons/book.json'
+
+  it('collects every activity in the tree in book order', async () => {
+    const manifests: Record<string, BookManifest> = {
+      [rootUrl]: {
+        children: [
+          { id: 'intro', name: 'Intro', py: 'intro.py' },
+          { id: 'lessons', name: 'Lessons', bookLink: 'lessons/book.json' },
+          { id: 'outro', name: 'Outro', py: 'outro.py' },
+        ],
+      },
+      [lessonsUrl]: {
+        children: [
+          { id: 'one', name: 'One', py: 'one.py' },
+          { id: 'two', name: 'Two', py: 'two.py' },
+        ],
+      },
+    }
+    await expect(collectBookChallengeIds(rootUrl, async url => manifests[url]))
+      .resolves.toEqual(['intro', 'one', 'two', 'outro'])
+  })
+
+  it('keeps the rest of the book when a sub-book fails to load, and ends on a cycle', async () => {
+    const brokenUrl = 'https://example.test/root/broken/book.json'
+    const manifests: Record<string, BookManifest> = {
+      [rootUrl]: {
+        children: [
+          { id: 'intro', name: 'Intro', py: 'intro.py' },
+          { id: 'broken', name: 'Broken', bookLink: 'broken/book.json' },
+          { id: 'lessons', name: 'Lessons', bookLink: 'lessons/book.json' },
+        ],
+      },
+      [lessonsUrl]: {
+        children: [{ id: 'back', name: 'Back to the root', bookLink: '../book.json' }],
+      },
+    }
+    await expect(collectBookChallengeIds(rootUrl, async url => {
+      if (url === brokenUrl) throw new Error('404')
+      return manifests[url]
+    })).resolves.toEqual(['intro'])
+  })
+})
+
+describe('deleteChallengeFilesystems', () => {
+  beforeEach(() => {
+    listFilesystems.mockReset()
+    deleteFilesystem.mockReset()
+    deleteFilesystem.mockResolvedValue(undefined)
+  })
+
+  it('matches a challenge filesystem with or without its display name', () => {
+    expect(isChallengeFsName('__book__:keyboard', 'keyboard')).toBe(true)
+    expect(isChallengeFsName('__book__:keyboard:Taking control', 'keyboard')).toBe(true)
+    expect(isChallengeFsName('__book__:keyboard-2', 'keyboard')).toBe(false)
+    expect(isChallengeFsName('default', 'keyboard')).toBe(false)
+  })
+
+  it('deletes only the named activities and never an unrelated filesystem', async () => {
+    listFilesystems.mockResolvedValue([
+      { id: 'fs-default', name: 'default' },
+      { id: 'fs-a', name: '__book__:alpha:Alpha activity' },
+      { id: 'fs-b', name: '__book__:beta' },
+      { id: 'fs-other', name: '__book__:gamma:Another book' },
+      { id: 'fs-near', name: '__book__:alpha-two:Not alpha' },
+    ])
+
+    await expect(deleteChallengeFilesystems(['alpha', 'beta'])).resolves.toBe(2)
+    expect(deleteFilesystem.mock.calls.map(c => c[0]).sort()).toEqual(['fs-a', 'fs-b'])
+  })
+
+  it('does nothing for an empty book', async () => {
+    await expect(deleteChallengeFilesystems([])).resolves.toBe(0)
+    expect(listFilesystems).not.toHaveBeenCalled()
   })
 })

@@ -249,9 +249,58 @@ async function fetchFileIntoFs(
   return false
 }
 
-function findExistingChallengeFs(fsList: Array<{ id: string; name: string }>, challengeId: string) {
+/**
+ * A challenge filesystem is named `__book__:<id>` or `__book__:<id>:<display
+ * name>` — the display name was added later, so both forms are in the wild and
+ * anything matching on the name has to accept either.
+ */
+export function isChallengeFsName(fsName: string, challengeId: string): boolean {
   const prefix = BOOK_FS_PREFIX + challengeId
-  return fsList.find(f => f.name === prefix || f.name.startsWith(prefix + ':'))
+  return fsName === prefix || fsName.startsWith(prefix + ':')
+}
+
+function findExistingChallengeFs(fsList: Array<{ id: string; name: string }>, challengeId: string) {
+  return fsList.find(f => isChallengeFsName(f.name, challengeId))
+}
+
+/** Every activity/example id in a book tree, in book order, sub-books included. */
+export async function collectBookChallengeIds(
+  rootBookUrl: string,
+  loadManifest: (url: string) => Promise<BookManifest> = fetchBookManifest,
+): Promise<string[]> {
+  const visited = new Set<string>()
+  const ids: string[] = []
+
+  const visit = async (bookUrl: string): Promise<void> => {
+    if (visited.has(bookUrl)) return
+    visited.add(bookUrl)
+    let manifest: BookManifest
+    // A sub-book that no longer loads must not abort the whole walk: the rest
+    // of the book still has work to reset.
+    try { manifest = await loadManifest(bookUrl) } catch { return }
+    for (const child of manifest.children) {
+      if (!isBookRef(child)) { ids.push(child.id); continue }
+      await visit(resolveBookUrl(bookUrl, child.bookLink))
+    }
+  }
+
+  await visit(rootBookUrl)
+  return ids
+}
+
+/**
+ * Throw away the saved work for the given activities. Returns how many
+ * filesystems were deleted. The next visit to each activity re-creates it from
+ * the book's own files.
+ */
+export async function deleteChallengeFilesystems(challengeIds: string[]): Promise<number> {
+  if (!challengeIds.length) return 0
+  const wanted = new Set(challengeIds)
+  const doomed = (await listFilesystems())
+    .filter(f => f.name.startsWith(BOOK_FS_PREFIX) &&
+      [...wanted].some(id => isChallengeFsName(f.name, id)))
+  for (const fs of doomed) await deleteFilesystem(fs.id)
+  return doomed.length
 }
 
 async function challengeFsIsComplete(fsId: string, challenge: BookChallenge): Promise<boolean> {

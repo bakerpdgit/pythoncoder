@@ -14,11 +14,11 @@ import {
   buildPythonStructureModel, analyzePythonClasses, analyzePythonFunctions,
   analyzePythonOutline, cleanCodeText, codeUsesPygame, codeUsesStdctx, codeUsesTurtle, codeUsesTurtleKeyboard, detectSpongeLibs, getExpandableOutlineIds,
 } from './utils/codeAnalysis'
-import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides, getStoredSettings, persistSettings, getStoredBookNavState, persistBookNavState, getStoredFixedInputs, persistFixedInputs, getStoredEditorFontSize, persistEditorFontSize, getStoredConsoleFontSize, persistConsoleFontSize, getStoredWatches, persistWatches, getStoredNamedLayouts, persistNamedLayouts, getStoredCompletions, persistCompletion, getStoredLayoutPrefs, persistLayoutPrefs, defaultPanelsForView, MINIMAL_VISIBLE_PANELS, DEFAULT_DISPLAY_SPLIT, DEFAULT_PRESENTATION_DISPLAY_SPLIT, DISPLAY_SPLIT_MIN, DISPLAY_SPLIT_MAX } from './utils/storage'
+import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides, getStoredSettings, persistSettings, getStoredBookNavState, persistBookNavState, getStoredFixedInputs, persistFixedInputs, getStoredEditorFontSize, persistEditorFontSize, getStoredConsoleFontSize, persistConsoleFontSize, getStoredWatches, persistWatches, getStoredNamedLayouts, persistNamedLayouts, getStoredCompletions, persistCompletion, clearCompletionsForBook, getStoredLayoutPrefs, persistLayoutPrefs, defaultPanelsForView, MINIMAL_VISIBLE_PANELS, DEFAULT_DISPLAY_SPLIT, DEFAULT_PRESENTATION_DISPLAY_SPLIT, DISPLAY_SPLIT_MIN, DISPLAY_SPLIT_MAX } from './utils/storage'
 import { triggerDownload, getBaseFileStem } from './utils/download'
 import { buildCommentExport, buildDocstringExport, replaceExistingDocstring, getDefinitionNote, getDefaultDefinitionNote, sanitizeNoteText } from './utils/export'
 import { loadMainThreadPyodide, resetMainThreadPyodide, PYGAME_MAIN_THREAD_BOOTSTRAP, TURTLE_CANVAS_BOOTSTRAP, TURTLE_SVG_BOOTSTRAP, SVG_TURTLE_WORKER_SETUP, STDCTX_MAIN_THREAD_BOOTSTRAP } from './utils/mainThread'
-import { fetchBookManifest, findFirstBookChallenge, findBookTargetById, getOrCreateChallengeFs, getHiddenPathsForFs, isBookUrl, isBookRef, BOOK_FS_PREFIX, BOOK_SRC_PREFIX } from './utils/bookLoader'
+import { fetchBookManifest, findFirstBookChallenge, findBookTargetById, getOrCreateChallengeFs, getHiddenPathsForFs, collectBookChallengeIds, deleteChallengeFilesystems, isBookUrl, isBookRef, BOOK_FS_PREFIX, BOOK_SRC_PREFIX } from './utils/bookLoader'
 import {
   ensureDefaultFilesystem, getAllFiles, syncFilesFromPyodide, writeFile,
   isTextMime, guessMimeType, mountFilesToPyodide, readFilesFromPyodide,
@@ -2192,6 +2192,36 @@ export default function App() {
       if (loadId === challengeLoadIdRef.current) {
         setCodeStatus(`Failed to load challenge: ${e instanceof Error ? e.message : String(e)}`)
       }
+    }
+  }
+
+  // "Reset book" — throw away the saved work for every activity in the tree,
+  // and optionally the completion ticks with it. The activity on screen is
+  // re-entered through handleEnterChallenge (which stops any run, then deletes
+  // and re-creates its filesystem) so the editor is never left pointing at a
+  // filesystem that has just been deleted underneath it.
+  const handleResetBook = async (clearProgress: boolean) => {
+    const nav = bookNavState
+    if (!nav) return
+    try {
+      const ids = await collectBookChallengeIds(nav.rootUrl)
+      // Only the activity actually on screen is re-entered. The ref outlives a
+      // walk back to the contents, so going by the ref alone would drag the
+      // student back into an activity they had just left.
+      const open = activeBookChallengeRef.current
+      const current = nav.activeChallengeId && open?.id === nav.activeChallengeId ? open : null
+      if (current) await handleEnterChallenge(nav.currentBookUrl, nav.rootUrl, current, true)
+      await deleteChallengeFilesystems(ids.filter(id => id !== current?.id))
+      setVfsReloadTrigger(t => t + 1)
+      if (clearProgress) {
+        clearCompletionsForBook(nav.rootUrl)
+        setCompletedChallenges(getStoredCompletions())
+      }
+      setCodeStatus(clearProgress
+        ? 'Book reset — every activity is back to its starting files and the ticks are cleared.'
+        : 'Book reset — every activity is back to its starting files.')
+    } catch (e) {
+      setCodeStatus(`Failed to reset book: ${e instanceof Error ? e.message : String(e)}`)
     }
   }
 
@@ -4723,6 +4753,7 @@ exec(code_obj, globals())
                       source: { rootUrl: bookNavState.rootUrl, label: bookLabel },
                       targetId: id,
                     })}
+                    onResetBook={(clearProgress) => void handleResetBook(clearProgress)}
                   />
                 </div>
                 {lastRightSection !== 'book' && (

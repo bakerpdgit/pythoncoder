@@ -33,6 +33,8 @@ interface Props {
   onSaveGuide?: (guidePath: string, markdown: string) => void
   /** Open the student-link dialog for this book; `id: null` means the whole book. */
   onCreateStudentLink?: (target: { id: string | null; bookLabel: string }) => void
+  /** Throw away every activity's saved work in this book, optionally its ticks too. */
+  onResetBook?: (clearProgress: boolean) => void
 }
 
 // ── Markdown renderer ───────────────────────────────────────────────────────
@@ -261,7 +263,7 @@ function CompletedTick() {
 }
 
 export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClose, testResult, isTestRunning, testStatus, onClearTestResult, completedChallenges,
-  editMode = false, editManifest = null, transientTicks, onAddExercise, onDeleteExercise, onMoveExercise, onRenameExercise, onToggleExample, onSaveGuide, onCreateStudentLink }: Props) {
+  editMode = false, editManifest = null, transientTicks, onAddExercise, onDeleteExercise, onMoveExercise, onRenameExercise, onToggleExample, onSaveGuide, onCreateStudentLink, onResetBook }: Props) {
   const dialogs = useDialogs()
   const [manifest, setManifest] = useState<BookManifest | null>(null)
   const [renamingId, setRenamingId] = useState<string | null>(null)
@@ -271,7 +273,6 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
   const [guideMarkdown, setGuideMarkdown] = useState('')
   const [guideLoading, setGuideLoading] = useState(false)
   const [showDotMenu, setShowDotMenu] = useState(false)
-  const [challengeHasFs, setChallengeHasFs] = useState(false)
   const [bookFontSize, setBookFontSize] = useState<number>(getStoredBookFontSize)
   const [previewSvg, setPreviewSvg] = useState<string | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
@@ -345,7 +346,6 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
   useEffect(() => {
     if (!navState.activeChallengeId || !manifest) {
       setGuideMarkdown('')
-      setChallengeHasFs(false)
       setPreviewSvg(null)
       setPreviewLoading(false)
       return
@@ -358,9 +358,6 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
       .then(md => setGuideMarkdown(md))
       .catch(e => setGuideMarkdown(`_Error loading guide: ${e instanceof Error ? e.message : String(e)}_`))
       .finally(() => setGuideLoading(false))
-
-    const fsName = getChallengeFsName(navState.activeChallengeId)
-    void listFilesystems().then(list => setChallengeHasFs(list.some(f => f.name === fsName)))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [navState.activeChallengeId, navState.currentBookUrl, activeGuidePath])
 
@@ -536,8 +533,27 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
       confirmLabel: 'Reset', danger: true,
     }))) return
     onEnterChallenge(navState.currentBookUrl, navState.rootUrl, challenge, true)
-    setChallengeHasFs(false)
   }, [navState, manifest, onEnterChallenge, dialogs])
+
+  // Resetting the whole book is two different wishes — start the exercises
+  // again, or hand the book on to someone else — so the ticks are a separate
+  // button rather than a silent side effect of either.
+  const handleResetBook = useCallback(async () => {
+    setShowDotMenu(false)
+    if (!onResetBook) return
+    const choice = await dialogs.choose({
+      title: 'Reset book',
+      message: 'Reset every activity in this book? All of your edits in it will be lost.',
+      detail: 'Your completion ticks are kept unless you choose to clear them too.',
+      buttons: [
+        { label: 'Cancel', value: 'cancel', tone: 'neutral' },
+        { label: 'Reset activities', value: 'work', tone: 'danger' },
+        { label: 'Reset activities and ticks', value: 'all', tone: 'danger' },
+      ],
+    })
+    if (choice !== 'work' && choice !== 'all') return
+    onResetBook(choice === 'all')
+  }, [dialogs, onResetBook])
 
   const isCompleted = useCallback((challengeId: string) =>
     completedChallenges[`${navState.rootUrl}::${challengeId}`] === true,
@@ -646,37 +662,46 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14 5l7 7-7 7m7-7H3" />
               </svg>
             </button>
-            {/* Options menu */}
-            <div className="relative flex-shrink-0">
-              <button type="button" title="Options" onClick={() => setShowDotMenu(o => !o)}
-                className="text-slate-400 hover:text-slate-200 p-0.5">
-                <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
-                  <circle cx="5" cy="12" r="2" /><circle cx="12" cy="12" r="2" /><circle cx="19" cy="12" r="2" />
-                </svg>
-              </button>
-              {showDotMenu && (
-                <div className="absolute right-0 top-full mt-1 z-50 bg-slate-800 border border-slate-600 rounded shadow-xl py-1 min-w-[140px]"
-                  onMouseLeave={() => setShowDotMenu(false)}>
-                  <button type="button" onClick={() => adjustFontSize(1)}
-                    disabled={bookFontSize === BOOK_FONT_SIZES[BOOK_FONT_SIZES.length - 1]}
-                    className="w-full text-left px-3 py-1.5 hover:bg-slate-700 text-slate-300 disabled:text-slate-600 disabled:cursor-not-allowed transition-colors">
-                    Increase font size
-                  </button>
-                  <button type="button" onClick={() => adjustFontSize(-1)}
-                    disabled={bookFontSize === BOOK_FONT_SIZES[0]}
-                    className="w-full text-left px-3 py-1.5 hover:bg-slate-700 text-slate-300 disabled:text-slate-600 disabled:cursor-not-allowed transition-colors">
-                    Decrease font size
-                  </button>
-                  <div className="border-t border-slate-700 my-1" />
-                  <button type="button" onClick={() => void handleReset()} disabled={!challengeHasFs}
-                    className="w-full text-left px-3 py-1.5 hover:bg-slate-700 text-slate-300 disabled:text-slate-600 disabled:cursor-not-allowed transition-colors">
-                    Reset challenge
-                  </button>
-                </div>
-              )}
-            </div>
           </>
         )}
+
+        {/* Options menu — also at contents level, where "Reset book" belongs */}
+        <div className="relative flex-shrink-0">
+          <button type="button" title="Options" onClick={() => setShowDotMenu(o => !o)}
+            className="text-slate-400 hover:text-slate-200 p-0.5">
+            <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
+              <circle cx="5" cy="12" r="2" /><circle cx="12" cy="12" r="2" /><circle cx="19" cy="12" r="2" />
+            </svg>
+          </button>
+          {showDotMenu && (
+            <div className="absolute right-0 top-full mt-1 z-50 bg-slate-800 border border-slate-600 rounded shadow-xl py-1 min-w-[170px]"
+              onMouseLeave={() => setShowDotMenu(false)}>
+              <button type="button" onClick={() => adjustFontSize(1)}
+                disabled={bookFontSize === BOOK_FONT_SIZES[BOOK_FONT_SIZES.length - 1]}
+                className="w-full text-left px-3 py-1.5 hover:bg-slate-700 text-slate-300 disabled:text-slate-600 disabled:cursor-not-allowed transition-colors">
+                Increase font size
+              </button>
+              <button type="button" onClick={() => adjustFontSize(-1)}
+                disabled={bookFontSize === BOOK_FONT_SIZES[0]}
+                className="w-full text-left px-3 py-1.5 hover:bg-slate-700 text-slate-300 disabled:text-slate-600 disabled:cursor-not-allowed transition-colors">
+                Decrease font size
+              </button>
+              <div className="border-t border-slate-700 my-1" />
+              {navState.activeChallengeId && (
+                <button type="button" onClick={() => void handleReset()}
+                  className="w-full text-left px-3 py-1.5 hover:bg-slate-700 text-slate-300 transition-colors">
+                  Reset challenge
+                </button>
+              )}
+              {onResetBook && (
+                <button type="button" onClick={() => void handleResetBook()}
+                  className="w-full text-left px-3 py-1.5 hover:bg-slate-700 text-slate-300 transition-colors">
+                  Reset book
+                </button>
+              )}
+            </div>
+          )}
+        </div>
 
         {/* Close book */}
         <button type="button" onClick={onClose} title="Close book"
