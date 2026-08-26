@@ -39,7 +39,7 @@ export function TeacherToolsPanel({
   onCloseBook, onOpenJsonEditor, onVerifyAll, onCreateStudentLink,
 }: Props) {
   return (
-    <div className="flex flex-col overflow-hidden text-xs select-none">
+    <div className="flex h-full flex-col overflow-hidden text-xs select-none">
       <div className="bg-slate-900 py-1.5 px-3 border-b border-slate-700 flex-shrink-0 flex items-center gap-2">
         <svg className="w-3.5 h-3.5 text-amber-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 14l9-5-9-5-9 5 9 5z" />
@@ -48,7 +48,7 @@ export function TeacherToolsPanel({
         <span className="font-bold uppercase tracking-wider text-slate-300 text-[11px]">Teacher Tools</span>
       </div>
 
-      <div className="overflow-y-auto p-3 space-y-2">
+      <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
         {!isEditing ? (
           <>
             <p className="text-slate-500 text-[11px] leading-relaxed mb-1">

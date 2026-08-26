@@ -199,6 +199,7 @@ export const DEFAULT_LAYOUT_PREFS: LayoutPrefs = {
   viewMode: 'minimal',
   visiblePanels: { ...MINIMAL_VISIBLE_PANELS },
   leftSidebarCollapsed: true,
+  rightSidebarCollapsed: false,
   displaySplit: DEFAULT_DISPLAY_SPLIT,
   presentationDisplaySplit: DEFAULT_PRESENTATION_DISPLAY_SPLIT,
 }
@@ -236,6 +237,7 @@ export const getStoredLayoutPrefs = (): LayoutPrefs => {
       viewMode,
       visiblePanels: panels,
       leftSidebarCollapsed,
+      rightSidebarCollapsed: parsed?.rightSidebarCollapsed === true,
       displaySplit: sanitiseSplit(parsed?.displaySplit, DEFAULT_DISPLAY_SPLIT),
       presentationDisplaySplit: sanitiseSplit(parsed?.presentationDisplaySplit, DEFAULT_PRESENTATION_DISPLAY_SPLIT),
     }

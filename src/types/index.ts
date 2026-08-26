@@ -28,6 +28,7 @@ export interface LayoutPrefs {
   viewMode: ViewMode
   visiblePanels: PanelVisibility
   leftSidebarCollapsed: boolean
+  rightSidebarCollapsed: boolean
   /** % of the output region given to the Console while editing (rest is the Display pane). */
   displaySplit: number
   /** The same split during a full-run presentation, where the region fills the screen. */
@@ -41,12 +42,14 @@ export interface NamedLayout {
   fsSidebarWidth: number
   leftSidebarSplit: number
   inspectorSplit: number
-  rightColSplit: number
   bookPanelWidth: number
   viewMode?: ViewMode
   leftSidebarCollapsed?: boolean
+  rightSidebarCollapsed?: boolean
   centerVerticalSplit?: number
-  structureColWidth?: number
+  /** Right-sidebar section heights in px; the book keeps its 75% default when absent. */
+  bookSectionHeight?: number | null
+  teacherSectionHeight?: number
   displaySplit?: number
   presentationDisplaySplit?: number
 }

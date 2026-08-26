@@ -21,8 +21,6 @@ interface Props {
   testStatus: string
   onClearTestResult: () => void
   completedChallenges: Record<string, boolean>
-  isCollapsed: boolean
-  onToggleCollapse: () => void
   // ── Teacher edit mode ──
   editMode?: boolean
   editManifest?: BookManifest | null
@@ -262,7 +260,7 @@ function CompletedTick() {
   )
 }
 
-export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClose, testResult, isTestRunning, testStatus, onClearTestResult, completedChallenges, isCollapsed, onToggleCollapse,
+export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClose, testResult, isTestRunning, testStatus, onClearTestResult, completedChallenges,
   editMode = false, editManifest = null, transientTicks, onAddExercise, onDeleteExercise, onMoveExercise, onRenameExercise, onToggleExample, onSaveGuide, onCreateStudentLink }: Props) {
   const dialogs = useDialogs()
   const [manifest, setManifest] = useState<BookManifest | null>(null)
@@ -592,32 +590,10 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
     return () => { cancelled = true }
   }, [manifest, navState, editMode])
 
-  if (isCollapsed) {
-    return (
-      <div className="flex flex-col h-full overflow-hidden">
-        <div className="bg-slate-900 py-1.5 px-1 border-b border-slate-700 flex-shrink-0 flex items-center justify-center">
-          <button type="button" title="Expand book panel" onClick={onToggleCollapse}
-            className="text-slate-400 hover:text-slate-200 p-0.5">
-            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
-            </svg>
-          </button>
-        </div>
-      </div>
-    )
-  }
-
   return (
     <div className="flex flex-col h-full overflow-hidden text-xs select-none">
       {/* Header */}
       <div className="bg-slate-900 py-1.5 px-2 border-b border-slate-700 flex-shrink-0 flex items-center gap-1">
-        {/* Collapse button */}
-        <button type="button" title="Collapse book panel" onClick={onToggleCollapse}
-          className="text-slate-400 hover:text-slate-200 p-0.5 flex-shrink-0">
-          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 5l7 7-7 7M5 5l7 7-7 7" />
-          </svg>
-        </button>
         {/* Back arrow */}
         <button type="button"
           onClick={navigateUp}

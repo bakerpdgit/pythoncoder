@@ -214,7 +214,6 @@ export default function App() {
   const [visiblePanels, setVisiblePanels] = useState<PanelVisibility>(() => ({ ...initialLayoutPrefs.visiblePanels }))
   const [leftSidebarCollapsed, setLeftSidebarCollapsed] = useState<boolean>(initialLayoutPrefs.leftSidebarCollapsed)
   const [centerVerticalSplit, setCenterVerticalSplit] = useState<number>(70) // % code editor in minimal mode center
-  const [structureColWidth, setStructureColWidth] = useState<number>(360)    // px width of structure column in minimal mode
   // notes is now a tab inside Structure, not a separate panel — kept in type for compat
   const [activeFilesystemId, setActiveFilesystemId] = useState<string>('default')
   const [currentWorkingDir, setCurrentWorkingDir] = useState<string>('/')
@@ -285,14 +284,18 @@ export default function App() {
   const [watchesHeight, setWatchesHeight] = useState(220)
   const [fsCollapsed, setFsCollapsed] = useState(false)
   const fsCollapsedBeforeRunRef = useRef<boolean | null>(null)
-  const [rightColSplit, setRightColSplit] = useState(42)      // % of right col for Console (top)
   // % of the output region given to the Console; the Display pane takes the rest.
   // A percentage means something different in a corner panel than on a full
   // screen, so the presentation layout remembers its own.
   const [displaySplit, setDisplaySplit] = useState<number>(initialLayoutPrefs.displaySplit)
   const [presentationDisplaySplit, setPresentationDisplaySplit] = useState<number>(initialLayoutPrefs.presentationDisplaySplit)
-  const [bookPanelWidth, setBookPanelWidth] = useState(360)   // px width of book panel
-  const [bookPanelCollapsed, setBookPanelCollapsed] = useState(false)
+  // Right sidebar: Learning book (top) · Teacher Tools · Structure. Mirrors the
+  // left sidebar — one card, one collapse control, a divider between sections.
+  const [rightSidebarWidth, setRightSidebarWidth] = useState(360)   // px
+  const [rightSidebarCollapsed, setRightSidebarCollapsed] = useState<boolean>(initialLayoutPrefs.rightSidebarCollapsed)
+  // Section heights in px. null = never dragged, so the book keeps its 75% default.
+  const [bookSectionHeight, setBookSectionHeight] = useState<number | null>(null)
+  const [teacherSectionHeight, setTeacherSectionHeight] = useState(260)
   const [watches, setWatches] = useState<string[]>(() => getStoredWatches())
   const watchesRef = useRef<string[]>(getStoredWatches())
   const [watchValues, setWatchValues] = useState<Record<string, InspectorNode>>({})
@@ -400,6 +403,9 @@ export default function App() {
   const watchesSecRef = useRef<HTMLDivElement | null>(null)
   const rightColRef = useRef<HTMLDivElement | null>(null)
   const outputPaneRef = useRef<HTMLDivElement | null>(null)
+  // The book section starts at a percentage height, so a drag has to read its
+  // rendered height rather than a state value that may still be null.
+  const bookSecRef = useRef<HTMLDivElement | null>(null)
   const inspectorRef = useRef<HTMLDivElement | null>(null)
   const mainThreadMountedPathsRef = useRef<string[]>([])
   const workerRunModeRef = useRef<WorkerRunMode>('debug')
@@ -504,9 +510,17 @@ export default function App() {
     : turtleSvg
   const hasLeftSidebar = visiblePanels.filesystem || visiblePanels.visualizer
   const hasInspectorAndFs = visiblePanels.filesystem && visiblePanels.visualizer
-  const hasRightCol = visiblePanels.output || visiblePanels.diagram
-  const hasConsoleAndStructure = visiblePanels.output && visiblePanels.diagram
+  const hasRightCol = visiblePanels.output
   const hasBookPanel = !!bookNavState
+  // The right sidebar stacks, top to bottom: Learning book · Teacher Tools · Structure.
+  // The last visible section fills the leftover height; the ones above it are sized in px.
+  const hasRightSidebar = hasBookPanel || visiblePanels.teacherTools || visiblePanels.diagram
+  const rightSidebarSections = [
+    ...(hasBookPanel ? ['book' as const] : []),
+    ...(visiblePanels.teacherTools ? ['teacher' as const] : []),
+    ...(visiblePanels.diagram ? ['structure' as const] : []),
+  ]
+  const lastRightSection = rightSidebarSections[rightSidebarSections.length - 1]
   const isBookEditMode = !!bookEditSession
   const hasConsoleTabs = appSettings.useFixedInputs || (isBookEditMode && !!activeBookChallenge) || traceSession !== null
 
@@ -668,7 +682,7 @@ export default function App() {
     if (!editorRef.current || !visiblePanels.code) return
     const frameId = requestAnimationFrame(() => editorRef.current?.layout())
     return () => cancelAnimationFrame(frameId)
-  }, [leftWidth, fsSidebarWidth, leftSidebarSplit, inspectorSplit, rightColSplit, centerVerticalSplit, structureColWidth, effectiveDisplaySplit, showDisplayPane, bookPanelWidth, bookPanelCollapsed, visiblePanels.code, visiblePanels.visualizer, visiblePanels.diagram, visiblePanels.output, visiblePanels.filesystem])
+  }, [leftWidth, fsSidebarWidth, leftSidebarSplit, inspectorSplit, centerVerticalSplit, effectiveDisplaySplit, showDisplayPane, rightSidebarWidth, rightSidebarCollapsed, visiblePanels.code, visiblePanels.visualizer, visiblePanels.diagram, visiblePanels.output, visiblePanels.filesystem])
 
   useEffect(() => {
     if (!visiblePanels.diagram) setShowExportDialog(false)
@@ -681,7 +695,23 @@ export default function App() {
   useEffect(() => { persistConsoleFontSize(consoleFontSize) }, [consoleFontSize])
   useEffect(() => { persistWatches(watches); watchesRef.current = watches }, [watches])
   useEffect(() => { persistNamedLayouts(savedLayouts) }, [savedLayouts])
-  useEffect(() => { persistLayoutPrefs({ viewMode, visiblePanels, leftSidebarCollapsed, displaySplit, presentationDisplaySplit }) }, [viewMode, visiblePanels, leftSidebarCollapsed, displaySplit, presentationDisplaySplit])
+  useEffect(() => { persistLayoutPrefs({ viewMode, visiblePanels, leftSidebarCollapsed, rightSidebarCollapsed, displaySplit, presentationDisplaySplit }) }, [viewMode, visiblePanels, leftSidebarCollapsed, rightSidebarCollapsed, displaySplit, presentationDisplaySplit])
+
+  // Something arriving in the right sidebar must be visible, or the student sees
+  // nothing happen: opening a book, or turning on Teacher Tools or Structure,
+  // re-opens the sidebar even when it was collapsed to its rail.
+  const prevRightSectionsRef = useRef({ book: hasBookPanel, teacher: visiblePanels.teacherTools, structure: visiblePanels.diagram })
+  useEffect(() => {
+    const prev = prevRightSectionsRef.current
+    const appeared = (hasBookPanel && !prev.book)
+      || (visiblePanels.teacherTools && !prev.teacher)
+      || (visiblePanels.diagram && !prev.structure)
+    prevRightSectionsRef.current = { book: hasBookPanel, teacher: visiblePanels.teacherTools, structure: visiblePanels.diagram }
+    if (appeared) setRightSidebarCollapsed(false)
+    // A newly opened book starts at its 75% default rather than inheriting the
+    // height the previous book was dragged to.
+    if (hasBookPanel && !prev.book) setBookSectionHeight(null)
+  }, [hasBookPanel, visiblePanels.teacherTools, visiblePanels.diagram])
 
   useEffect(() => startVersionPolling(() => setUpdateAvailable(true)), [])
 
@@ -771,8 +801,12 @@ export default function App() {
         setLeftWidth(Math.max(20, Math.min(80, ((e.clientX - rect.left) / rect.width) * 100)))
       } else if (drag.type === 'col-fssidebar') {
         setFsSidebarWidth(Math.max(160, Math.min(400, drag.startVal + (e.clientX - drag.startX))))
-      } else if (drag.type === 'col-bookpanel') {
-        setBookPanelWidth(Math.max(240, Math.min(600, drag.startVal + (drag.startX - e.clientX))))
+      } else if (drag.type === 'col-rightsidebar') {
+        setRightSidebarWidth(Math.max(240, Math.min(600, drag.startVal + (drag.startX - e.clientX))))
+      } else if (drag.type === 'row-booksec') {
+        setBookSectionHeight(Math.max(80, drag.startVal + (e.clientY - drag.startY)))
+      } else if (drag.type === 'row-teachersec') {
+        setTeacherSectionHeight(Math.max(80, drag.startVal + (e.clientY - drag.startY)))
       } else if (drag.type === 'row-fs') {
         setFsSectionHeight(Math.max(80, drag.startVal + (e.clientY - drag.startY)))
       } else if (drag.type === 'row-globals') {
@@ -781,14 +815,9 @@ export default function App() {
         setLocalsHeight(Math.max(80, drag.startVal + (e.clientY - drag.startY)))
       } else if (drag.type === 'row-watches') {
         setWatchesHeight(Math.max(60, drag.startVal + (e.clientY - drag.startY)))
-      } else if (drag.type === 'row-rightcol' && rightColRef.current) {
-        const rect = rightColRef.current.getBoundingClientRect()
-        setRightColSplit(Math.max(20, Math.min(80, ((e.clientY - rect.top) / rect.height) * 100)))
       } else if (drag.type === 'row-center' && centerRef.current) {
         const rect = centerRef.current.getBoundingClientRect()
         setCenterVerticalSplit(Math.max(20, Math.min(85, ((e.clientY - rect.top) / rect.height) * 100)))
-      } else if (drag.type === 'col-structure') {
-        setStructureColWidth(Math.max(240, Math.min(720, drag.startVal + (drag.startX - e.clientX))))
       } else if (drag.type === 'row-display' && outputPaneRef.current) {
         const rect = outputPaneRef.current.getBoundingClientRect()
         const pct = Math.max(DISPLAY_SPLIT_MIN, Math.min(DISPLAY_SPLIT_MAX, ((e.clientY - rect.top) / rect.height) * 100))
@@ -1620,9 +1649,11 @@ export default function App() {
     setFsSidebarWidth(224)
     setLeftSidebarSplit(55)
     setInspectorSplit(50)
-    setRightColSplit(42)
     setCenterVerticalSplit(70)
-    setStructureColWidth(360)
+    setRightSidebarWidth(360)
+    setRightSidebarCollapsed(false)
+    setBookSectionHeight(null)
+    setTeacherSectionHeight(260)
     setDisplaySplit(DEFAULT_DISPLAY_SPLIT)
     setPresentationDisplaySplit(DEFAULT_PRESENTATION_DISPLAY_SPLIT)
     setIsPanelMenuOpen(false)
@@ -1632,10 +1663,7 @@ export default function App() {
     setViewMode(mode)
     setVisiblePanels(defaultPanelsForView(mode))
     setLeftSidebarCollapsed(mode === 'minimal')
-    if (mode === 'minimal') {
-      setCenterVerticalSplit(70)
-      setStructureColWidth(360)
-    }
+    if (mode === 'minimal') setCenterVerticalSplit(70)
     setIsPanelMenuOpen(false)
   }
 
@@ -1643,8 +1671,8 @@ export default function App() {
     const name = await dialogs.prompt({ title: 'Save layout', message: 'Name for this layout:', placeholder: 'Layout name' })
     if (!name?.trim()) return
     const layout: NamedLayout = {
-      name: name.trim(), visiblePanels: { ...visiblePanels }, leftWidth, fsSidebarWidth, leftSidebarSplit, inspectorSplit, rightColSplit, bookPanelWidth,
-      viewMode, leftSidebarCollapsed, centerVerticalSplit, structureColWidth, displaySplit, presentationDisplaySplit,
+      name: name.trim(), visiblePanels: { ...visiblePanels }, leftWidth, fsSidebarWidth, leftSidebarSplit, inspectorSplit, bookPanelWidth: rightSidebarWidth,
+      viewMode, leftSidebarCollapsed, rightSidebarCollapsed, centerVerticalSplit, bookSectionHeight, teacherSectionHeight, displaySplit, presentationDisplaySplit,
     }
     setSavedLayouts(prev => [...prev.filter(l => l.name !== layout.name), layout])
   }
@@ -1655,12 +1683,13 @@ export default function App() {
     setFsSidebarWidth(layout.fsSidebarWidth)
     setLeftSidebarSplit(layout.leftSidebarSplit)
     setInspectorSplit(layout.inspectorSplit)
-    setRightColSplit(layout.rightColSplit)
-    setBookPanelWidth(layout.bookPanelWidth)
+    setRightSidebarWidth(layout.bookPanelWidth)
     if (layout.viewMode) setViewMode(layout.viewMode)
     if (typeof layout.leftSidebarCollapsed === 'boolean') setLeftSidebarCollapsed(layout.leftSidebarCollapsed)
     if (typeof layout.centerVerticalSplit === 'number') setCenterVerticalSplit(layout.centerVerticalSplit)
-    if (typeof layout.structureColWidth === 'number') setStructureColWidth(layout.structureColWidth)
+    if (typeof layout.rightSidebarCollapsed === 'boolean') setRightSidebarCollapsed(layout.rightSidebarCollapsed)
+    setBookSectionHeight(typeof layout.bookSectionHeight === 'number' ? layout.bookSectionHeight : null)
+    if (typeof layout.teacherSectionHeight === 'number') setTeacherSectionHeight(layout.teacherSectionHeight)
     if (typeof layout.displaySplit === 'number') setDisplaySplit(layout.displaySplit)
     if (typeof layout.presentationDisplaySplit === 'number') setPresentationDisplaySplit(layout.presentationDisplaySplit)
     setIsPanelMenuOpen(false)
@@ -4420,7 +4449,7 @@ exec(code_obj, globals())
                 and the drawing are always on screen together. */}
             {visiblePanels.output && (
               <div ref={outputPaneRef} className="flex flex-col overflow-hidden min-h-0 flex-shrink-0"
-                style={{ height: viewMode === 'developer' && hasConsoleAndStructure ? `${rightColSplit}%` : '100%' }}>
+                style={{ height: '100%' }}>
 
               <div className="flex flex-col overflow-hidden min-h-0 flex-shrink-0"
                 style={{ height: showDisplayPane ? `calc(${effectiveDisplaySplit}% - 3px)` : '100%' }}>
@@ -4596,16 +4625,6 @@ exec(code_obj, globals())
               </div>
             )}
 
-            {/* Resize handle: console ↔ structure (developer mode only — structure is its own column in minimal) */}
-            {viewMode === 'developer' && hasConsoleAndStructure && (
-              <div className="resize-handle-row flex-shrink-0"
-                onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'row-rightcol', startX: e.clientX, startY: e.clientY, startVal: rightColSplit }; document.body.style.cursor = 'row-resize'; document.body.style.userSelect = 'none' }}>
-                <div className="resize-bar" style={{ height: '3px', width: '48px' }} />
-              </div>
-            )}
-
-            {/* Structure panel (developer mode placement — minimal mode renders it as its own column below) */}
-            {viewMode === 'developer' && visiblePanels.diagram && structurePanelInner}
           </div>
         )}
 
@@ -4613,37 +4632,115 @@ exec(code_obj, globals())
         )}
         {/* end center section */}
 
-        {/* Structure column (minimal mode only) — full-height, own column to the right of center */}
-        {viewMode === 'minimal' && visiblePanels.diagram && (
-          <>
-            {(visiblePanels.code || visiblePanels.output) && (
-              <div className="resize-handle-col"
-                onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'col-structure', startX: e.clientX, startY: e.clientY, startVal: structureColWidth }; document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none' }}>
-                <div className="resize-bar" style={{ width: '3px', height: '48px' }} />
-              </div>
-            )}
-            <div className="flex-shrink-0 bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden"
-              style={{ width: structureColWidth }}>
-              {structurePanelInner}
-            </div>
-          </>
-        )}
-
-        {/* Resize handle: center ↔ right (teacher tools + book) column */}
-        {(hasBookPanel || visiblePanels.teacherTools) && !bookPanelCollapsed && (visiblePanels.code || hasRightCol || (viewMode === 'minimal' && visiblePanels.diagram)) && (
+        {/* Resize handle: center ↔ right sidebar */}
+        {hasRightSidebar && !rightSidebarCollapsed && (visiblePanels.code || hasRightCol) && (
           <div className="resize-handle-col"
-            onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'col-bookpanel', startX: e.clientX, startY: e.clientY, startVal: bookPanelWidth }; document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none' }}>
+            onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'col-rightsidebar', startX: e.clientX, startY: e.clientY, startVal: rightSidebarWidth }; document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none' }}>
             <div className="resize-bar" style={{ width: '3px', height: '48px' }} />
           </div>
         )}
 
-        {/* RIGHT COLUMN — Teacher Tools (top) stacked above the Book navigator */}
-        {(hasBookPanel || visiblePanels.teacherTools) && (
-          <div className="flex-shrink-0 flex flex-col gap-[3px] min-h-0"
-            style={{ width: (bookPanelCollapsed && hasBookPanel) ? 32 : bookPanelWidth }}>
-            {visiblePanels.teacherTools && !(bookPanelCollapsed && hasBookPanel) && (
-              <div className="flex-shrink-0 bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden max-h-[60%]">
-                <TeacherToolsPanel
+        {/* RIGHT SIDEBAR (collapsed rail) — mirrors the left sidebar's rail. */}
+        {hasRightSidebar && rightSidebarCollapsed && (
+          <div className="flex-shrink-0 bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden"
+            style={{ width: 32 }}>
+            <button type="button" title="Expand sidebar"
+              onClick={() => setRightSidebarCollapsed(false)}
+              className="flex flex-col items-center gap-2 py-2 text-slate-400 hover:text-slate-200 transition-colors">
+              <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
+              </svg>
+              {hasBookPanel && (
+                <svg className="h-4 w-4 text-emerald-500/70" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <title>Learning book</title>
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6.5A5 5 0 007 5H4v12h3a5 5 0 015 1.5A5 5 0 0117 17h3V5h-3a5 5 0 00-5 1.5zm0 0V19" />
+                </svg>
+              )}
+              {visiblePanels.teacherTools && (
+                <svg className="h-4 w-4 text-amber-400/70" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <title>Teacher Tools</title>
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 14l9-5-9-5-9 5 9 5z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 14l6.16-3.42A12 12 0 0112 21a12 12 0 01-6.16-10.42L12 14z" />
+                </svg>
+              )}
+              {visiblePanels.diagram && (
+                <svg className="h-4 w-4 text-emerald-400/70" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <title>Structure</title>
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 6h6v4H4zM14 14h6v4h-6zM7 10v4h7" />
+                </svg>
+              )}
+            </button>
+          </div>
+        )}
+
+        {/* RIGHT SIDEBAR — Learning book (top) · Teacher Tools · Structure.
+            One card with one collapse control, exactly like the left sidebar. The
+            last visible section fills the leftover height; those above it are
+            sized in px and each scrolls its own content. */}
+        {hasRightSidebar && !rightSidebarCollapsed && (
+          <div className="flex-shrink-0 bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden min-h-0"
+            style={{ width: rightSidebarWidth }}>
+
+            {/* Sidebar collapse strip — present whenever the sidebar has anything at all */}
+            <div className="bg-slate-900 px-2 py-1 border-b border-slate-700 flex items-center justify-start flex-shrink-0">
+              <button type="button" title="Collapse sidebar"
+                onClick={() => setRightSidebarCollapsed(true)}
+                className="text-slate-400 hover:text-slate-200 p-0.5">
+                <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 5l7 7-7 7M5 5l7 7-7 7" />
+                </svg>
+              </button>
+            </div>
+
+            <div className="flex-1 min-h-0 flex flex-col">
+
+            {/* Learning book — always the top section, 75% of the stack by default */}
+            {hasBookPanel && (
+              <>
+                <div ref={bookSecRef}
+                  className={lastRightSection === 'book' ? 'flex flex-1 flex-col overflow-hidden min-h-0' : 'flex flex-col overflow-hidden flex-shrink-0 min-h-0'}
+                  style={lastRightSection === 'book' ? undefined : { height: bookSectionHeight ?? '75%' }}>
+                  <BookPanel
+                    navState={bookNavState}
+                    onNavStateChange={handleBookNavStateChange}
+                    onEnterChallenge={(bookUrl, challenge, forceReset) => void handleEnterChallenge(bookUrl, challenge, forceReset)}
+                    onClose={handleCloseBook}
+                    testResult={testResult}
+                    isTestRunning={isTestRunning}
+                    testStatus={testRunnerStatus}
+                    onClearTestResult={() => setTestResult(null)}
+                    completedChallenges={completedChallenges}
+                    editMode={isBookEditMode}
+                    editManifest={editManifest}
+                    transientTicks={transientTicks}
+                    onAddExercise={(afterId) => void handleAddExercise(afterId)}
+                    onDeleteExercise={(id) => void handleDeleteExercise(id)}
+                    onMoveExercise={(id, dir) => void handleMoveExercise(id, dir)}
+                    onRenameExercise={handleRenameExercise}
+                    onToggleExample={(id) => void handleToggleExample(id)}
+                    onSaveGuide={handleSaveGuide}
+                    onCreateStudentLink={({ id, bookLabel }) => setStudentLinkRequest({
+                      source: { rootUrl: bookNavState.rootUrl, label: bookLabel },
+                      targetId: id,
+                    })}
+                  />
+                </div>
+                {lastRightSection !== 'book' && (
+                  <div className="resize-handle-row flex-shrink-0"
+                    onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'row-booksec', startX: e.clientX, startY: e.clientY, startVal: bookSecRef.current?.getBoundingClientRect().height ?? 0 }; document.body.style.cursor = 'row-resize'; document.body.style.userSelect = 'none' }}>
+                    <div className="resize-bar" style={{ height: '3px', width: '48px' }} />
+                  </div>
+                )}
+              </>
+            )}
+
+            {/* Teacher Tools */}
+            {visiblePanels.teacherTools && (
+              <>
+                <div
+                  className={lastRightSection === 'teacher' ? 'flex flex-1 flex-col overflow-hidden min-h-0' : 'flex flex-col overflow-hidden flex-shrink-0 min-h-0'}
+                  style={lastRightSection === 'teacher' ? undefined : { height: teacherSectionHeight }}>
+                  <TeacherToolsPanel
                   isEditing={isBookEditMode}
                   bookName={bookName}
                   folderConnected={!!bookEditSession?.folderHandle}
@@ -4657,39 +4754,25 @@ exec(code_obj, globals())
                   onOpenJsonEditor={handleOpenBookJsonEditor}
                   onVerifyAll={() => void handleVerifyAllSolutions()}
                   onCreateStudentLink={() => setStudentLinkRequest({ source: null, targetId: null })}
-                />
+                  />
+                </div>
+                {lastRightSection !== 'teacher' && (
+                  <div className="resize-handle-row flex-shrink-0"
+                    onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'row-teachersec', startX: e.clientX, startY: e.clientY, startVal: teacherSectionHeight }; document.body.style.cursor = 'row-resize'; document.body.style.userSelect = 'none' }}>
+                    <div className="resize-bar" style={{ height: '3px', width: '48px' }} />
+                  </div>
+                )}
+              </>
+            )}
+
+            {/* Structure — always last, so it takes the leftover height */}
+            {visiblePanels.diagram && (
+              <div className="flex flex-1 flex-col overflow-hidden min-h-0">
+                {structurePanelInner}
               </div>
             )}
-            {hasBookPanel && (
-              <div className="flex-1 min-h-0 bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden">
-                <BookPanel
-                  navState={bookNavState}
-                  onNavStateChange={handleBookNavStateChange}
-                  onEnterChallenge={(bookUrl, challenge, forceReset) => void handleEnterChallenge(bookUrl, challenge, forceReset)}
-                  onClose={handleCloseBook}
-                  testResult={testResult}
-                  isTestRunning={isTestRunning}
-                  testStatus={testRunnerStatus}
-                  onClearTestResult={() => setTestResult(null)}
-                  completedChallenges={completedChallenges}
-                  isCollapsed={bookPanelCollapsed}
-                  onToggleCollapse={() => setBookPanelCollapsed(o => !o)}
-                  editMode={isBookEditMode}
-                  editManifest={editManifest}
-                  transientTicks={transientTicks}
-                  onAddExercise={(afterId) => void handleAddExercise(afterId)}
-                  onDeleteExercise={(id) => void handleDeleteExercise(id)}
-                  onMoveExercise={(id, dir) => void handleMoveExercise(id, dir)}
-                  onRenameExercise={handleRenameExercise}
-                  onToggleExample={(id) => void handleToggleExample(id)}
-                  onSaveGuide={handleSaveGuide}
-                  onCreateStudentLink={({ id, bookLabel }) => setStudentLinkRequest({
-                    source: { rootUrl: bookNavState.rootUrl, label: bookLabel },
-                    targetId: id,
-                  })}
-                />
-              </div>
-            )}
+
+            </div>
           </div>
         )}
       </div>

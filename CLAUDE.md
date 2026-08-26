@@ -201,6 +201,26 @@ These are set in:
   `App.tsx`. There is no inbound file-watching (the API can't); a manual
   "Reload from folder" button re-reads disk. Permissions reset on page reload.
 
+### The right sidebar
+
+- Mirrors the left sidebar: one card, one collapse control at the very top, and a
+  divider between sections. It stacks, top to bottom, **Learning book · Teacher
+  Tools · Structure** — the book is always the top section because it is what a
+  student is working through.
+- The **last visible section fills the leftover height**; the ones above it are
+  sized in pixels and dragged with a `row-booksec` / `row-teachersec` handle. Each
+  section scrolls its own content, so a long Teacher Tools list never pushes the
+  Structure panel off screen. A newly opened book resets to **75%** of the stack
+  (`bookSectionHeight` back to `null`); a drag pins it to a pixel height.
+- The collapse strip is present whenever the sidebar has *anything*, and the whole
+  sidebar disappears only when it has nothing — no book, no Teacher Tools, no
+  Structure. Collapsed, it becomes a 32px rail with an icon per section.
+- A section **arriving** re-opens a collapsed sidebar (`prevRightSectionsRef`).
+  Without that, opening a book or ticking Structure looks like nothing happened.
+- The Structure panel used to live in two places (bottom of the right column in
+  developer view, its own column in minimal view). It now has one home in both
+  view modes, which is why `rightColSplit` and `structureColWidth` are gone.
+
 ### The Display pane
 
 - **Every** kind of visual output lives in one **Display pane**, rendered directly
