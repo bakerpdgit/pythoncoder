@@ -173,6 +173,23 @@ These are set in:
   after its source URL. A locally authored or locally imported book cannot, and
   the dialog shows publishing instructions instead of a useless `vfs://` link.
 
+### Turning the page stops the run
+
+- Every book navigation (`handleBookNavStateChange`, `handleEnterChallenge`,
+  `handleCloseBook`) first calls `stopRunBeforeNavigating`. Without it the panel
+  moved to the next activity but `canSwitchCodeSource()` refused the swap, so the
+  student read page 3 with page 2's code and filesystem still loaded.
+- Stopping is not instant — a trace worker acknowledges and flushes its final
+  events before terminating, and a pygame/turtle main-thread run only unwinds
+  when its loop next sees the stop flag — so `stopAndAwaitRuntimeRelease`
+  (`utils/runtimeRelease.ts`) polls `isRuntimeSourceLocked` until the runtime
+  lets go, with a timeout so a wedged runtime cannot freeze navigation.
+- It also applies the `pendingRestore` the post-run "Return to editor" bar would
+  have, otherwise navigating out of a pygame run left the student in the
+  full-canvas presentation layout.
+- Navigation reads `challengeLoadIdRef` before awaiting and bails if it moved:
+  the await is long enough for a second click to land.
+
 ### Virtual filesystem & local folders
 
 - `utils/virtualFS.ts` is an IndexedDB-backed store of multiple named filesystems

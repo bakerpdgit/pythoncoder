@@ -83,6 +83,7 @@ import { normalizeTestInputs } from './utils/testInputs'
 import { startVersionPolling } from './utils/versionCheck'
 import { githubRepositoryBookUrl } from './utils/bookSource'
 import { isRuntimeSourceLocked, RuntimeStartGuard } from './utils/runtimeStartGuard'
+import { stopAndAwaitRuntimeRelease } from './utils/runtimeRelease'
 import {
   beginTraceInputTabHandoff, completeTraceInputTabHandoff, type ConsolePanelTab,
 } from './utils/traceInputTab'
@@ -291,6 +292,11 @@ export default function App() {
   const workerRef = useRef<Worker | null>(null)
   const isRunningRef = useRef(isRunning)
   isRunningRef.current = isRunning
+  // Read after an `await`, where the render closure's copies would be stale.
+  const pendingRestoreRef = useRef(pendingRestore)
+  pendingRestoreRef.current = pendingRestore
+  const isConsolePresentationModeRef = useRef(isConsolePresentationMode)
+  isConsolePresentationModeRef.current = isConsolePresentationMode
   const traceWorkerStartGuardRef = useRef(new RuntimeStartGuard<TraceWorkerStartSource>())
   const traceWorkerSourceRef = useRef<TraceWorkerStartSource>({
     filesystemId: activeFilesystemId,
@@ -2063,9 +2069,48 @@ export default function App() {
     }
   }
 
-  const handleBookNavStateChange = (state: BookNavState) => {
-    if (!state.activeChallengeId && !canSwitchCodeSource()) return
-    if (!state.activeChallengeId) challengeLoadIdRef.current += 1
+  // Turning the page of a book must not leave a student reading one activity
+  // while the editor and filesystem still hold the previous one's: the source
+  // switch is refused outright while a program runs. So navigation stops the run
+  // itself, waits for the runtime to let go, and puts the layout back the way the
+  // post-run "Return to editor" bar would have. Returns false only if the runtime
+  // never released, in which case the caller leaves everything as it was.
+  const stopRunBeforeNavigating = async (): Promise<boolean> => {
+    const released = await stopAndAwaitRuntimeRelease({
+      isLocked: () => isRuntimeSourceLocked({
+        isRunning: isRunningRef.current,
+        hasWorker: workerRef.current !== null,
+        isStarting: traceWorkerStartGuardRef.current.isStarting,
+      }),
+      stop: forceStop,
+      wait: ms => new Promise<void>(resolve => { window.setTimeout(resolve, ms) }),
+      now: () => Date.now(),
+    })
+    if (!released) {
+      setCodeStatus('Stop the running program before changing code or switching files.')
+      return false
+    }
+    const restore = pendingRestoreRef.current
+    if (restore) {
+      restore()
+      setPendingRestore(null)
+    } else if (isConsolePresentationModeRef.current) {
+      restoreConsolePresentationMode()
+    }
+    return true
+  }
+
+  const handleBookNavStateChange = async (state: BookNavState) => {
+    // Entering an activity only moves the panel; handleEnterChallenge, which
+    // follows it, owns stopping the run before it swaps the code source.
+    if (!state.activeChallengeId) {
+      const loadId = challengeLoadIdRef.current
+      if (!(await stopRunBeforeNavigating())) return
+      // A later navigation started while the run was stopping — it wins.
+      if (loadId !== challengeLoadIdRef.current) return
+      if (!canSwitchCodeSource()) return
+      challengeLoadIdRef.current += 1
+    }
     setBookNavState(state)
     persistBookNavState(state)
     if (!state.activeChallengeId) {
@@ -2077,8 +2122,12 @@ export default function App() {
   }
 
   const handleEnterChallenge = async (bookUrl: string, challenge: BookChallenge, forceReset = false) => {
-    if (!canSwitchCodeSource()) return
     const loadId = ++challengeLoadIdRef.current
+    // Stop first: the run being stopped belongs to the activity we are leaving,
+    // and saving it back below must not race the runtime's own file sync.
+    if (!(await stopRunBeforeNavigating())) return
+    if (loadId !== challengeLoadIdRef.current) return
+    if (!canSwitchCodeSource()) return
     try {
       await saveCurrentToVFS()
       if (loadId !== challengeLoadIdRef.current) return
@@ -2148,7 +2197,10 @@ export default function App() {
     if (target.kind === 'challenge') await handleEnterChallenge(target.bookUrl, target.challenge)
   }
 
-  const handleCloseBook = () => {
+  const handleCloseBook = async () => {
+    const loadId = challengeLoadIdRef.current
+    if (!(await stopRunBeforeNavigating())) return
+    if (loadId !== challengeLoadIdRef.current) return
     if (!canSwitchCodeSource()) return
     challengeLoadIdRef.current += 1
     setBookNavState(null)
