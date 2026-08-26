@@ -481,6 +481,18 @@ _ctx.fillRect(0, 0, 600, 600)
 _SPEED_DELAY = {0: 0.0, 1: 0.12, 2: 0.07, 3: 0.045, 4: 0.027, 5: 0.016,
                 6: 0.010, 7: 0.006, 8: 0.003, 9: 0.001, 10: 0.0}
 
+# The Edexcel PLS names speeds as words as well as numbers; map them the way
+# CPython's turtle does. _pace_speed is the speed the loop yielder paces on:
+# whichever turtle most recently called speed(), so a program driving its own
+# turtle (PLS style) still controls the animation.
+_SPEED_WORDS = {'fastest': 0, 'fast': 10, 'normal': 6, 'slow': 3, 'slowest': 1}
+_pace_speed = [6]
+
+def _parse_speed(s):
+    if isinstance(s, str):
+        return _SPEED_WORDS.get(s.lower().strip(), 6)
+    return s if s == 0 else max(1, min(10, int(s)))
+
 _COLOR_MAP = {
     'red':'#ff0000','green':'#008000','blue':'#0000ff','yellow':'#ffff00',
     'orange':'#ffa500','purple':'#800080','pink':'#ffc0cb','black':'#000000',
@@ -676,7 +688,9 @@ class _Turtle:
         return math.sqrt((float(x)-self._x)**2+(float(y)-self._y)**2)
 
     def speed(self, s=None):
-        if s is not None: self._speed = s if s==0 else max(1,min(10,int(s)))
+        if s is not None:
+            self._speed = _parse_speed(s)
+            _pace_speed[0] = self._speed
         return self._speed
     def shape(self, *a): return 'classic'
     def shapesize(self, *a): pass
@@ -698,7 +712,7 @@ _global_screen = _Screen()
 _default_turtle = _Turtle()
 
 def __turtle_delay__():
-    return _SPEED_DELAY.get(_default_turtle._speed, 0.010)
+    return _SPEED_DELAY.get(_pace_speed[0], 0.010)
 
 _turtle_mod = _types_mod.ModuleType('turtle')
 for _fn, _tgt in [
@@ -852,6 +866,14 @@ def _pc(c):
         return f'rgb({int(r)},{int(g)},{int(b)})'
     s=str(c).lower().strip()
     return _COLOR_MAP.get(s,s)
+
+# Edexcel PLS speed words, mapped the way CPython's turtle does.
+_SPEED_WORDS = {'fastest': 0, 'fast': 10, 'normal': 6, 'slow': 3, 'slowest': 1}
+
+def _parse_speed(s):
+    if isinstance(s, str):
+        return _SPEED_WORDS.get(s.lower().strip(), 6)
+    return s if s == 0 else max(1, min(10, int(s)))
 
 def _get_svg():
     w,h=_turtle_sw,_turtle_sh
@@ -1016,7 +1038,7 @@ class _SvgTurtle:
         if y is None and hasattr(x,'__iter__'): x,y=tuple(x)
         return math.sqrt((float(x)-self._x)**2+(float(y)-self._y)**2)
     def speed(self,s=None):
-        if s is not None: self._speed=s if s==0 else max(1,min(10,int(s)))
+        if s is not None: self._speed=_parse_speed(s)
         return self._speed
     def shape(self,*a): return 'classic'
     def shapesize(self,*a): pass
@@ -1128,6 +1150,14 @@ def _pc(c):
             return f'rgb({int(r*255)},{int(g*255)},{int(b*255)})'
         return f'rgb({int(r)},{int(g)},{int(b)})'
     s=str(c).lower().strip(); return _CMAP.get(s,s)
+
+# Edexcel PLS speed words, mapped the way CPython's turtle does.
+_SPEED_WORDS = {'fastest': 0, 'fast': 10, 'normal': 6, 'slow': 3, 'slowest': 1}
+
+def _parse_speed(s):
+    if isinstance(s, str):
+        return _SPEED_WORDS.get(s.lower().strip(), 6)
+    return s if s == 0 else max(1, min(10, int(s)))
 
 def _refresh_svg():
     global __turtle_svg__
@@ -1279,7 +1309,7 @@ class _WTurtle:
         if y is None and hasattr(x,'__iter__'): x,y=tuple(x)
         return _math.sqrt((float(x)-self._x)**2+(float(y)-self._y)**2)
     def speed(self,s=None):
-        if s is not None: self._speed=s if s==0 else max(1,min(10,int(s)))
+        if s is not None: self._speed=_parse_speed(s)
         return self._speed
     def shape(self,*a): return 'classic'
     def shapesize(self,*a): pass

@@ -1,0 +1,76 @@
+{
+  "name": "Turtle",
+  "id": "turtle",
+  "children": [
+    {
+      "id": "turtle-first-turtle",
+      "name": "1. Your first turtle",
+      "guide": "01_first_turtle.md",
+      "py": "01_first_turtle.py",
+      "isExample": true
+    },
+    {
+      "id": "turtle-penup-pendown",
+      "name": "2. Lifting the pen",
+      "guide": "02_penup_pendown.md",
+      "py": "02_penup_pendown.py",
+      "isExample": true
+    },
+    {
+      "id": "turtle-loops-and-angles",
+      "name": "3. Loops and angles",
+      "guide": "03_loops_and_angles.md",
+      "py": "03_loops_and_angles.py",
+      "isExample": true
+    },
+    {
+      "id": "turtle-pen-colours",
+      "name": "4. Colour, thickness and speed",
+      "guide": "04_pen_colours.md",
+      "py": "04_pen_colours.py",
+      "isExample": true
+    },
+    {
+      "id": "turtle-coordinates",
+      "name": "5. Coordinates",
+      "guide": "05_coordinates.md",
+      "py": "05_coordinates.py",
+      "isExample": true
+    },
+    {
+      "id": "turtle-filling-shapes",
+      "name": "6. Filling shapes",
+      "guide": "06_filling_shapes.md",
+      "py": "06_filling_shapes.py",
+      "isExample": true
+    },
+    {
+      "id": "turtle-circles-and-arcs",
+      "name": "7. Circles and arcs",
+      "guide": "07_circles_and_arcs.md",
+      "py": "07_circles_and_arcs.py",
+      "isExample": true
+    },
+    {
+      "id": "turtle-patterns",
+      "name": "8. Patterns from nested loops",
+      "guide": "08_patterns.md",
+      "py": "08_patterns.py",
+      "isExample": true
+    },
+    {
+      "id": "turtle-many-turtles",
+      "name": "9. More than one turtle",
+      "guide": "09_many_turtles.md",
+      "py": "09_many_turtles.py",
+      "isExample": true
+    },
+    {
+      "id": "turtle-keyboard-control",
+      "name": "10. Driving with the keyboard",
+      "guide": "10_keyboard_control.md",
+      "py": "10_keyboard_control.py",
+      "isExample": true
+    }
+  ]
+}
