@@ -190,9 +190,18 @@ These are set in:
   working. stdctx mirrors the HTML5 Canvas 2D API; every call becomes a JSON
   command replayed against a `<canvas>` in a **Canvas tab** of the console panel.
 - The Python source and the JS renderers all live in `utils/stdctx.ts`;
-  `CanvasPane.tsx` hosts the canvas. One bootstrap installs both objects, gated
-  on `codeUsesSpongeLibs`; the Canvas tab needs `codeUsesStdctx` specifically, so
-  an audio-only program does not grow one.
+  `CanvasPane.tsx` hosts the canvas. One bootstrap installs both objects.
+- Detection is `detectSpongeLibs(editorSource, files)`, which scans **every
+  mounted `.py`**, not just the open file. Book challenges routinely keep their
+  drawing in an imported module (`import UI`), so the file on screen never
+  mentions stdctx even though the run needs it — checking only the editor left
+  those programs with `ImportError: cannot import name 'stdctx' from 'sys'`.
+  The Canvas tab needs stdctx specifically, so an audio-only program does not
+  grow one.
+- Because that detection happens at run start, the Canvas tab can appear only
+  once a run begins. `CanvasPane` therefore sizes its canvas on attach rather
+  than relying on `clear()`: a bare `<canvas>` already reports the HTML default
+  of 300x150, so a "size it if unset" guard silently never fires.
 - The canvas starts at Sponge's fixed 500x400. `stdctx.resize(w, h)` — or
   assigning `stdctx.width` / `stdctx.height` — sends a `resize` command, which
   (like the HTML canvas) clears the bitmap. Every run restarts at the default.

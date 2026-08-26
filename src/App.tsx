@@ -12,7 +12,7 @@ if (import.meta.env.DEV) {
 import type { editor as MonacoEditor } from 'monaco-editor'
 import {
   buildPythonStructureModel, analyzePythonClasses, analyzePythonFunctions,
-  analyzePythonOutline, cleanCodeText, codeUsesPygame, codeUsesSpongeLibs, codeUsesStdctx, codeUsesTurtle, codeUsesTurtleKeyboard, getExpandableOutlineIds,
+  analyzePythonOutline, cleanCodeText, codeUsesPygame, codeUsesStdctx, codeUsesTurtle, codeUsesTurtleKeyboard, detectSpongeLibs, getExpandableOutlineIds,
 } from './utils/codeAnalysis'
 import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides, getStoredSettings, persistSettings, getStoredBookNavState, persistBookNavState, getStoredFixedInputs, persistFixedInputs, getStoredEditorFontSize, persistEditorFontSize, getStoredConsoleFontSize, persistConsoleFontSize, getStoredWatches, persistWatches, getStoredNamedLayouts, persistNamedLayouts, getStoredCompletions, persistCompletion, getStoredLayoutPrefs, persistLayoutPrefs, defaultPanelsForView, MINIMAL_VISIBLE_PANELS } from './utils/storage'
 import { triggerDownload, getBaseFileStem } from './utils/download'
@@ -2889,8 +2889,11 @@ export default function App() {
     }
 
     const hasTurtleForMode = codeUsesTurtle(capturedCode)
-    const usesStdctxForRun = codeUsesStdctx(capturedCode)
-    const usesSpongeLibsForRun = codeUsesSpongeLibs(capturedCode)
+    // Checked across every mounted .py, not just the open file: a challenge can
+    // keep its drawing in an imported module the editor is not showing.
+    const spongeLibs = detectSpongeLibs(capturedCode, vfsFiles)
+    const usesStdctxForRun = spongeLibs.usesStdctx
+    const usesSpongeLibsForRun = spongeLibs.usesStdctx || spongeLibs.usesStdaud
     const isSvgTurtleRun = (choice === 'run') && hasTurtleForMode && effectiveTurtleMode(capturedCode) === 'basthon-svg'
 
     workerRunModeRef.current = choice
@@ -3179,8 +3182,10 @@ export default function App() {
     const turtleMode = shouldRunTurtle ? effectiveTurtleMode(codeText) : null
     const shouldRunTurtleCanvas = turtleMode === 'pyo-js-turtle'
     const shouldRunTurtleSvg = turtleMode === 'basthon-svg'
-    const shouldRunSpongeLibs = !shouldRunPygame && !shouldRunTurtle && codeUsesSpongeLibs(codeText)
-    const shouldRunStdctx = shouldRunSpongeLibs && codeUsesStdctx(codeText)
+    const spongeLibs = detectSpongeLibs(codeText, vfsFiles)
+    const shouldRunSpongeLibs = !shouldRunPygame && !shouldRunTurtle
+      && (spongeLibs.usesStdctx || spongeLibs.usesStdaud)
+    const shouldRunStdctx = shouldRunSpongeLibs && spongeLibs.usesStdctx
 
     mainThreadStopRequestedRef.current = false
     if (shouldRunPygame) enterPygamePresentationMode()

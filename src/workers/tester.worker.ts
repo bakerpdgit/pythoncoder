@@ -2,7 +2,7 @@
 
 import { SVG_TURTLE_WORKER_SETUP } from '../utils/mainThread'
 import { STDCTX_TEST_BOOTSTRAP } from '../utils/stdctx'
-import { codeUsesSpongeLibs } from '../utils/codeAnalysis'
+import { detectSpongeLibs } from '../utils/codeAnalysis'
 import { normalizeTestInputs } from '../utils/testInputs'
 
 const PYODIDE_BASE_URL = 'https://cdn.jsdelivr.net/pyodide/v0.29.3/full'
@@ -204,7 +204,8 @@ self.onmessage = async (e: MessageEvent) => {
       pyodide.runPython(SVG_TURTLE_WORKER_SETUP)
     }
 
-    if (codeUsesSpongeLibs(code)) installStdctxForTests()
+    const spongeLibs = detectSpongeLibs(code, files ?? [])
+    if (spongeLibs.usesStdctx || spongeLibs.usesStdaud) installStdctxForTests()
 
     const results: Array<{
       caseIndex: number

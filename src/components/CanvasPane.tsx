@@ -38,10 +38,14 @@ export const CanvasPane = forwardRef<CanvasPaneHandle, CanvasPaneProps>(({ onKey
 
   const attachCanvas = useCallback((canvas: HTMLCanvasElement | null) => {
     canvasRef.current = canvas
-    if (canvas && !canvas.width) {
-      canvas.width = STDCTX_CANVAS_WIDTH
-      canvas.height = STDCTX_CANVAS_HEIGHT
-    }
+    if (!canvas) return
+    // Size it on attach, unconditionally. A bare <canvas> already reports the
+    // HTML default of 300x150, so guarding on a falsy width would never fire —
+    // and when the pane mounts only once a run has started (the program's
+    // stdctx lives in an imported module, so the tab did not exist before),
+    // clear() ran against a null ref and nothing else would size it.
+    canvas.width = STDCTX_CANVAS_WIDTH
+    canvas.height = STDCTX_CANVAS_HEIGHT
   }, [])
 
   useImperativeHandle(ref, () => ({

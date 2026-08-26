@@ -14,7 +14,7 @@ import {
   processCanvasCommand,
   type StdctxCommand,
 } from './stdctx'
-import { codeUsesSpongeLibs, codeUsesStdaud, codeUsesStdctx } from './codeAnalysis'
+import { codeUsesSpongeLibs, codeUsesStdaud, codeUsesStdctx, detectSpongeLibs } from './codeAnalysis'
 
 const pythonAvailable = spawnSync('python', ['--version'], { encoding: 'utf8' }).status === 0
 
@@ -238,6 +238,48 @@ describe('processAudioCommand', () => {
       play: () => Promise.reject(new Error('NotAllowedError')),
     } as unknown as HTMLAudioElement
     expect(() => processAudioCommand(audio, { action: 'play' }, s => s)).not.toThrow()
+  })
+})
+
+describe('detectSpongeLibs', () => {
+  const file = (path: string, source: string) => ({
+    path,
+    content: new TextEncoder().encode(source).buffer as ArrayBuffer,
+  })
+
+  it('finds stdctx in the open file', () => {
+    expect(detectSpongeLibs('from sys import stdctx\n', [])).toEqual({ usesStdctx: true, usesStdaud: false })
+  })
+
+  // The Fun Challenges 4 "Pathfinding" shape: main.py imports a UI module, and
+  // only that module ever mentions stdctx.
+  it('finds stdctx in an imported module the editor is not showing', () => {
+    const editor = 'import UI\nUI.draw_maze()\n'
+    const files = [file('/main.py', editor), file('/UI.py', 'from sys import stdctx\n')]
+    expect(detectSpongeLibs(editor, files)).toEqual({ usesStdctx: true, usesStdaud: false })
+  })
+
+  it('finds stdaud in another module', () => {
+    const files = [file('/sound.py', 'from sys import stdaud\n')]
+    expect(detectSpongeLibs('import sound\n', files)).toEqual({ usesStdctx: false, usesStdaud: true })
+  })
+
+  it('reports both when they live in different modules', () => {
+    const files = [file('/ui.py', 'from sys import stdctx\n'), file('/audio.py', 'from sys import stdaud\n')]
+    expect(detectSpongeLibs('import ui, audio\n', files)).toEqual({ usesStdctx: true, usesStdaud: true })
+  })
+
+  it('ignores non-Python files, including binaries that cannot be decoded', () => {
+    const files = [
+      { path: '/notes.txt', content: new TextEncoder().encode('stdctx').buffer as ArrayBuffer },
+      { path: '/clip.wav', content: new Uint8Array([0xff, 0xfe, 0x00, 0x01]).buffer as ArrayBuffer },
+    ]
+    expect(detectSpongeLibs('print("hi")\n', files)).toEqual({ usesStdctx: false, usesStdaud: false })
+  })
+
+  it('reports neither for an ordinary program', () => {
+    const files = [file('/helper.py', 'def add(a, b):\n    return a + b\n')]
+    expect(detectSpongeLibs('import helper\n', files)).toEqual({ usesStdctx: false, usesStdaud: false })
   })
 })
 

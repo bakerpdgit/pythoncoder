@@ -43,6 +43,38 @@ export const codeUsesSpongeLibs = (source: string): boolean => {
   return STDCTX_USAGE_REGEX.test(cleaned) || STDAUD_USAGE_REGEX.test(cleaned)
 }
 
+/**
+ * Whether a *whole program* reaches for the Python Sponge libraries.
+ *
+ * Checking only the open editor file is not enough: a book challenge routinely
+ * keeps its drawing in a separate module (`import UI`), so the file on screen
+ * never mentions stdctx even though the run needs it. Every Python file that
+ * will be mounted is checked too.
+ */
+export const detectSpongeLibs = (
+  editorSource: string,
+  files: Iterable<{ path: string; content: ArrayBuffer }> = [],
+): { usesStdctx: boolean; usesStdaud: boolean } => {
+  let usesStdctx = codeUsesStdctx(editorSource)
+  let usesStdaud = codeUsesStdaud(editorSource)
+  if (usesStdctx && usesStdaud) return { usesStdctx, usesStdaud }
+
+  const decoder = new TextDecoder()
+  for (const file of files) {
+    if (!/\.py$/i.test(file.path)) continue
+    let text: string
+    try {
+      text = decoder.decode(file.content)
+    } catch {
+      continue
+    }
+    if (!usesStdctx) usesStdctx = codeUsesStdctx(text)
+    if (!usesStdaud) usesStdaud = codeUsesStdaud(text)
+    if (usesStdctx && usesStdaud) break
+  }
+  return { usesStdctx, usesStdaud }
+}
+
 // ── Structure model ────────────────────────────────────────────────────────
 
 export const buildPythonStructureModel = (source: string): StructureModel => {
