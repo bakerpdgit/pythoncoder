@@ -316,6 +316,17 @@ async function challengeFsIsComplete(fsId: string, challenge: BookChallenge): Pr
   return true
 }
 
+/**
+ * A Parsons challenge's `py` file *is* the answer, in order. It has to live in
+ * the challenge filesystem (that is where the puzzle is re-parsed from on every
+ * re-entry), so hide it from the file browser instead.
+ */
+function parsonsHiddenPaths(challenge: BookChallenge): string[] {
+  return challenge.typ === 'parsons' && challenge.py
+    ? [`/${challengeFilePath(challenge.py)}`]
+    : []
+}
+
 export async function getOrCreateChallengeFs(
   bookUrl: string,
   rootBookUrl: string,
@@ -332,7 +343,7 @@ export async function getOrCreateChallengeFs(
         return {
           fsId: existing.id,
           pyFilename: challenge.py ? challengeFilePath(challenge.py) : null,
-          hiddenPaths: getHiddenPathsForFs(existing.id),
+          hiddenPaths: Array.from(new Set([...getHiddenPathsForFs(existing.id), ...parsonsHiddenPaths(challenge)])),
         }
       }
       // A transient fetch failure in an older run could leave a named but empty
@@ -346,7 +357,7 @@ export async function getOrCreateChallengeFs(
 
   const { id: fsId } = await createFilesystem(fsName)
   const bases = bookFileBaseUrls(bookUrl, rootBookUrl)
-  const hiddenPaths: string[] = []
+  const hiddenPaths: string[] = parsonsHiddenPaths(challenge)
 
   try {
     if (challenge.py) {

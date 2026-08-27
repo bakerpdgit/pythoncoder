@@ -1,5 +1,6 @@
 import { THEME_STORAGE_KEY, NOTES_STORAGE_KEY, SETTINGS_STORAGE_KEY } from '../constants'
 import type { Theme, AppSettings, BookNavState, InputMode, NamedLayout, LayoutPrefs, PanelVisibility, ViewMode } from '../types'
+import type { ParsonsArrangement } from './parsons'
 
 const EDITOR_FONT_SIZE_KEY = 'coder_editor_font_size'
 const CONSOLE_FONT_SIZE_KEY = 'coder_console_font_size'
@@ -178,6 +179,50 @@ export const clearCompletionsForBook = (bookRootUrl: string): void => {
     }
     localStorage.setItem(BOOK_COMPLETIONS_KEY, JSON.stringify(completions))
   } catch { /* ignore */ }
+}
+
+/**
+ * A student's in-progress Parsons arrangement, keyed exactly like completions
+ * (`${rootUrl}::${challengeId}`) so ids with odd characters — tutorial 4 has
+ * two with a trailing space — behave identically in both stores.
+ */
+const PARSONS_STATE_KEY = 'pythoncoder-parsons-state'
+
+const readParsonsStore = (): Record<string, ParsonsArrangement> => {
+  try {
+    const raw = localStorage.getItem(PARSONS_STATE_KEY)
+    const parsed = raw ? JSON.parse(raw) : {}
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch { return {} }
+}
+
+const writeParsonsStore = (store: Record<string, ParsonsArrangement>): void => {
+  try { localStorage.setItem(PARSONS_STATE_KEY, JSON.stringify(store)) } catch { /* ignore */ }
+}
+
+export const getStoredParsonsState = (bookRootUrl: string, challengeId: string): ParsonsArrangement | null =>
+  readParsonsStore()[`${bookRootUrl}::${challengeId}`] ?? null
+
+export const persistParsonsState = (bookRootUrl: string, challengeId: string, arrangement: ParsonsArrangement): void => {
+  const store = readParsonsStore()
+  store[`${bookRootUrl}::${challengeId}`] = arrangement
+  writeParsonsStore(store)
+}
+
+export const clearParsonsState = (bookRootUrl: string, challengeId: string): void => {
+  const store = readParsonsStore()
+  delete store[`${bookRootUrl}::${challengeId}`]
+  writeParsonsStore(store)
+}
+
+/** Forget every saved arrangement in one book (used by Reset book). */
+export const clearParsonsStateForBook = (bookRootUrl: string): void => {
+  const store = readParsonsStore()
+  const prefix = `${bookRootUrl}::`
+  for (const key of Object.keys(store)) {
+    if (key.startsWith(prefix)) delete store[key]
+  }
+  writeParsonsStore(store)
 }
 
 export const persistSettings = (settings: AppSettings): void => {

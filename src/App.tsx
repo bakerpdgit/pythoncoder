@@ -14,7 +14,7 @@ import {
   buildPythonStructureModel, analyzePythonClasses, analyzePythonFunctions,
   analyzePythonOutline, cleanCodeText, codeUsesPygame, codeUsesStdctx, codeUsesTurtle, codeUsesTurtleKeyboard, detectSpongeLibs, getExpandableOutlineIds,
 } from './utils/codeAnalysis'
-import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides, getStoredSettings, persistSettings, getStoredBookNavState, persistBookNavState, getStoredFixedInputs, persistFixedInputs, getStoredEditorFontSize, persistEditorFontSize, getStoredConsoleFontSize, persistConsoleFontSize, getStoredWatches, persistWatches, getStoredNamedLayouts, persistNamedLayouts, getStoredCompletions, persistCompletion, clearCompletionsForBook, getStoredLayoutPrefs, persistLayoutPrefs, defaultPanelsForView, MINIMAL_VISIBLE_PANELS, DEFAULT_DISPLAY_SPLIT, DEFAULT_PRESENTATION_DISPLAY_SPLIT, DISPLAY_SPLIT_MIN, DISPLAY_SPLIT_MAX } from './utils/storage'
+import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides, getStoredSettings, persistSettings, getStoredBookNavState, persistBookNavState, getStoredFixedInputs, persistFixedInputs, getStoredEditorFontSize, persistEditorFontSize, getStoredConsoleFontSize, persistConsoleFontSize, getStoredWatches, persistWatches, getStoredNamedLayouts, persistNamedLayouts, getStoredCompletions, persistCompletion, clearCompletionsForBook, getStoredParsonsState, persistParsonsState, clearParsonsState, clearParsonsStateForBook, getStoredLayoutPrefs, persistLayoutPrefs, defaultPanelsForView, MINIMAL_VISIBLE_PANELS, DEFAULT_DISPLAY_SPLIT, DEFAULT_PRESENTATION_DISPLAY_SPLIT, DISPLAY_SPLIT_MIN, DISPLAY_SPLIT_MAX } from './utils/storage'
 import { triggerDownload, getBaseFileStem } from './utils/download'
 import { buildCommentExport, buildDocstringExport, replaceExistingDocstring, getDefinitionNote, getDefaultDefinitionNote, sanitizeNoteText } from './utils/export'
 import { loadMainThreadPyodide, resetMainThreadPyodide, PYGAME_MAIN_THREAD_BOOTSTRAP, TURTLE_CANVAS_BOOTSTRAP, TURTLE_SVG_BOOTSTRAP, SVG_TURTLE_WORKER_SETUP, STDCTX_MAIN_THREAD_BOOTSTRAP } from './utils/mainThread'
@@ -26,6 +26,12 @@ import {
   createFilesystem, deleteFilesystem, listFilesystems, importFileMapToFs, downloadEntryAsZip,
 } from './utils/virtualFS'
 import { buildVfsPreviewUrl, ensureVfsPreviewServiceWorker, isHtmlFile } from './utils/htmlPreview'
+import {
+  parseParsonsSource, shuffledArrangement, arrangementMatchesProblem,
+  solutionLines, assembleCode, gradeParsons,
+} from './utils/parsons'
+import type { ParsonsArrangement, ParsonsFeedback, ParsonsProblem } from './utils/parsons'
+import { ParsonsPane } from './components/ParsonsPane'
 import { FileSystemPanel } from './components/FileSystemPanel'
 import { BookPanel } from './components/BookPanel'
 import { TeacherToolsPanel } from './components/TeacherToolsPanel'
@@ -234,6 +240,11 @@ export default function App() {
   const captureRunRef = useRef(false)                          // a "capture test case" run is in progress
   const captureInputsRef = useRef<string[]>([])                // inputs consumed during a capture run
   const [testResult, setTestResult] = useState<OverallTestResult | null>(null)
+  // Parsons (drag-and-drop) activities: the parsed puzzle, where the student
+  // has put the fragments, and the last grading result.
+  const [parsonsProblem, setParsonsProblem] = useState<ParsonsProblem | null>(null)
+  const [parsonsArrangement, setParsonsArrangement] = useState<ParsonsArrangement | null>(null)
+  const [parsonsFeedback, setParsonsFeedback] = useState<ParsonsFeedback | null>(null)
   const [isTestRunning, setIsTestRunning] = useState(false)
   const [testRunnerStatus, setTestRunnerStatus] = useState('')
   const [challengeHiddenPaths, setChallengeHiddenPaths] = useState<string[]>([])
@@ -337,6 +348,9 @@ export default function App() {
   const testerWorkerRef = useRef<Worker | null>(null)
   const prewarmedTesterWorkerRef = useRef<Worker | null>(null)
   const activeBookChallengeRef = useRef<BookChallenge | null>(null)
+  // Where to persist the current Parsons arrangement. Held in a ref because it
+  // is set while entering an activity, before bookNavState has re-rendered.
+  const parsonsKeyRef = useRef<{ rootUrl: string; id: string } | null>(null)
   const challengeLoadIdRef = useRef(0)
   const sabRef = useRef<SabRef | null>(null)
   const canvasPaneRef = useRef<CanvasPaneHandle | null>(null)
@@ -551,9 +565,18 @@ export default function App() {
 
   // In edit mode the teacher can run tests against any challenge that has tests
   // (including examples); normally only non-example task challenges show Submit.
+  // A Parsons activity replaces the editor with the drag-and-drop pane. In book
+  // edit mode it falls back to plain Monaco so the teacher can author the source.
+  // Gated on the parsed puzzle, not just the challenge: activeBookChallenge
+  // outlives a walk back to the book contents, and the header must not keep
+  // calling itself a Parsons problem once the pane has gone.
+  const isParsonsChallenge = activeBookChallenge?.typ === 'parsons' && !isBookEditMode && parsonsProblem !== null
+
+  // A Parsons activity carries no `tests` — its grading is the widget itself —
+  // so it must still count as a task, or it could never be submitted or ticked.
   const isTaskChallenge = !!activeBookChallenge &&
     (isBookEditMode || !(activeBookChallenge.isExample === 'True' || activeBookChallenge.isExample === true)) &&
-    (activeBookChallenge.tests?.length ?? 0) > 0
+    ((activeBookChallenge.tests?.length ?? 0) > 0 || isParsonsChallenge)
 
   // ── Effects ──────────────────────────────────────────────────────────────
 
@@ -2052,6 +2075,13 @@ export default function App() {
       }
       setBookNavState(newState)
       persistBookNavState(newState)
+      // A different book is now open at its contents: the previous book's
+      // activity must not stay loaded behind it (a Parsons pane showing the
+      // last book's puzzle is the visible symptom).
+      setActiveBookChallenge(null)
+      activeBookChallengeRef.current = null
+      setTestResult(null)
+      clearParsonsChallenge()
       return true
     } catch (e) {
       setCodeStatus(`Failed to open book: ${e instanceof Error ? e.message : String(e)}`)
@@ -2152,10 +2182,40 @@ export default function App() {
     persistBookNavState(state)
     if (!state.activeChallengeId) {
       setChallengeHiddenPaths([])
+      clearParsonsChallenge()
       if (!clearEditorForSwitch()) return
       setActiveFilesystemId('default')
       setCurrentWorkingDir('/')
     }
+  }
+
+  // ── Parsons activities ────────────────────────────────────────────────────
+
+  // Every runtime path (trace worker, main-thread run, Submit, hasCode) reads
+  // codeText, so keeping codeText equal to the assembled arrangement is all it
+  // takes for Run / Debug / Trace to work on a Parsons puzzle unchanged.
+  const applyParsonsArrangement = (
+    problem: ParsonsProblem,
+    arrangement: ParsonsArrangement,
+    persist = true,
+  ) => {
+    setParsonsArrangement(arrangement)
+    setParsonsFeedback(null)
+    replaceProgrammaticEditorCode(assembleCode(problem, solutionLines(problem, arrangement)), false)
+    const key = parsonsKeyRef.current
+    if (persist && key) persistParsonsState(key.rootUrl, key.id, arrangement)
+  }
+
+  const handleParsonsShuffle = () => {
+    if (!parsonsProblem) return
+    applyParsonsArrangement(parsonsProblem, shuffledArrangement(parsonsProblem))
+  }
+
+  const clearParsonsChallenge = () => {
+    parsonsKeyRef.current = null
+    setParsonsProblem(null)
+    setParsonsArrangement(null)
+    setParsonsFeedback(null)
   }
 
   const handleEnterChallenge = async (bookUrl: string, rootBookUrl: string, challenge: BookChallenge, forceReset = false) => {
@@ -2174,6 +2234,9 @@ export default function App() {
       setActiveBookChallenge(challenge)
       activeBookChallengeRef.current = challenge
       setTestResult(null)
+      clearParsonsChallenge()
+      const isParsons = challenge.typ === 'parsons' && !isBookEditMode
+      if (isParsons && forceReset) clearParsonsState(rootBookUrl, challenge.id)
       const { fsId, pyFilename, hiddenPaths } = await getOrCreateChallengeFs(bookUrl, rootBookUrl, challenge, forceReset)
       if (loadId !== challengeLoadIdRef.current) return
       setActiveFilesystemId(fsId)
@@ -2185,7 +2248,22 @@ export default function App() {
         if (loadId !== challengeLoadIdRef.current) return
         if (entry?.content) {
           const text = new TextDecoder().decode(entry.content)
-          loadCodeText(text, entry.name, entry.path)
+          if (isParsons) {
+            // Deliberately no loadCodeText: openFilePath stays null so
+            // saveCurrentToVFS can never write the student's shuffled
+            // arrangement over the pristine model solution, which every
+            // re-entry re-parses the puzzle from.
+            const problem = parseParsonsSource(text)
+            const saved = getStoredParsonsState(rootBookUrl, challenge.id)
+            const arrangement = arrangementMatchesProblem(problem, saved)
+              ? saved
+              : shuffledArrangement(problem)
+            parsonsKeyRef.current = { rootUrl: rootBookUrl, id: challenge.id }
+            setParsonsProblem(problem)
+            applyParsonsArrangement(problem, arrangement, false)
+          } else {
+            loadCodeText(text, entry.name, entry.path)
+          }
         }
       }
     } catch (e) {
@@ -2210,6 +2288,8 @@ export default function App() {
       // student back into an activity they had just left.
       const open = activeBookChallengeRef.current
       const current = nav.activeChallengeId && open?.id === nav.activeChallengeId ? open : null
+      // Before re-entering, so the activity on screen reshuffles from scratch.
+      clearParsonsStateForBook(nav.rootUrl)
       if (current) await handleEnterChallenge(nav.currentBookUrl, nav.rootUrl, current, true)
       await deleteChallengeFilesystems(ids.filter(id => id !== current?.id))
       setVfsReloadTrigger(t => t + 1)
@@ -2276,6 +2356,7 @@ export default function App() {
     setActiveBookChallenge(null)
     activeBookChallengeRef.current = null
     setTestResult(null)
+    clearParsonsChallenge()
     if (!clearEditorForSwitch()) return
     setActiveFilesystemId('default')
     setCurrentWorkingDir('/')
@@ -2735,8 +2816,41 @@ export default function App() {
     } catch (e) { setCodeStatus(`Capture failed: ${e instanceof Error ? e.message : String(e)}`) }
   }
 
+  // A Parsons submission is graded in-process by the widget — no Pyodide, no
+  // tester worker. The detailed feedback lands in the pane; the results bar
+  // just reports pass/fail, so its Input/Expected table stays hidden.
+  const submitParsons = () => {
+    if (!parsonsProblem || !parsonsArrangement) return
+    const feedback = gradeParsons(parsonsProblem.solution, solutionLines(parsonsProblem, parsonsArrangement))
+    setParsonsFeedback(feedback)
+    setTestResult({
+      allPassed: feedback.success,
+      results: [{
+        caseIndex: 0,
+        passed: feedback.success,
+        reveal: false,
+        inputs: [],
+        out: '',
+        output: undefined,
+        error: feedback.success ? undefined : feedback.messages.join(' '),
+        reqResults: [],
+      }],
+    })
+    if (feedback.success && bookNavState && activeBookChallengeRef.current) {
+      if (isBookEditMode) {
+        const cid = activeBookChallengeRef.current.id
+        setTransientTicks(prev => { const n = new Set(prev); n.add(cid); return n })
+      } else {
+        persistCompletion(bookNavState.rootUrl, activeBookChallengeRef.current.id)
+        setCompletedChallenges(getStoredCompletions())
+      }
+    }
+  }
+
   const handleSubmit = async () => {
-    if (!activeBookChallenge?.tests?.length || isRunning || isTestRunning) return
+    if (isRunning || isTestRunning) return
+    if (isParsonsChallenge) { submitParsons(); return }
+    if (!activeBookChallenge?.tests?.length) return
     await saveCurrentToVFS()
     const vfsFiles = await getAllFiles(activeFilesystemId)
     const capturedCode = codeText
@@ -3939,7 +4053,7 @@ exec(code_obj, globals())
             <button
               type="button"
               onClick={() => void handleSubmit()}
-              disabled={isTestRunning || !hasCode}
+              disabled={isTestRunning || (!hasCode && !isParsonsChallenge)}
               title="Run all test cases"
               className="bg-amber-600 hover:bg-amber-500 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded font-semibold transition-colors flex items-center gap-1.5 text-sm"
             >
@@ -4324,12 +4438,16 @@ exec(code_obj, globals())
                         </button>
                       )}
                       {isUnsaved && <span className="inline-block w-2 h-2 rounded-full bg-amber-400 flex-shrink-0" title="Unsaved changes" />}
-                      Code Editor{openFilePath ? ` (${codeFileName})` : ''}
+                      {isParsonsChallenge ? 'Parsons Problem' : `Code Editor${openFilePath ? ` (${codeFileName})` : ''}`}
                     </div>
-                    <div className="normal-case tracking-normal text-[11px] text-slate-500 truncate">{codeStatus}</div>
+                    <div className="normal-case tracking-normal text-[11px] text-slate-500 truncate">
+                      {isParsonsChallenge
+                        ? 'Drag the fragments into order, then Submit'
+                        : codeStatus}
+                    </div>
                   </div>
                   <div className="flex items-center gap-2 flex-shrink-0">
-                    {/* Editor font size dropdown */}
+                    {/* Editor font size dropdown — also sizes Parsons fragments */}
                     <select
                       value={editorFontSize}
                       onChange={e => {
@@ -4344,6 +4462,7 @@ exec(code_obj, globals())
                         <option key={sz} value={sz}>{sz}px</option>
                       ))}
                     </select>
+                    {!isParsonsChallenge && (
                     <div ref={bpToolMenuRef} className="relative">
                       <button
                         type="button"
@@ -4380,11 +4499,14 @@ exec(code_obj, globals())
                         </div>
                       )}
                     </div>
+                    )}
+                    {!isParsonsChallenge && (
                     <IconButton title="Save to virtual filesystem" onClick={() => void handleSaveCode()} disabled={!hasCode || isRunning}>
                       <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2zM17 21v-8H7v8M7 3v5h8" />
                       </svg>
                     </IconButton>
+                    )}
                   </div>
                 </div>
                 {/* Starter / Solution tabs (book edit mode) */}
@@ -4440,7 +4562,24 @@ exec(code_obj, globals())
                     readOnly: isRunning,
                   }}
                 />
-                {openFilePath === null && (
+                {/* A Parsons activity replaces the editor. Monaco stays mounted
+                    underneath for the same dispose-churn reason as above. */}
+                {isParsonsChallenge && parsonsProblem && parsonsArrangement && (
+                  <div className="absolute inset-0 z-20">
+                    <ParsonsPane
+                      problem={parsonsProblem}
+                      arrangement={parsonsArrangement}
+                      onChange={next => applyParsonsArrangement(parsonsProblem, next)}
+                      feedback={parsonsFeedback}
+                      onShuffle={handleParsonsShuffle}
+                      highlightPython={(activeBookChallenge?.py ?? '').toLowerCase().endsWith('.py')}
+                      fontSize={editorFontSize}
+                      theme={theme === 'light' ? 'light' : 'dark'}
+                      disabled={isRunning}
+                    />
+                  </div>
+                )}
+                {openFilePath === null && !isParsonsChallenge && (
                   <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-slate-500 bg-slate-950 z-20">
                     <svg className="w-10 h-10 text-slate-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />

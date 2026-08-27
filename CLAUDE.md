@@ -196,6 +196,59 @@ These are set in:
   filesystem at its declared name (`/fp_utils.py`), because the exercise does a
   plain `import fp_utils`.
 
+### Parsons problems (drag-and-drop activities)
+
+- A challenge with `"typ": "parsons"` is a **Parsons problem**: its `py` file is
+  the *answer*, split into fragments, shuffled, and reassembled by dragging.
+  The authoring contract is inherited verbatim from Python Sponge so existing
+  books keep working — a line ending `#distractor` is a wrong fragment, an
+  optional single `# start` … `# end` region fences the draggable body (the rest
+  becomes fixed header/footer code), a two-character backslash-n escape inside a
+  line makes one multi-line fragment, and blank lines are dropped. Parsons
+  activities carry **no `tests`**.
+- The logic is a native port of js-parsons in `utils/parsons.ts` (parsing,
+  distractors, indent normalisation, an LIS-based line grader, code assembly);
+  `components/ParsonsPane.tsx` is the UI. Nothing from `oldpythongsponge/` runs —
+  no jQuery, no jQuery-UI, no prettify. Fragments are syntax-highlighted with
+  `monaco.editor.colorize` (Monaco is already loaded, so they match the editor in
+  both themes); `colorize` appends a trailing `<br>` that has to be stripped.
+  Highlighting is skipped unless `py` ends `.py` — tutorial 4's Parsons files
+  are maths proofs in `.md`/`.txt`.
+- **`codeText` stays the source of truth.** Every arrangement change reassembles
+  the program and pushes it through `replaceProgrammaticEditorCode`, so Run,
+  Debug, Trace and the runtime switches all work on a Parsons puzzle without a
+  single branch of their own.
+- **`openFilePath` deliberately stays null.** `handleEnterChallenge` skips
+  `loadCodeText` for a Parsons activity, which makes `saveCurrentToVFS` a no-op
+  (`App.tsx`), so a shuffled arrangement can never overwrite the pristine model
+  solution — every re-entry re-parses the puzzle from it. The `py` file is also
+  added to the challenge filesystem's `hiddenPaths` (`parsonsHiddenPaths` in
+  `utils/bookLoader.ts`); it must stay *in* the filesystem, just out of the
+  file browser, or the student is looking at the answer in order.
+- **Indentation is auto-disabled** when no model line is indented (`canIndent`).
+  Tutorial 4's proofs indent with U+2800 BRAILLE PATTERN BLANK, which is not
+  `\s`, so every line normalises to level 0; offering indentation there would
+  let the student only lose. Student indents are re-normalised before grading,
+  so an over-indented but structurally correct answer still passes.
+- Submit has no tester worker: `submitParsons` grades in-process and writes a
+  single synthetic `TestCaseResult` with `reveal: false`, so `TestResultsBar`
+  shows only pass/fail and hides its Input/Expected table — the real feedback
+  (message list plus per-fragment highlighting) lives in the pane. Completion
+  ticks go through the same `persistCompletion` path as tested challenges, which
+  is why `isTaskChallenge` has to accept a challenge with no `tests`.
+- The student's arrangement persists (`pythoncoder-parsons-state` in
+  `utils/storage.ts`, keyed `${rootUrl}::${challengeId}` exactly like
+  completions). A saved arrangement is discarded unless its fragment ids still
+  match the freshly parsed pool, so editing the source file cannot strand a
+  student. **Reset challenge** and **Reset book** clear it; opening a different
+  book clears the active challenge so its puzzle does not linger.
+- `isParsonsChallenge` is gated on the *parsed problem*, not just on
+  `activeBookChallenge.typ` — `activeBookChallenge` outlives a walk back to the
+  book contents, and the panel header must not keep claiming a Parsons problem
+  once the pane has gone.
+- In **book edit mode** a Parsons node falls back to the plain Monaco editor so
+  the teacher can author the source.
+
 ### Turning the page stops the run
 
 - Every book navigation (`handleBookNavStateChange`, `handleEnterChallenge`,
