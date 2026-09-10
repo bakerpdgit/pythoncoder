@@ -1,13 +1,14 @@
 import { useState } from 'react'
+import { SimpleBookCheckbox } from './SimpleBookOption'
 import { GitHubBookWizard } from './GitHubBookWizard'
 import { GoogleDriveWizard } from './GoogleDriveWizard'
 import { PublicUrlWizard } from './PublicUrlWizard'
 
 interface Props {
   onClose: () => void
-  onOpenLocalZip: () => void
-  onConnectFolder: () => void
-  onOpenResourceUrl: (url: string) => void
+  onOpenLocalZip: (opts?: { simple?: boolean }) => void
+  onConnectFolder: (opts?: { simple?: boolean }) => void
+  onOpenResourceUrl: (url: string, opts?: { simple?: boolean }) => void
 }
 
 type View = 'hub' | 'web' | 'github' | 'drive' | 'other'
@@ -17,8 +18,9 @@ type View = 'hub' | 'web' | 'github' | 'drive' | 'other'
 // public URL). The web choices open per-source wizards (Part 4).
 export function OpenResourceDialog({ onClose, onOpenLocalZip, onConnectFolder, onOpenResourceUrl }: Props) {
   const [view, setView] = useState<View>('hub')
+  const [simpleLocal, setSimpleLocal] = useState(false)
 
-  const open = (url: string) => { onOpenResourceUrl(url); onClose() }
+  const open = (url: string, opts?: { simple?: boolean }) => { onOpenResourceUrl(url, opts); onClose() }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70" onClick={onClose}>
@@ -32,12 +34,16 @@ export function OpenResourceDialog({ onClose, onOpenLocalZip, onConnectFolder, o
                 title="Open a local ZIP file"
                 desc="Import a ZIP from your computer as a filesystem or a learning book."
                 icon={<path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8l1 12a2 2 0 002 2h8a2 2 0 002-2l1-12M10 12h4" />}
-                onClick={() => { onOpenLocalZip(); onClose() }} />
+                onClick={() => { onOpenLocalZip({ simple: simpleLocal }); onClose() }} />
               <BigButton
                 title="Connect a local folder"
                 desc="Two-way sync with a folder on your disk, or open a learning book from it."
                 icon={<path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2zM12 11v6m-3-3l3 3 3-3" />}
-                onClick={() => { onConnectFolder(); onClose() }} />
+                onClick={() => { onConnectFolder({ simple: simpleLocal }); onClose() }} />
+              {/* Attached to the two choices above: the web wizards carry their
+                  own copy of this option. */}
+              <SimpleBookCheckbox checked={simpleLocal} onChange={setSimpleLocal} />
+              <div className="border-t border-slate-700 mt-1" />
               <BigButton
                 title="Open from the web"
                 desc="Load a learning book from GitHub, Google Drive, or any public URL."
@@ -59,7 +65,7 @@ export function OpenResourceDialog({ onClose, onOpenLocalZip, onConnectFolder, o
             <p className="text-slate-400 mb-3 leading-relaxed">Where is the learning book hosted?</p>
             <div className="flex flex-col gap-2">
               <BigButton title="GitHub public repo"
-                desc="Book ZIP or book.json. Fetched directly from GitHub — no caching delay."
+                desc="Browse a repository for its book.json or ZIP — or use a folder of .py files as a simple book."
                 icon={<path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 20l4-16M6 16l-4-4 4-4M18 8l4 4-4 4" />}
                 onClick={() => setView('github')} />
               <BigButton title="Google Drive share link"

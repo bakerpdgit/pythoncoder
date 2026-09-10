@@ -6,6 +6,12 @@ html[data-theme="light"] .trace-table-teaching-note {
   color: #92400e;
 }
 
+/* Amber advice in the open-a-source and student-link dialogs. Amber-300 is
+   pitched for the dark surface and washes out on the light one. */
+html[data-theme="light"] .dialog-warning-text {
+  color: #b45309;
+}
+
 html[data-theme="light"] .trace-table-output-cell {
   color: #92400e;
 }

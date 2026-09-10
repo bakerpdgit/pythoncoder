@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { getRunModeFromSearch, getShowFirstFromSearch } from './urlRunMode'
+import { getRunModeFromSearch, getShowFirstFromSearch, getSimpleBookFromSearch } from './urlRunMode'
 
 describe('URL run mode', () => {
   it('selects Trace case-insensitively', () => {
@@ -40,5 +40,22 @@ describe('URL first learning-book example', () => {
     expect(getShowFirstFromSearch('?mode=Trace')).toBe(false)
     expect(getShowFirstFromSearch('?showFirst=false')).toBe(false)
     expect(getShowFirstFromSearch('?showFirst=0')).toBe(false)
+  })
+})
+
+describe('getSimpleBookFromSearch', () => {
+  it('is off unless the link says otherwise', () => {
+    expect(getSimpleBookFromSearch('?book=https%3A%2F%2Fexample.com%2Fbook.json')).toBe(false)
+  })
+
+  it('accepts a bare flag and the usual truthy spellings', () => {
+    for (const search of ['?simple', '?simple=1', '?simple=true', '?simple=YES']) {
+      expect(getSimpleBookFromSearch(search)).toBe(true)
+    }
+  })
+
+  it('rejects anything else, so a typo does not silently change how a book is read', () => {
+    expect(getSimpleBookFromSearch('?simple=0')).toBe(false)
+    expect(getSimpleBookFromSearch('?simple=no')).toBe(false)
   })
 })

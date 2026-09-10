@@ -250,8 +250,15 @@ export interface BookRef {
 }
 
 export interface BookAdditionalFile {
+  /** The path the exercise sees, inside its own challenge filesystem. */
   filename: string
   visible: boolean
+  /**
+   * Where to fetch it from, when the book stores it under a different name.
+   * A simple learning book names a shared file `challenge01_data.txt` so the
+   * flat folder can tell whose it is, and mounts it as plain `data.txt`.
+   */
+  source?: string
 }
 
 export interface BookTestOutputReq {

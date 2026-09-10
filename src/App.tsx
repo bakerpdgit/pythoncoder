@@ -94,7 +94,8 @@ import { stopAndAwaitRuntimeRelease } from './utils/runtimeRelease'
 import {
   beginTraceInputTabHandoff, completeTraceInputTabHandoff, type ConsolePanelTab,
 } from './utils/traceInputTab'
-import { getRunModeFromSearch, getShowFirstFromSearch, type WorkerRunMode } from './utils/urlRunMode'
+import { invalidateSimpleBook, isSimpleBookUrl, simpleBookRootUrl } from './utils/simpleBook'
+import { getRunModeFromSearch, getShowFirstFromSearch, getSimpleBookFromSearch, type WorkerRunMode } from './utils/urlRunMode'
 import { useDialogs } from './components/dialogs/DialogProvider'
 import {
   readDirectoryToMap, writeFileToFolderHandle, mkdirInFolderHandle,
@@ -643,7 +644,9 @@ export default function App() {
       const bookParam = params.get('book')
       if (bookParam) {
         try {
-          const openedBookUrl = await openResourceUrl(decodeURIComponent(bookParam))
+          const openedBookUrl = await openResourceUrl(decodeURIComponent(bookParam), {
+            simple: getSimpleBookFromSearch(window.location.search),
+          })
           // `?challenge=` names one activity (or section) inside the book and
           // supersedes `?showFirst`.
           const targetId = params.get('challenge')?.trim()
@@ -2130,12 +2133,23 @@ export default function App() {
   // wizards and the ?book= querystring. A book.json URL opens directly as a book; any
   // other URL is fetched as a ZIP and opened as a book (if it contains book.json) or a
   // plain filesystem otherwise.
-  const openResourceUrl = async (rawUrl: string): Promise<string | null> => {
+  const openResourceUrl = async (rawUrl: string, opts: { simple?: boolean } = {}): Promise<string | null> => {
     if (!canSwitchCodeSource()) return null
     const url = rawUrl.trim()
     if (!url) return null
     hideTeacherToolsPanel()
     try {
+      // A simple learning book has no manifest to fetch: the folder, repo or ZIP
+      // *is* the book, read straight from its own address so a student's ticks
+      // stay keyed to it.
+      if (opts.simple) {
+        const rootUrl = simpleBookRootUrl(url)
+        // Opening is the teacher's cue that the folder may have changed.
+        invalidateSimpleBook(rootUrl)
+        const opened = await handleBookOpen(rootUrl)
+        if (opened) revealFilesystemPanel()
+        return opened ? rootUrl : null
+      }
       if (isBookUrl(url)) {
         const opened = await handleBookOpen(url)
         revealFilesystemPanel()
@@ -2253,6 +2267,10 @@ export default function App() {
 
   const handleEnterChallenge = async (bookUrl: string, rootBookUrl: string, challenge: BookChallenge, forceReset = false) => {
     const loadId = ++challengeLoadIdRef.current
+    // Resetting an activity means "give me the teacher's file again", so a
+    // simple book's cached folder listing must not answer from the copy it read
+    // when the book was opened.
+    if (forceReset && isSimpleBookUrl(rootBookUrl)) invalidateSimpleBook(rootBookUrl)
     // Stop first: the run being stopped belongs to the activity we are leaving,
     // and saving it back below must not race the runtime's own file sync.
     if (!(await stopRunBeforeNavigating())) return
@@ -2315,6 +2333,7 @@ export default function App() {
     const nav = bookNavState
     if (!nav) return
     try {
+      if (isSimpleBookUrl(nav.rootUrl)) invalidateSimpleBook(nav.rootUrl)
       const ids = await collectBookChallengeIds(nav.rootUrl)
       // Only the activity actually on screen is re-entered. The ref outlives a
       // walk back to the contents, so going by the ref alone would drag the
@@ -2989,8 +3008,13 @@ export default function App() {
     }
   }
 
-  const importLocalFiles = async (fileMap: Map<string, ArrayBuffer>, sourceName: string) => {
-    if (!canSwitchCodeSource()) return
+  /**
+   * Import a folder or ZIP from disk. Returns the filesystem it landed in, or
+   * null when it was a full learning book (opened straight away) or the import
+   * was declined — so a caller can go on to read it as a simple learning book.
+   */
+  const importLocalFiles = async (fileMap: Map<string, ArrayBuffer>, sourceName: string): Promise<string | null> => {
+    if (!canSwitchCodeSource()) return null
     hideTeacherToolsPanel()
     const bookJsonBuf = fileMap.get('book.json')
     if (bookJsonBuf) {
@@ -3001,6 +3025,7 @@ export default function App() {
       const { id: stagingFsId } = await createFilesystem(stagingName)
       await importFileMapToFs(stagingFsId, fileMap, true)
       await handleBookOpen(`vfs://fs:${stagingFsId}/book.json`)
+      return null
     } else {
       const fsList = await listFilesystems()
       const existing = fsList.find(f => f.name === sourceName)
@@ -3016,7 +3041,7 @@ export default function App() {
             { label: 'Cancel', value: 'cancel', tone: 'neutral' },
           ],
         })
-        if (choice === 'cancel' || choice === null) return
+        if (choice === 'cancel' || choice === null) return null
         if (choice === 'reset') {
           await deleteFilesystem(existing.id)
           const { id } = await createFilesystem(sourceName)
@@ -3034,39 +3059,52 @@ export default function App() {
       localFolderHandleRef.current = null
       setLocalFolderFsId(null)
       setVfsReloadTrigger(t => t + 1)
-      if (!clearEditorForSwitch()) return
+      if (!clearEditorForSwitch()) return null
       setActiveFilesystemId(fsId)
       setCurrentWorkingDir('/')
       revealFilesystemPanel()
       await autoOpenMainPy(fsId)
+      return fsId
     }
   }
 
-  const handleLocalFileImport = async (fileMap: Map<string, ArrayBuffer>, sourceName: string) => {
+  /**
+   * Read a filesystem that has just been imported from disk as a simple
+   * learning book — a flat folder of `.py` exercises with no `book.json`. Useful
+   * for checking a folder reads correctly before publishing it and handing out
+   * the link.
+   */
+  const openSimpleBookFromFilesystem = async (fsId: string) => {
+    const rootUrl = simpleBookRootUrl(`vfs://fs:${fsId}`)
+    invalidateSimpleBook(rootUrl)
+    await handleBookOpen(rootUrl)
+  }
+
+  const handleLocalFileImport = async (
+    fileMap: Map<string, ArrayBuffer>, sourceName: string, opts: { simple?: boolean } = {},
+  ) => {
     if (!canSwitchCodeSource()) return
-    try { await importLocalFiles(fileMap, sourceName) }
+    try {
+      const fsId = await importLocalFiles(fileMap, sourceName)
+      if (opts.simple && fsId) await openSimpleBookFromFilesystem(fsId)
+    }
     catch (e) { setCodeStatus(`Import failed: ${e instanceof Error ? e.message : String(e)}`) }
   }
 
-  const handleFolderConnect = async (handle: FileSystemDirectoryHandle) => {
+  const handleFolderConnect = async (handle: FileSystemDirectoryHandle, opts: { simple?: boolean } = {}) => {
     try {
       const perm = await handle.requestPermission({ mode: 'readwrite' })
       if (perm !== 'granted') { setCodeStatus('Folder permission denied.'); return }
       const fileMap = await readDirectoryToMap(handle)
-      const bookJsonBuf = fileMap.get('book.json')
-      if (bookJsonBuf) {
-        await importLocalFiles(fileMap, handle.name)
-      } else {
-        await importLocalFiles(fileMap, handle.name)
-        const fsList = await listFilesystems()
-        const fs = fsList.find(f => f.name === handle.name)
-        if (fs) {
-          localFolderHandleRef.current = handle
-          setLocalFolderFsId(fs.id)
-          setDiskDeleteWarnDismissed(false)
-          setCodeStatus(`Connected to local folder "${handle.name}" — changes now save back to disk.`)
-        }
-      }
+      const fsId = await importLocalFiles(fileMap, handle.name)
+      // A book.json import has opened the book itself and left no plain
+      // filesystem to keep in sync with the folder.
+      if (!fsId) return
+      localFolderHandleRef.current = handle
+      setLocalFolderFsId(fsId)
+      setDiskDeleteWarnDismissed(false)
+      setCodeStatus(`Connected to local folder "${handle.name}" — changes now save back to disk.`)
+      if (opts.simple) await openSimpleBookFromFilesystem(fsId)
     } catch (e) { setCodeStatus(`Folder connect failed: ${e instanceof Error ? e.message : String(e)}`) }
   }
 
@@ -4303,7 +4341,7 @@ exec(code_obj, globals())
                             isChallengeMode={!!bookNavState?.activeChallengeId}
                             isBookOpen={!!bookNavState}
                             onCloseBook={handleCloseBook}
-                            onOpenResourceUrl={url => void openResourceUrl(url)}
+                            onOpenResourceUrl={(url, opts) => void openResourceUrl(url, opts)}
                             onFilesystemChange={id => void handleFilesystemChange(id)}
                             onFilesystemForcedChange={handleFilesystemForcedChange}
                             onFilesystemCreated={id => void handleFilesystemCreated(id)}
@@ -4312,8 +4350,8 @@ exec(code_obj, globals())
                             onPreviewHtml={entry => void handlePreviewHtml(entry)}
                             onError={msg => setCodeStatus(msg)}
                             onBookOpen={url => void handleBookOpen(url)}
-                            onLocalFileImport={(m, n) => handleLocalFileImport(m, n)}
-                            onFolderConnect={h => handleFolderConnect(h)}
+                            onLocalFileImport={(m, n, o) => handleLocalFileImport(m, n, o)}
+                            onFolderConnect={(h, o) => handleFolderConnect(h, o)}
                             isLocalFolderConnected={localFolderFsId === activeFilesystemId}
                             onLocalFolderSync={op => syncToLocalFolder(op)}
                             onReloadFolder={() => void handleReloadFolder()}
