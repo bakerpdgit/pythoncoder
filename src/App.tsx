@@ -89,6 +89,7 @@ import { normalizeTestInputs } from './utils/testInputs'
 import { startVersionPolling } from './utils/versionCheck'
 import { githubRepositoryBookUrl } from './utils/bookSource'
 import { isRuntimeSourceLocked, RuntimeStartGuard } from './utils/runtimeStartGuard'
+import { PYODIDE_RUNTIME_RESET_CODE } from './utils/pyodideReset'
 import { stopAndAwaitRuntimeRelease } from './utils/runtimeRelease'
 import {
   beginTraceInputTabHandoff, completeTraceInputTabHandoff, type ConsolePanelTab,
@@ -201,7 +202,6 @@ export default function App() {
   // Latched once a pygame/turtle-canvas run has started, so the final frame stays
   // on screen after the run ends (mirrors hasCanvasOutput for stdctx).
   const [hasMainThreadCanvasOutput, setHasMainThreadCanvasOutput] = useState(false)
-  const [pendingRestore, setPendingRestore] = useState<(() => void) | null>(null)
   const [turtleSvg, setTurtleSvg] = useState('')
   const [turtleSvgHistory, setTurtleSvgHistory] = useState<string[]>([])
   const [turtleScrubStep, setTurtleScrubStep] = useState(0)
@@ -318,10 +318,16 @@ export default function App() {
   const isRunningRef = useRef(isRunning)
   isRunningRef.current = isRunning
   // Read after an `await`, where the render closure's copies would be stale.
-  const pendingRestoreRef = useRef(pendingRestore)
-  pendingRestoreRef.current = pendingRestore
   const isConsolePresentationModeRef = useRef(isConsolePresentationMode)
   isConsolePresentationModeRef.current = isConsolePresentationMode
+  // The layout a run hands back at the end. A run now restores it the moment it
+  // finishes, so the next run can begin before React has re-rendered with the
+  // restored panels — snapshot from these, never from the render closure, or it
+  // would capture the presentation layout and never let go of the screen.
+  const visiblePanelsRef = useRef(visiblePanels)
+  visiblePanelsRef.current = visiblePanels
+  const leftWidthRef = useRef(leftWidth)
+  leftWidthRef.current = leftWidth
   // Assigned below, once the derived flag exists — the splitter's mousemove
   // listener is installed once and would otherwise read a stale closure.
   const isRunPresentationModeRef = useRef(false)
@@ -427,9 +433,17 @@ export default function App() {
   const turtleSvgHistoryRef = useRef<string[]>([])
   const turtleScrubLockedRef = useRef(false)
 
-  const prepareTraceWorker = () => {
-    if (!hasSab || workerRef.current || prewarmedTraceWorkerRef.current) return
-    const worker = new TracerWorker()
+  /**
+   * Park a worker whose Pyodide is loaded and idle, ready for the next run.
+   *
+   * Both a freshly warmed worker and one recycled after a clean run land here,
+   * which is what keeps Pyodide out of the critical path of Debug/Trace/Run:
+   * the runtime is compiled at most once per session rather than once per run.
+   * Returns false when a worker is already parked, leaving the caller to
+   * dispose of the surplus one.
+   */
+  const holdIdleTraceWorker = (worker: Worker): boolean => {
+    if (prewarmedTraceWorkerRef.current) return false
     prewarmedTraceWorkerRef.current = worker
     const discardWarmWorker = () => {
       if (prewarmedTraceWorkerRef.current !== worker) return
@@ -440,6 +454,13 @@ export default function App() {
       if (event.data?.type === 'warm-error') discardWarmWorker()
     }
     worker.onerror = discardWarmWorker
+    return true
+  }
+
+  const prepareTraceWorker = () => {
+    if (!hasSab || workerRef.current || prewarmedTraceWorkerRef.current) return
+    const worker = new TracerWorker()
+    if (!holdIdleTraceWorker(worker)) { worker.terminate(); return }
     worker.postMessage({ type: 'prewarm' })
   }
 
@@ -1802,7 +1823,7 @@ export default function App() {
    */
   const enterRunPresentationMode = (kind: 'pygame' | 'turtle-canvas' | 'turtle-svg' | 'console') => {
     if (!runLayoutSnapshotRef.current) {
-      runLayoutSnapshotRef.current = { visiblePanels: { ...visiblePanels }, leftWidth }
+      runLayoutSnapshotRef.current = { visiblePanels: { ...visiblePanelsRef.current }, leftWidth: leftWidthRef.current }
     }
     setShowExportDialog(false)
     setVisiblePanels({ code: false, visualizer: false, diagram: false, notes: false, output: true, filesystem: false, teacherTools: false })
@@ -1812,6 +1833,19 @@ export default function App() {
     else setIsConsolePresentationMode(true)
   }
 
+  /**
+   * Give the screen back at the end of a run.
+   *
+   * The layout goes straight back to whatever the student had before they
+   * pressed Run — there is no "Return to editor" step to notice or miss, which
+   * is what made the old bar unreliable for pygame and turtle programs, whose
+   * run can end in half a dozen different places.
+   *
+   * The Console Output panel is forced back on either way: it hosts the Display
+   * pane, so a pygame window, a turtle drawing or a stdctx canvas would vanish
+   * with the program that drew it if the pre-run layout happened to have the
+   * panel hidden. Safe to call at any ending, snapshot or not.
+   */
   const restoreRunPresentationMode = () => {
     setIsPygameRunActive(false)
     setIsTurtleCanvasRunActive(false)
@@ -1819,8 +1853,11 @@ export default function App() {
     setIsConsolePresentationMode(false)
     const snapshot = runLayoutSnapshotRef.current
     runLayoutSnapshotRef.current = null
-    if (!snapshot) return
-    setVisiblePanels(snapshot.visiblePanels)
+    if (!snapshot) {
+      setVisiblePanels(p => (p.output ? p : { ...p, output: true }))
+      return
+    }
+    setVisiblePanels({ ...snapshot.visiblePanels, output: true })
     setLeftWidth(snapshot.leftWidth)
   }
 
@@ -2157,13 +2194,9 @@ export default function App() {
       setCodeStatus('Stop the running program before changing code or switching files.')
       return false
     }
-    const restore = pendingRestoreRef.current
-    if (restore) {
-      restore()
-      setPendingRestore(null)
-    } else if (isRunPresentationModeRef.current) {
-      restoreRunPresentationMode()
-    }
+    // A run that ended normally has already restored the layout itself; this
+    // covers navigating away from one that was still on screen.
+    if (isRunPresentationModeRef.current) restoreRunPresentationMode()
     return true
   }
 
@@ -3037,6 +3070,15 @@ export default function App() {
     } catch (e) { setCodeStatus(`Folder connect failed: ${e instanceof Error ? e.message : String(e)}`) }
   }
 
+  /**
+   * The one full teardown of both runtimes.
+   *
+   * Everywhere else Pyodide is deliberately kept alive — the main thread caches
+   * it and the trace worker is recycled after a clean run — so this is what a
+   * student reaches for when the environment itself looks wrong. It has to
+   * throw away the parked worker *and* any worker mid-run, or the next Debug
+   * would just pick the same runtime back up.
+   */
   const handlePyodideReset = () => {
     traceWorkerStartGuardRef.current.cancel()
     if (isRunning && activeRuntime === 'main-thread') {
@@ -3046,6 +3088,18 @@ export default function App() {
       setActiveRuntime('')
     }
     resetMainThreadPyodide()
+    if (workerRef.current) {
+      workerRef.current.terminate()
+      workerRef.current = null
+      sabRef.current = null
+      stdctxKeyBufferRef.current = null
+      setIsRunning(false)
+      setActiveRuntime('')
+      setInputRequest(null)
+      setInputValue('')
+      workerRunModeRef.current = 'debug'
+      workerStartModeRef.current = 'debug'
+    }
     prewarmedTraceWorkerRef.current?.terminate()
     prewarmedTraceWorkerRef.current = null
     if (selectedRuntime === 'trace-worker') prepareTraceWorker()
@@ -3074,8 +3128,6 @@ export default function App() {
       returnToTraceTableAfterInputRef.current = false
       // Auto-refocus the Console when a run starts from the Tests tab.
       if (consoleTab === 'tests') setConsoleTab('console')
-      if (pendingRestore) pendingRestore()
-      setPendingRestore(null)
       fixedInputsQueueRef.current = appSettings.useFixedInputs
         ? fixedInputsText.split('\n').filter(l => l.length > 0)
         : []
@@ -3179,15 +3231,26 @@ export default function App() {
       return
     }
 
-    const releaseWorker = () => {
+    /**
+     * Let go of the worker at the end of a run.
+     *
+     * `recycle` keeps it (and its compiled Pyodide) for the next run — only
+     * safe once the worker has posted a terminal `done`/`error`, which proves
+     * its Python has unwound and it is back in its own event loop, ready to
+     * clear the run's state on the next `init`. Every other ending — a forced
+     * stop, a wedged or errored worker, a trace that hit the event limit and
+     * deliberately parked itself in Atomics.wait — must terminate instead.
+     */
+    const releaseWorker = (recycle = false) => {
       traceWorkerStartGuardRef.current.cancel()
       if (traceStopTimeoutRef.current !== null) window.clearTimeout(traceStopTimeoutRef.current)
       traceStopTimeoutRef.current = null
       traceStopAckHandlerRef.current = null
-      worker.terminate()
       if (workerRef.current === worker) workerRef.current = null
       sabRef.current = null
       stdctxKeyBufferRef.current = null
+      if (recycle && holdIdleTraceWorker(worker)) return
+      worker.terminate()
       window.setTimeout(prepareTraceWorker, 0)
     }
 
@@ -3292,12 +3355,11 @@ export default function App() {
           finishTraceSession('error', String(data.error))
         }
         setCodeStatus('Worker runtime failed.')
-        if (workerStartModeRef.current === 'run') {
-          setPendingRestore(() => restoreRunPresentationMode)
-        }
+        restoreRunPresentationMode()
         workerRunModeRef.current = 'debug'
         workerStartModeRef.current = 'debug'
-        releaseWorker()
+        // A reported Python error still means the worker unwound cleanly.
+        releaseWorker(true)
       } else if (data.type === 'done') {
         if (data.files?.length) {
           void syncFilesFromPyodide(capturedFsId, data.files).then(() => setVfsReloadTrigger(t => t + 1))
@@ -3335,12 +3397,12 @@ export default function App() {
           traceLimitReached ? `Trace event limit of ${traceSessionRef.current?.retention?.eventLimit.toLocaleString() ?? TRACE_TABLE_EVENT_LIMIT.toLocaleString()} reached; execution stopped.` :
           'Trace runtime finished.'
         )
-        if (wasRunMode) {
-          setPendingRestore(() => restoreRunPresentationMode)
-        }
+        restoreRunPresentationMode()
         workerRunModeRef.current = 'debug'
         workerStartModeRef.current = 'debug'
-        releaseWorker()
+        // A trace that hit the event limit parks itself in Atomics.wait after
+        // posting this, so that worker can never be reused.
+        releaseWorker(!data.traceTableLimitReached)
       } else if (data.type === 'turtle_update') {
         const svg = data.svg || ''
         setTurtleSvg(svg)
@@ -3396,8 +3458,6 @@ export default function App() {
 
   const startMainThreadRun = async () => {
     if (!hasCode) return
-    if (pendingRestore) pendingRestore()
-    setPendingRestore(null)
     await saveCurrentToVFS()
     const vfsFiles = await getAllFiles(activeFilesystemId)
     const capturedFsId = activeFilesystemId
@@ -3450,6 +3510,9 @@ export default function App() {
       if (pyodide._api) pyodide._api._skip_unwind_fatal_error = true
 
       cleanFilesFromPyodide(pyodide, mainThreadMountedPathsRef.current)
+      // This Pyodide is cached across runs, so the last run's imported modules
+      // would otherwise be served back out of sys.modules after an edit.
+      try { await pyodide.runPythonAsync(PYODIDE_RUNTIME_RESET_CODE) } catch { /* best effort */ }
       mountFilesToPyodide(pyodide, vfsFiles, capturedCwd)
       mainThreadMountedPathsRef.current = vfsFiles.map(f => f.path)
 
@@ -3588,10 +3651,9 @@ exec(code_obj, globals())
     } finally {
       mainThreadStopRequestedRef.current = false
       stopMainThreadCanvasWatcher({ restoreSnapshot: shouldRunPygame || shouldRunTurtleCanvas })
-      if (!mainThreadAbandonedRef.current) {
-        const restore = restoreRunPresentationMode
-        setPendingRestore(() => restore)
-      }
+      // An abandoned run has already been superseded (a Reset, a forced stop,
+      // or a newer run) — whoever abandoned it owns the layout.
+      if (!mainThreadAbandonedRef.current) restoreRunPresentationMode()
       mainThreadAbandonedRef.current = false
     }
   }
@@ -3677,9 +3739,7 @@ exec(code_obj, globals())
       }
       workerRef.current.terminate(); workerRef.current = null; sabRef.current = null
       setCodeStatus('Worker runtime stopped.')
-      if (workerStartModeRef.current === 'run') {
-        setPendingRestore(() => restoreRunPresentationMode)
-      }
+      restoreRunPresentationMode()
       workerRunModeRef.current = 'debug'
       workerStartModeRef.current = 'debug'
       window.setTimeout(prepareTraceWorker, 0)
@@ -3696,7 +3756,7 @@ exec(code_obj, globals())
       setActiveRuntime('')
       setMainThreadStatus('Main-thread run stopped.')
       appendOutput('\n[INFO] Main-thread run stopped.')
-      if (runLayoutSnapshotRef.current) setPendingRestore(() => restoreRunPresentationMode)
+      restoreRunPresentationMode()
       return
     }
     setIsRunning(false); setActiveRuntime(''); setCurrentLine(-1); setCurrentFunc(''); setCurrentClass('')
@@ -4160,18 +4220,6 @@ exec(code_obj, globals())
           </div>
         </div>
       </dialog>
-
-      {/* Post-run return bar */}
-      {(pendingRestore || (isRunPresentationMode && !isRunning)) && (
-        <div
-          className="flex-shrink-0 flex items-center justify-between border-b border-emerald-600/50 bg-emerald-900/30 px-5 py-2.5 cursor-pointer hover:bg-emerald-900/50 transition-colors"
-          onClick={() => { if (pendingRestore) { pendingRestore(); setPendingRestore(null) } else { restoreRunPresentationMode() } }}
-          role="button"
-        >
-          <span className="text-sm text-emerald-100">Execution ended — click here to return to the editor.</span>
-          <span className="flex-shrink-0 rounded border border-emerald-600/60 px-3 py-0.5 text-xs font-semibold text-emerald-300">Return to editor</span>
-        </div>
-      )}
 
       {/* Main Layout */}
       <div ref={mainContainerRef} className="flex-1 flex overflow-hidden p-2 gap-[3px]">

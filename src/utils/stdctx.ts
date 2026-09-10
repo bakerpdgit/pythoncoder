@@ -362,6 +362,12 @@ _coder_stdctx.reset()
 export const STDCTX_WORKER_BOOTSTRAP = STDCTX_CLASS + String.raw`
 import time as _ctx_time
 
+# The trace worker is recycled between runs, so stash the real sleep the first
+# time it is patched — PYODIDE_RUNTIME_RESET_CODE puts it back before a run that
+# does not use stdctx.
+if not hasattr(_ctx_time, "_coder_real_sleep"):
+    _ctx_time._coder_real_sleep = _ctx_time.sleep
+
 
 def _coder_stdctx_sleep(seconds):
     js_stdctx_sleep(float(seconds))
