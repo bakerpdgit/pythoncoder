@@ -2,6 +2,7 @@
 
 import { TRACE_TABLE_EVENT_LIMIT } from '../types/traceTable'
 import { pyodideSkipDirs } from '../utils/pyodideFs'
+import { PYODIDE_RUNTIME_RESET_CODE } from '../utils/pyodideReset'
 
 const PYODIDE_BASE_URL = 'https://cdn.jsdelivr.net/pyodide/v0.29.3/full'
 const PYODIDE_URL = `${PYODIDE_BASE_URL}/pyodide.js`
@@ -12,6 +13,23 @@ const PYODIDE_URL = `${PYODIDE_BASE_URL}/pyodide.js`
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let pyodidePromise: Promise<any> | null = null
 let traceStdoutCapture: ((text: string) => void) | null = null
+
+// This worker is recycled after a clean run rather than terminated, so a second
+// `init` reuses the Pyodide already compiled above. Everything the previous run
+// left behind is cleared first: every path it mounted or wrote (files it
+// created included, which is why the post-run sweep records them too), and then
+// the Python-level state in PYODIDE_RUNTIME_RESET_CODE.
+const touchedPaths = new Set<string>()
+let runtimeUsed = false
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function resetRuntimeBetweenRuns(pyodide: any): Promise<void> {
+  for (const path of touchedPaths) {
+    try { pyodide.FS.unlink(path) } catch { /* already gone */ }
+  }
+  touchedPaths.clear()
+  try { await pyodide.runPythonAsync(PYODIDE_RUNTIME_RESET_CODE) } catch { /* best effort */ }
+}
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const ensurePyodide = (): Promise<any> => {
@@ -67,6 +85,9 @@ import types
 import itertools
 import math
 _builtin_names = frozenset(dir(builtins))
+# __pycache__ next to a student's own module would be swept into their
+# filesystem by the post-run walk, and served back stale after an edit.
+sys.dont_write_bytecode = True
 if trace_table_enabled:
     import dis
 
@@ -1539,7 +1560,10 @@ self.onmessage = async function (e: MessageEvent) {
     self.postMessage({ type: 'trace', line, func, cls, state: stateStr, watchValues })
   })
 
-  // Mount virtual filesystem files
+  // Mount virtual filesystem files, over a runtime the previous run may have
+  // left dirty (this worker is reused while its Pyodide is healthy).
+  if (runtimeUsed) await resetRuntimeBetweenRuns(pyodide)
+  runtimeUsed = true
   const vfsFiles: Array<{ path: string; content: ArrayBuffer; mimeType: string }> = e.data.files ?? []
   const vfsCwd: string = e.data.cwd ?? '/'
   const mountedPaths: string[] = []
@@ -1549,6 +1573,7 @@ self.onmessage = async function (e: MessageEvent) {
       if (dir !== '/') { try { pyodide.FS.mkdirTree(dir) } catch { /* exists */ } }
       pyodide.FS.writeFile(file.path, new Uint8Array(file.content))
       mountedPaths.push(file.path)
+      touchedPaths.add(file.path)
     } catch { /* skip */ }
   }
   try { pyodide.FS.chdir(vfsCwd) } catch { /* ignore */ }
@@ -1579,6 +1604,8 @@ self.onmessage = async function (e: MessageEvent) {
             // virtual filesystem already recorded, so a .wav or .png that the
             // program merely read does not come back typed as text.
             results.push({ path: full, content: bytes.buffer.slice(0) as ArrayBuffer, mimeType: '' })
+            // Files this run created are the next run's leftovers.
+            touchedPaths.add(full)
           }
         } catch { /* skip */ }
       }

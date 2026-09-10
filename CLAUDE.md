@@ -66,10 +66,13 @@ src/
     codeAnalysis.ts           # Python source parsing (classes, functions, outline)
     virtualFS.ts              # IndexedDB-backed virtual filesystem (multiple named FSes)
     bookLoader.ts             # Learning "book" manifest/challenge loading
+    simpleBook.ts             # Books with no book.json — a flat folder of .py exercises
+    githubRepo.ts             # Parse/browse a public GitHub repo (directory listings)
     htmlPreview.ts            # HTML file preview helpers
     stdctx.ts                 # sys.stdctx / sys.stdaud (Python bootstrap + renderers)
     vfsMediaUrl.ts            # deduped blob URLs for VFS-backed media (stdaud, drawImage)
     pyodideFs.ts              # which Pyodide MEMFS dirs are off-limits when syncing back
+    pyodideReset.ts           # Python-side reset that makes a reused Pyodide look fresh
     testMatcher.ts            # Challenge test evaluation
     download.ts               # File download helpers
     export.ts                 # Note/docstring export formatting
@@ -90,6 +93,8 @@ src/
       DialogProvider.tsx      # Promise-based styled confirm/choose/prompt/alert (useDialogs)
       ConfirmDialog.tsx       # Styled confirm dialog (with optional warning + checkbox)
       SaveFileDialog.tsx      # Save-to-VFS path/name picker
+      GitHubRepoBrowser.tsx   # Pick a book.json / ZIP / folder inside a repository
+      SimpleBookOption.tsx    # The "simple learning book" tick and its (i) explainer
     ui/
       IconButton.tsx  ThemeToggleButton.tsx  RuntimeSettingsMenu.tsx
       PanelVisibilityMenu.tsx  DiagramFontControls.tsx  SettingsDialog.tsx
@@ -129,6 +134,34 @@ These are set in:
 4. A **SharedArrayBuffer** (4 KB) is shared between the main thread and the worker. The worker blocks on `Atomics.wait` after each trace event; the main thread unblocks it via `Atomics.notify` when the user clicks Step/Continue.
 5. Trace state (current line, variables, object graph) is posted back as structured messages and rendered by the React UI.
 
+### One Pyodide per session, not per run
+
+- Compiling Pyodide dwarfs everything else about starting a run, so **neither
+  runtime reloads it**: the main thread caches its instance
+  (`loadMainThreadPyodide`) and the trace worker is *recycled* after a run
+  instead of terminated. `holdIdleTraceWorker` (`App.tsx`) parks the idle worker
+  — a freshly warmed one and a recycled one land in the same place — and the next
+  Debug/Trace/Run claims it.
+- A reused runtime has to be made to look freshly started, which is
+  `PYODIDE_RUNTIME_RESET_CODE` (`utils/pyodideReset.ts`), run by both runtimes
+  before mounting the next run's files: drop a live `sys.settrace` hook, restore
+  the `time.sleep` the stdctx bootstrap patched, and evict every module whose
+  `__file__` is outside `/lib` — Pyodide's own stdlib and site-packages live
+  there, so anything else came from the working directory and would otherwise be
+  served stale after the student edits it. It also sets `dont_write_bytecode`,
+  since a `__pycache__` beside a student's module would be swept into their
+  filesystem by the post-run walk.
+- The worker additionally unlinks every path it has mounted *or written*
+  (`touchedPaths` in `tracer.worker.ts`), so a file the last activity created
+  cannot appear in the next one.
+- `releaseWorker(recycle)` only recycles after a terminal `done`/`error`, which
+  proves the worker's Python has unwound and it is back in its own event loop.
+  A forced stop, a failed worker, and a trace that hit the event limit (it parks
+  itself in `Atomics.wait` on purpose) all terminate instead.
+- **Reset Pyodide is the only full teardown** — and therefore drops a worker
+  mid-run as well as the parked one, or the next Debug would pick the same
+  runtime straight back up.
+
 ### UI conventions
 
 - **No native browser dialogs.** Never use `window.confirm`, `window.alert`, or
@@ -150,8 +183,9 @@ These are set in:
 
 - The app reads these query parameters at startup (`App.tsx`, `utils/urlRunMode.ts`):
   `?book=<url>` (a `book.json` or a book ZIP), `?challenge=<id>`, `?showFirst`,
-  `?mode=trace|run|debug`, and `?filesystem=<url>`. `buildShareLink`
-  (`utils/bookSource.ts`) is the only place that composes them.
+  `?simple` (read `?book=` as a *simple learning book*), `?mode=trace|run|debug`,
+  and `?filesystem=<url>`. `buildShareLink` (`utils/bookSource.ts`) is the only
+  place that composes them.
 - `?challenge=` resolves through `findBookTargetById` (`utils/bookLoader.ts`),
   which walks the whole tree depth-first: an **activity** id enters that
   activity, a **sub-book** id opens that section's contents. Ids are not
@@ -173,6 +207,64 @@ These are set in:
   unzipped from a URL still can: `loadFilesystemFromUrl` names the filesystem
   after its source URL. A locally authored or locally imported book cannot, and
   the dialog shows publishing instructions instead of a useless `vfs://` link.
+- **A link is never built from an address that does not hold a book.** The
+  dialog loads the manifest to fill its target picker anyway, so a failure there
+  replaces the link with an explanation. Pasting a bare repository address used
+  to produce a link that opened to "Cannot parse book.json" for every student.
+
+### A repository address is somewhere to look, not something to fetch
+
+- Teachers paste `https://github.com/them/their-repo`, not the address of a file
+  inside it. `utils/githubRepo.ts` parses github.com and raw.githubusercontent.com
+  addresses (`parseGitHubLocation`) and lists directories, and
+  `dialogs/GitHubRepoBrowser.tsx` is the picker built on it: click into folders,
+  choose the `book.json` or ZIP — or, with the simple-book tick, the folder
+  itself. It is shared by the student-link dialog and the open-from-GitHub wizard.
+- Directory listings go through GitHub's API; **file contents never do**, they
+  come from raw.githubusercontent.com through `bookSource` as before.
+- The API allows ~60 unauthenticated requests an hour **per IP**, and a school
+  NATs a whole cohort behind one, so `listDirectory` falls back to jsDelivr's
+  data API on a rate-limit. jsDelivr is the fallback and not the default because
+  its cache can lag a teacher's push by hours.
+- What counts as openable is `isBookFileName`, matched exactly as `isBookUrl`
+  routes it, so nothing is offered in the picker that the loader would then
+  decline to read.
+
+### Simple learning books (no book.json)
+
+- A folder, repo, sub-folder of a repo or ZIP of plain `.py` files is a learning
+  book with no manifest: `challenge01.py` is an activity titled *challenge01*,
+  `challenge01.txt` is its instructions, and `challenge01_data.txt` is mounted
+  into its filesystem as `data.txt`. Activities are ordered by name,
+  numeric-aware (challenge2 before challenge10). Subfolders are ignored. Nothing
+  can declare a test, so every activity is an example.
+- `utils/simpleBook.ts` owns it. The shape-reading half
+  (`readSimpleBookActivities`, `buildSimpleBookManifest`) is pure and tested; the
+  loading half turns a source into a listing.
+- **It is addressed as a URL, not special-cased.** A root is
+  `simplebook:<source>` and a file `simplebook:<source>#<name>`, which
+  `fetchBookManifest` and `resolveBookUrl` recognise. Everything downstream —
+  challenge filesystems, guides, student links, completion ticks, Reset book —
+  then works with no branch of its own.
+- The root URL is the **source address**, never a freshly-minted filesystem id,
+  so completion ticks (`${rootUrl}::${challengeId}`) survive closing and
+  reopening the book. Activity ids carry an FNV-1a digest of that address
+  (`simpleBookIdPrefix`) because two folders may each hold a `challenge01.py` and
+  the challenge filesystem is named `__book__:<id>`.
+- `BookAdditionalFile.source` exists for this: the folder stores the file as
+  `challenge01_data.txt` so the flat folder can tell whose it is, and the
+  exercise sees `data.txt`. `fetchFileIntoFs` fetches `source` and writes
+  `filename`.
+- **Listing and reading are separate.** The contents page, the book panel and the
+  link picker all need the book's shape and none of them needs its contents, so a
+  GitHub source lists names with one API call and fetches a file only when an
+  activity is entered. A ZIP arrives whole either way.
+- A `.txt` guide renders as plain text (`isPlainTextGuide` in `BookPanel.tsx`) —
+  these are typed in Notepad, and the markdown renderer would eat the asterisks
+  and underscores a teacher writing about Python is very likely to use.
+- The listing is cached per source. Opening the book, **Reset challenge** and
+  **Reset book** all call `invalidateSimpleBook`, because each of those means
+  "give me the teacher's files again".
 
 ### Shared files live anywhere up the book tree
 
@@ -260,9 +352,9 @@ These are set in:
   when its loop next sees the stop flag — so `stopAndAwaitRuntimeRelease`
   (`utils/runtimeRelease.ts`) polls `isRuntimeSourceLocked` until the runtime
   lets go, with a timeout so a wedged runtime cannot freeze navigation.
-- It also applies the `pendingRestore` the post-run "Return to editor" bar would
-  have, otherwise navigating out of a pygame run left the student in the
-  full-canvas presentation layout.
+- It also restores the layout if the run being left was still presenting,
+  otherwise navigating out of a pygame run left the student in the full-canvas
+  presentation layout. A run that ended normally has already done this itself.
 - Navigation reads `challengeLoadIdRef` before awaiting and bails if it moved:
   the await is long enough for a second click to land.
 
@@ -351,6 +443,19 @@ These are set in:
   `enterRunPresentationMode(kind)` / `restoreRunPresentationMode()` pair over one
   snapshot ref covers pygame, turtle canvas, SVG turtle and plain console; `kind`
   only picks which run flag to raise.
+- **A run restores the layout the moment it ends** — worker `done`, worker
+  `error`, forced stop, and the main-thread `finally` all call
+  `restoreRunPresentationMode()`. There is no "Return to editor" bar any more:
+  it depended on every one of those endings remembering to arm a `pendingRestore`
+  callback, and pygame and turtle runs (which end in the most places) kept
+  missing one, stranding the student in the full-screen layout.
+- Restoring always forces `visiblePanels.output` back on, snapshot or not,
+  because the Display pane lives in that panel — a pygame window or turtle
+  drawing must outlive the program that made it.
+- The snapshot is taken from `visiblePanelsRef` / `leftWidthRef`, not the render
+  closure: a run can now start before React has re-rendered with the restored
+  panels, and a stale closure would snapshot the presentation layout and never
+  give the screen back.
 - Debug and trace deliberately keep the normal layout, so `showTurtleSvg`,
   `beginStdctxRun` and `beginMainThreadCanvasRun` each force `visiblePanels.output`
   true and select their surface. Without that, a debug run draws into a hidden

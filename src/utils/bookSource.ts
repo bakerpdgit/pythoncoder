@@ -106,6 +106,12 @@ export interface ShareLinkOptions {
   mode?: WorkerRunMode
   /** `?showFirst` — enter the first activity. Meaningless once `challengeId` is set. */
   showFirst?: boolean
+  /**
+   * `?simple` — read the resource as a *simple* learning book: a flat folder,
+   * repo or ZIP of `.py` exercises with no `book.json` at all. Without it the
+   * same address would be fetched as a manifest or a book ZIP and fail.
+   */
+  simple?: boolean
 }
 
 /**
@@ -122,6 +128,7 @@ export function buildShareLink(resourceUrl: string, opts: ShareLinkOptions = {})
   // (`params.get()` then `decodeURIComponent`), and URLSearchParams would emit
   // `+` for spaces, which that reader would turn back into a literal space.
   const parts = [`book=${encodeURIComponent(resourceUrl)}`]
+  if (opts.simple) parts.push('simple=1')
   if (opts.challengeId) parts.push(`challenge=${encodeURIComponent(opts.challengeId)}`)
   else if (opts.showFirst) parts.push('showFirst=1')
   if (opts.mode) parts.push(`mode=${opts.mode}`)

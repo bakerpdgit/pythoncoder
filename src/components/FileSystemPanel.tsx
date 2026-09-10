@@ -20,7 +20,7 @@ interface Props {
   isChallengeMode?: boolean
   isBookOpen?: boolean
   onCloseBook?: () => void
-  onOpenResourceUrl?: (url: string) => void
+  onOpenResourceUrl?: (url: string, opts?: { simple?: boolean }) => void
   onFilesystemChange: (id: string) => void
   onFilesystemForcedChange: (id: string) => void
   onFilesystemCreated: (id: string) => void
@@ -29,8 +29,8 @@ interface Props {
   onPreviewHtml: (entry: VFSEntry) => void
   onError: (msg: string) => void
   onBookOpen?: (url: string) => void
-  onLocalFileImport?: (fileMap: Map<string, ArrayBuffer>, sourceName: string) => Promise<void>
-  onFolderConnect?: (handle: FileSystemDirectoryHandle) => Promise<void>
+  onLocalFileImport?: (fileMap: Map<string, ArrayBuffer>, sourceName: string, opts?: { simple?: boolean }) => Promise<void>
+  onFolderConnect?: (handle: FileSystemDirectoryHandle, opts?: { simple?: boolean }) => Promise<void>
   isLocalFolderConnected?: boolean
   onLocalFolderSync?: (op: LocalFolderSyncOp) => Promise<void>
   onReloadFolder?: () => void
@@ -100,6 +100,9 @@ export function FileSystemPanel({
   const [showNewMenu, setShowNewMenu] = useState(false)
   const uploadInputRef = useRef<HTMLInputElement>(null)
   const zipInputRef = useRef<HTMLInputElement>(null)
+  // The Open dialog is gone by the time the file picker fires, so its "simple
+  // learning book" choice has to be parked here.
+  const simpleImportRef = useRef(false)
   const fsMenuRef = useRef<HTMLDivElement>(null)
 
   const reload = useCallback(async () => {
@@ -327,18 +330,18 @@ export function FileSystemPanel({
         fileMap.set(stripped, await zip.files[name].async('arraybuffer'))
       }
       const zipName = file.name.replace(/\.zip$/i, '')
-      await onLocalFileImport?.(fileMap, zipName)
+      await onLocalFileImport?.(fileMap, zipName, { simple: simpleImportRef.current })
     } catch (err) { onError(err instanceof Error ? err.message : String(err)) }
   }
 
-  const handleFolderOpen = async () => {
+  const handleFolderOpen = async (simple = false) => {
     if (!('showDirectoryPicker' in window)) {
       onError('Your browser does not support the File System Access API.')
       return
     }
     try {
       const handle = await (window as typeof window & { showDirectoryPicker: (o?: object) => Promise<FileSystemDirectoryHandle> }).showDirectoryPicker({ mode: 'readwrite' })
-      await onFolderConnect?.(handle)
+      await onFolderConnect?.(handle, { simple })
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') return
       onError(err instanceof Error ? err.message : String(err))
@@ -715,9 +718,9 @@ export function FileSystemPanel({
       {showOpenDialog && (
         <OpenResourceDialog
           onClose={() => setShowOpenDialog(false)}
-          onOpenLocalZip={() => zipInputRef.current?.click()}
-          onConnectFolder={() => void handleFolderOpen()}
-          onOpenResourceUrl={url => onOpenResourceUrl?.(url)}
+          onOpenLocalZip={opts => { simpleImportRef.current = !!opts?.simple; zipInputRef.current?.click() }}
+          onConnectFolder={opts => void handleFolderOpen(!!opts?.simple)}
+          onOpenResourceUrl={(url, opts) => onOpenResourceUrl?.(url, opts)}
         />
       )}
     </div>

@@ -89,11 +89,13 @@ import { normalizeTestInputs } from './utils/testInputs'
 import { startVersionPolling } from './utils/versionCheck'
 import { githubRepositoryBookUrl } from './utils/bookSource'
 import { isRuntimeSourceLocked, RuntimeStartGuard } from './utils/runtimeStartGuard'
+import { PYODIDE_RUNTIME_RESET_CODE } from './utils/pyodideReset'
 import { stopAndAwaitRuntimeRelease } from './utils/runtimeRelease'
 import {
   beginTraceInputTabHandoff, completeTraceInputTabHandoff, type ConsolePanelTab,
 } from './utils/traceInputTab'
-import { getRunModeFromSearch, getShowFirstFromSearch, type WorkerRunMode } from './utils/urlRunMode'
+import { invalidateSimpleBook, isSimpleBookUrl, simpleBookRootUrl } from './utils/simpleBook'
+import { getRunModeFromSearch, getShowFirstFromSearch, getSimpleBookFromSearch, type WorkerRunMode } from './utils/urlRunMode'
 import { useDialogs } from './components/dialogs/DialogProvider'
 import {
   readDirectoryToMap, writeFileToFolderHandle, mkdirInFolderHandle,
@@ -201,7 +203,6 @@ export default function App() {
   // Latched once a pygame/turtle-canvas run has started, so the final frame stays
   // on screen after the run ends (mirrors hasCanvasOutput for stdctx).
   const [hasMainThreadCanvasOutput, setHasMainThreadCanvasOutput] = useState(false)
-  const [pendingRestore, setPendingRestore] = useState<(() => void) | null>(null)
   const [turtleSvg, setTurtleSvg] = useState('')
   const [turtleSvgHistory, setTurtleSvgHistory] = useState<string[]>([])
   const [turtleScrubStep, setTurtleScrubStep] = useState(0)
@@ -318,10 +319,16 @@ export default function App() {
   const isRunningRef = useRef(isRunning)
   isRunningRef.current = isRunning
   // Read after an `await`, where the render closure's copies would be stale.
-  const pendingRestoreRef = useRef(pendingRestore)
-  pendingRestoreRef.current = pendingRestore
   const isConsolePresentationModeRef = useRef(isConsolePresentationMode)
   isConsolePresentationModeRef.current = isConsolePresentationMode
+  // The layout a run hands back at the end. A run now restores it the moment it
+  // finishes, so the next run can begin before React has re-rendered with the
+  // restored panels — snapshot from these, never from the render closure, or it
+  // would capture the presentation layout and never let go of the screen.
+  const visiblePanelsRef = useRef(visiblePanels)
+  visiblePanelsRef.current = visiblePanels
+  const leftWidthRef = useRef(leftWidth)
+  leftWidthRef.current = leftWidth
   // Assigned below, once the derived flag exists — the splitter's mousemove
   // listener is installed once and would otherwise read a stale closure.
   const isRunPresentationModeRef = useRef(false)
@@ -427,9 +434,17 @@ export default function App() {
   const turtleSvgHistoryRef = useRef<string[]>([])
   const turtleScrubLockedRef = useRef(false)
 
-  const prepareTraceWorker = () => {
-    if (!hasSab || workerRef.current || prewarmedTraceWorkerRef.current) return
-    const worker = new TracerWorker()
+  /**
+   * Park a worker whose Pyodide is loaded and idle, ready for the next run.
+   *
+   * Both a freshly warmed worker and one recycled after a clean run land here,
+   * which is what keeps Pyodide out of the critical path of Debug/Trace/Run:
+   * the runtime is compiled at most once per session rather than once per run.
+   * Returns false when a worker is already parked, leaving the caller to
+   * dispose of the surplus one.
+   */
+  const holdIdleTraceWorker = (worker: Worker): boolean => {
+    if (prewarmedTraceWorkerRef.current) return false
     prewarmedTraceWorkerRef.current = worker
     const discardWarmWorker = () => {
       if (prewarmedTraceWorkerRef.current !== worker) return
@@ -440,6 +455,13 @@ export default function App() {
       if (event.data?.type === 'warm-error') discardWarmWorker()
     }
     worker.onerror = discardWarmWorker
+    return true
+  }
+
+  const prepareTraceWorker = () => {
+    if (!hasSab || workerRef.current || prewarmedTraceWorkerRef.current) return
+    const worker = new TracerWorker()
+    if (!holdIdleTraceWorker(worker)) { worker.terminate(); return }
     worker.postMessage({ type: 'prewarm' })
   }
 
@@ -622,7 +644,9 @@ export default function App() {
       const bookParam = params.get('book')
       if (bookParam) {
         try {
-          const openedBookUrl = await openResourceUrl(decodeURIComponent(bookParam))
+          const openedBookUrl = await openResourceUrl(decodeURIComponent(bookParam), {
+            simple: getSimpleBookFromSearch(window.location.search),
+          })
           // `?challenge=` names one activity (or section) inside the book and
           // supersedes `?showFirst`.
           const targetId = params.get('challenge')?.trim()
@@ -1802,7 +1826,7 @@ export default function App() {
    */
   const enterRunPresentationMode = (kind: 'pygame' | 'turtle-canvas' | 'turtle-svg' | 'console') => {
     if (!runLayoutSnapshotRef.current) {
-      runLayoutSnapshotRef.current = { visiblePanels: { ...visiblePanels }, leftWidth }
+      runLayoutSnapshotRef.current = { visiblePanels: { ...visiblePanelsRef.current }, leftWidth: leftWidthRef.current }
     }
     setShowExportDialog(false)
     setVisiblePanels({ code: false, visualizer: false, diagram: false, notes: false, output: true, filesystem: false, teacherTools: false })
@@ -1812,6 +1836,19 @@ export default function App() {
     else setIsConsolePresentationMode(true)
   }
 
+  /**
+   * Give the screen back at the end of a run.
+   *
+   * The layout goes straight back to whatever the student had before they
+   * pressed Run — there is no "Return to editor" step to notice or miss, which
+   * is what made the old bar unreliable for pygame and turtle programs, whose
+   * run can end in half a dozen different places.
+   *
+   * The Console Output panel is forced back on either way: it hosts the Display
+   * pane, so a pygame window, a turtle drawing or a stdctx canvas would vanish
+   * with the program that drew it if the pre-run layout happened to have the
+   * panel hidden. Safe to call at any ending, snapshot or not.
+   */
   const restoreRunPresentationMode = () => {
     setIsPygameRunActive(false)
     setIsTurtleCanvasRunActive(false)
@@ -1819,8 +1856,11 @@ export default function App() {
     setIsConsolePresentationMode(false)
     const snapshot = runLayoutSnapshotRef.current
     runLayoutSnapshotRef.current = null
-    if (!snapshot) return
-    setVisiblePanels(snapshot.visiblePanels)
+    if (!snapshot) {
+      setVisiblePanels(p => (p.output ? p : { ...p, output: true }))
+      return
+    }
+    setVisiblePanels({ ...snapshot.visiblePanels, output: true })
     setLeftWidth(snapshot.leftWidth)
   }
 
@@ -2093,12 +2133,23 @@ export default function App() {
   // wizards and the ?book= querystring. A book.json URL opens directly as a book; any
   // other URL is fetched as a ZIP and opened as a book (if it contains book.json) or a
   // plain filesystem otherwise.
-  const openResourceUrl = async (rawUrl: string): Promise<string | null> => {
+  const openResourceUrl = async (rawUrl: string, opts: { simple?: boolean } = {}): Promise<string | null> => {
     if (!canSwitchCodeSource()) return null
     const url = rawUrl.trim()
     if (!url) return null
     hideTeacherToolsPanel()
     try {
+      // A simple learning book has no manifest to fetch: the folder, repo or ZIP
+      // *is* the book, read straight from its own address so a student's ticks
+      // stay keyed to it.
+      if (opts.simple) {
+        const rootUrl = simpleBookRootUrl(url)
+        // Opening is the teacher's cue that the folder may have changed.
+        invalidateSimpleBook(rootUrl)
+        const opened = await handleBookOpen(rootUrl)
+        if (opened) revealFilesystemPanel()
+        return opened ? rootUrl : null
+      }
       if (isBookUrl(url)) {
         const opened = await handleBookOpen(url)
         revealFilesystemPanel()
@@ -2157,13 +2208,9 @@ export default function App() {
       setCodeStatus('Stop the running program before changing code or switching files.')
       return false
     }
-    const restore = pendingRestoreRef.current
-    if (restore) {
-      restore()
-      setPendingRestore(null)
-    } else if (isRunPresentationModeRef.current) {
-      restoreRunPresentationMode()
-    }
+    // A run that ended normally has already restored the layout itself; this
+    // covers navigating away from one that was still on screen.
+    if (isRunPresentationModeRef.current) restoreRunPresentationMode()
     return true
   }
 
@@ -2220,6 +2267,10 @@ export default function App() {
 
   const handleEnterChallenge = async (bookUrl: string, rootBookUrl: string, challenge: BookChallenge, forceReset = false) => {
     const loadId = ++challengeLoadIdRef.current
+    // Resetting an activity means "give me the teacher's file again", so a
+    // simple book's cached folder listing must not answer from the copy it read
+    // when the book was opened.
+    if (forceReset && isSimpleBookUrl(rootBookUrl)) invalidateSimpleBook(rootBookUrl)
     // Stop first: the run being stopped belongs to the activity we are leaving,
     // and saving it back below must not race the runtime's own file sync.
     if (!(await stopRunBeforeNavigating())) return
@@ -2282,6 +2333,7 @@ export default function App() {
     const nav = bookNavState
     if (!nav) return
     try {
+      if (isSimpleBookUrl(nav.rootUrl)) invalidateSimpleBook(nav.rootUrl)
       const ids = await collectBookChallengeIds(nav.rootUrl)
       // Only the activity actually on screen is re-entered. The ref outlives a
       // walk back to the contents, so going by the ref alone would drag the
@@ -2956,8 +3008,13 @@ export default function App() {
     }
   }
 
-  const importLocalFiles = async (fileMap: Map<string, ArrayBuffer>, sourceName: string) => {
-    if (!canSwitchCodeSource()) return
+  /**
+   * Import a folder or ZIP from disk. Returns the filesystem it landed in, or
+   * null when it was a full learning book (opened straight away) or the import
+   * was declined — so a caller can go on to read it as a simple learning book.
+   */
+  const importLocalFiles = async (fileMap: Map<string, ArrayBuffer>, sourceName: string): Promise<string | null> => {
+    if (!canSwitchCodeSource()) return null
     hideTeacherToolsPanel()
     const bookJsonBuf = fileMap.get('book.json')
     if (bookJsonBuf) {
@@ -2968,6 +3025,7 @@ export default function App() {
       const { id: stagingFsId } = await createFilesystem(stagingName)
       await importFileMapToFs(stagingFsId, fileMap, true)
       await handleBookOpen(`vfs://fs:${stagingFsId}/book.json`)
+      return null
     } else {
       const fsList = await listFilesystems()
       const existing = fsList.find(f => f.name === sourceName)
@@ -2983,7 +3041,7 @@ export default function App() {
             { label: 'Cancel', value: 'cancel', tone: 'neutral' },
           ],
         })
-        if (choice === 'cancel' || choice === null) return
+        if (choice === 'cancel' || choice === null) return null
         if (choice === 'reset') {
           await deleteFilesystem(existing.id)
           const { id } = await createFilesystem(sourceName)
@@ -3001,42 +3059,64 @@ export default function App() {
       localFolderHandleRef.current = null
       setLocalFolderFsId(null)
       setVfsReloadTrigger(t => t + 1)
-      if (!clearEditorForSwitch()) return
+      if (!clearEditorForSwitch()) return null
       setActiveFilesystemId(fsId)
       setCurrentWorkingDir('/')
       revealFilesystemPanel()
       await autoOpenMainPy(fsId)
+      return fsId
     }
   }
 
-  const handleLocalFileImport = async (fileMap: Map<string, ArrayBuffer>, sourceName: string) => {
+  /**
+   * Read a filesystem that has just been imported from disk as a simple
+   * learning book — a flat folder of `.py` exercises with no `book.json`. Useful
+   * for checking a folder reads correctly before publishing it and handing out
+   * the link.
+   */
+  const openSimpleBookFromFilesystem = async (fsId: string) => {
+    const rootUrl = simpleBookRootUrl(`vfs://fs:${fsId}`)
+    invalidateSimpleBook(rootUrl)
+    await handleBookOpen(rootUrl)
+  }
+
+  const handleLocalFileImport = async (
+    fileMap: Map<string, ArrayBuffer>, sourceName: string, opts: { simple?: boolean } = {},
+  ) => {
     if (!canSwitchCodeSource()) return
-    try { await importLocalFiles(fileMap, sourceName) }
+    try {
+      const fsId = await importLocalFiles(fileMap, sourceName)
+      if (opts.simple && fsId) await openSimpleBookFromFilesystem(fsId)
+    }
     catch (e) { setCodeStatus(`Import failed: ${e instanceof Error ? e.message : String(e)}`) }
   }
 
-  const handleFolderConnect = async (handle: FileSystemDirectoryHandle) => {
+  const handleFolderConnect = async (handle: FileSystemDirectoryHandle, opts: { simple?: boolean } = {}) => {
     try {
       const perm = await handle.requestPermission({ mode: 'readwrite' })
       if (perm !== 'granted') { setCodeStatus('Folder permission denied.'); return }
       const fileMap = await readDirectoryToMap(handle)
-      const bookJsonBuf = fileMap.get('book.json')
-      if (bookJsonBuf) {
-        await importLocalFiles(fileMap, handle.name)
-      } else {
-        await importLocalFiles(fileMap, handle.name)
-        const fsList = await listFilesystems()
-        const fs = fsList.find(f => f.name === handle.name)
-        if (fs) {
-          localFolderHandleRef.current = handle
-          setLocalFolderFsId(fs.id)
-          setDiskDeleteWarnDismissed(false)
-          setCodeStatus(`Connected to local folder "${handle.name}" — changes now save back to disk.`)
-        }
-      }
+      const fsId = await importLocalFiles(fileMap, handle.name)
+      // A book.json import has opened the book itself and left no plain
+      // filesystem to keep in sync with the folder.
+      if (!fsId) return
+      localFolderHandleRef.current = handle
+      setLocalFolderFsId(fsId)
+      setDiskDeleteWarnDismissed(false)
+      setCodeStatus(`Connected to local folder "${handle.name}" — changes now save back to disk.`)
+      if (opts.simple) await openSimpleBookFromFilesystem(fsId)
     } catch (e) { setCodeStatus(`Folder connect failed: ${e instanceof Error ? e.message : String(e)}`) }
   }
 
+  /**
+   * The one full teardown of both runtimes.
+   *
+   * Everywhere else Pyodide is deliberately kept alive — the main thread caches
+   * it and the trace worker is recycled after a clean run — so this is what a
+   * student reaches for when the environment itself looks wrong. It has to
+   * throw away the parked worker *and* any worker mid-run, or the next Debug
+   * would just pick the same runtime back up.
+   */
   const handlePyodideReset = () => {
     traceWorkerStartGuardRef.current.cancel()
     if (isRunning && activeRuntime === 'main-thread') {
@@ -3046,6 +3126,18 @@ export default function App() {
       setActiveRuntime('')
     }
     resetMainThreadPyodide()
+    if (workerRef.current) {
+      workerRef.current.terminate()
+      workerRef.current = null
+      sabRef.current = null
+      stdctxKeyBufferRef.current = null
+      setIsRunning(false)
+      setActiveRuntime('')
+      setInputRequest(null)
+      setInputValue('')
+      workerRunModeRef.current = 'debug'
+      workerStartModeRef.current = 'debug'
+    }
     prewarmedTraceWorkerRef.current?.terminate()
     prewarmedTraceWorkerRef.current = null
     if (selectedRuntime === 'trace-worker') prepareTraceWorker()
@@ -3074,8 +3166,6 @@ export default function App() {
       returnToTraceTableAfterInputRef.current = false
       // Auto-refocus the Console when a run starts from the Tests tab.
       if (consoleTab === 'tests') setConsoleTab('console')
-      if (pendingRestore) pendingRestore()
-      setPendingRestore(null)
       fixedInputsQueueRef.current = appSettings.useFixedInputs
         ? fixedInputsText.split('\n').filter(l => l.length > 0)
         : []
@@ -3179,15 +3269,26 @@ export default function App() {
       return
     }
 
-    const releaseWorker = () => {
+    /**
+     * Let go of the worker at the end of a run.
+     *
+     * `recycle` keeps it (and its compiled Pyodide) for the next run — only
+     * safe once the worker has posted a terminal `done`/`error`, which proves
+     * its Python has unwound and it is back in its own event loop, ready to
+     * clear the run's state on the next `init`. Every other ending — a forced
+     * stop, a wedged or errored worker, a trace that hit the event limit and
+     * deliberately parked itself in Atomics.wait — must terminate instead.
+     */
+    const releaseWorker = (recycle = false) => {
       traceWorkerStartGuardRef.current.cancel()
       if (traceStopTimeoutRef.current !== null) window.clearTimeout(traceStopTimeoutRef.current)
       traceStopTimeoutRef.current = null
       traceStopAckHandlerRef.current = null
-      worker.terminate()
       if (workerRef.current === worker) workerRef.current = null
       sabRef.current = null
       stdctxKeyBufferRef.current = null
+      if (recycle && holdIdleTraceWorker(worker)) return
+      worker.terminate()
       window.setTimeout(prepareTraceWorker, 0)
     }
 
@@ -3292,12 +3393,11 @@ export default function App() {
           finishTraceSession('error', String(data.error))
         }
         setCodeStatus('Worker runtime failed.')
-        if (workerStartModeRef.current === 'run') {
-          setPendingRestore(() => restoreRunPresentationMode)
-        }
+        restoreRunPresentationMode()
         workerRunModeRef.current = 'debug'
         workerStartModeRef.current = 'debug'
-        releaseWorker()
+        // A reported Python error still means the worker unwound cleanly.
+        releaseWorker(true)
       } else if (data.type === 'done') {
         if (data.files?.length) {
           void syncFilesFromPyodide(capturedFsId, data.files).then(() => setVfsReloadTrigger(t => t + 1))
@@ -3335,12 +3435,12 @@ export default function App() {
           traceLimitReached ? `Trace event limit of ${traceSessionRef.current?.retention?.eventLimit.toLocaleString() ?? TRACE_TABLE_EVENT_LIMIT.toLocaleString()} reached; execution stopped.` :
           'Trace runtime finished.'
         )
-        if (wasRunMode) {
-          setPendingRestore(() => restoreRunPresentationMode)
-        }
+        restoreRunPresentationMode()
         workerRunModeRef.current = 'debug'
         workerStartModeRef.current = 'debug'
-        releaseWorker()
+        // A trace that hit the event limit parks itself in Atomics.wait after
+        // posting this, so that worker can never be reused.
+        releaseWorker(!data.traceTableLimitReached)
       } else if (data.type === 'turtle_update') {
         const svg = data.svg || ''
         setTurtleSvg(svg)
@@ -3396,8 +3496,6 @@ export default function App() {
 
   const startMainThreadRun = async () => {
     if (!hasCode) return
-    if (pendingRestore) pendingRestore()
-    setPendingRestore(null)
     await saveCurrentToVFS()
     const vfsFiles = await getAllFiles(activeFilesystemId)
     const capturedFsId = activeFilesystemId
@@ -3450,6 +3548,9 @@ export default function App() {
       if (pyodide._api) pyodide._api._skip_unwind_fatal_error = true
 
       cleanFilesFromPyodide(pyodide, mainThreadMountedPathsRef.current)
+      // This Pyodide is cached across runs, so the last run's imported modules
+      // would otherwise be served back out of sys.modules after an edit.
+      try { await pyodide.runPythonAsync(PYODIDE_RUNTIME_RESET_CODE) } catch { /* best effort */ }
       mountFilesToPyodide(pyodide, vfsFiles, capturedCwd)
       mainThreadMountedPathsRef.current = vfsFiles.map(f => f.path)
 
@@ -3588,10 +3689,9 @@ exec(code_obj, globals())
     } finally {
       mainThreadStopRequestedRef.current = false
       stopMainThreadCanvasWatcher({ restoreSnapshot: shouldRunPygame || shouldRunTurtleCanvas })
-      if (!mainThreadAbandonedRef.current) {
-        const restore = restoreRunPresentationMode
-        setPendingRestore(() => restore)
-      }
+      // An abandoned run has already been superseded (a Reset, a forced stop,
+      // or a newer run) — whoever abandoned it owns the layout.
+      if (!mainThreadAbandonedRef.current) restoreRunPresentationMode()
       mainThreadAbandonedRef.current = false
     }
   }
@@ -3677,9 +3777,7 @@ exec(code_obj, globals())
       }
       workerRef.current.terminate(); workerRef.current = null; sabRef.current = null
       setCodeStatus('Worker runtime stopped.')
-      if (workerStartModeRef.current === 'run') {
-        setPendingRestore(() => restoreRunPresentationMode)
-      }
+      restoreRunPresentationMode()
       workerRunModeRef.current = 'debug'
       workerStartModeRef.current = 'debug'
       window.setTimeout(prepareTraceWorker, 0)
@@ -3696,7 +3794,7 @@ exec(code_obj, globals())
       setActiveRuntime('')
       setMainThreadStatus('Main-thread run stopped.')
       appendOutput('\n[INFO] Main-thread run stopped.')
-      if (runLayoutSnapshotRef.current) setPendingRestore(() => restoreRunPresentationMode)
+      restoreRunPresentationMode()
       return
     }
     setIsRunning(false); setActiveRuntime(''); setCurrentLine(-1); setCurrentFunc(''); setCurrentClass('')
@@ -4161,18 +4259,6 @@ exec(code_obj, globals())
         </div>
       </dialog>
 
-      {/* Post-run return bar */}
-      {(pendingRestore || (isRunPresentationMode && !isRunning)) && (
-        <div
-          className="flex-shrink-0 flex items-center justify-between border-b border-emerald-600/50 bg-emerald-900/30 px-5 py-2.5 cursor-pointer hover:bg-emerald-900/50 transition-colors"
-          onClick={() => { if (pendingRestore) { pendingRestore(); setPendingRestore(null) } else { restoreRunPresentationMode() } }}
-          role="button"
-        >
-          <span className="text-sm text-emerald-100">Execution ended — click here to return to the editor.</span>
-          <span className="flex-shrink-0 rounded border border-emerald-600/60 px-3 py-0.5 text-xs font-semibold text-emerald-300">Return to editor</span>
-        </div>
-      )}
-
       {/* Main Layout */}
       <div ref={mainContainerRef} className="flex-1 flex overflow-hidden p-2 gap-[3px]">
 
@@ -4255,7 +4341,7 @@ exec(code_obj, globals())
                             isChallengeMode={!!bookNavState?.activeChallengeId}
                             isBookOpen={!!bookNavState}
                             onCloseBook={handleCloseBook}
-                            onOpenResourceUrl={url => void openResourceUrl(url)}
+                            onOpenResourceUrl={(url, opts) => void openResourceUrl(url, opts)}
                             onFilesystemChange={id => void handleFilesystemChange(id)}
                             onFilesystemForcedChange={handleFilesystemForcedChange}
                             onFilesystemCreated={id => void handleFilesystemCreated(id)}
@@ -4264,8 +4350,8 @@ exec(code_obj, globals())
                             onPreviewHtml={entry => void handlePreviewHtml(entry)}
                             onError={msg => setCodeStatus(msg)}
                             onBookOpen={url => void handleBookOpen(url)}
-                            onLocalFileImport={(m, n) => handleLocalFileImport(m, n)}
-                            onFolderConnect={h => handleFolderConnect(h)}
+                            onLocalFileImport={(m, n, o) => handleLocalFileImport(m, n, o)}
+                            onFolderConnect={(h, o) => handleFolderConnect(h, o)}
                             isLocalFolderConnected={localFolderFsId === activeFilesystemId}
                             onLocalFolderSync={op => syncToLocalFolder(op)}
                             onReloadFolder={() => void handleReloadFolder()}

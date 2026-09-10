@@ -2,8 +2,13 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { BookChild, BookManifest } from '../../types'
 import { fetchBookManifest, findBookTargetById, isBookRef, resolveBookShareSource, resolveBookUrl } from '../../utils/bookLoader'
 import { githubRepositoryBookUrl } from '../../utils/bookSource'
+import { isBookFileName, parseGitHubLocation } from '../../utils/githubRepo'
+import { isSimpleBookUrl, simpleBookRootUrl } from '../../utils/simpleBook'
+import { getStoredGitHubToken } from '../../utils/storage'
 import { fetchTutorialCatalog, type LearningTutorial } from '../../utils/tutorialCatalog'
 import type { WorkerRunMode } from '../../utils/urlRunMode'
+import { GitHubRepoBrowser, type RepoSelection } from './GitHubRepoBrowser'
+import { SimpleBookCheckbox } from './SimpleBookOption'
 import { ShareLinkRow, inputClass, primaryBtnClass, secondaryBtnClass } from './webWizardShared'
 
 // Build a link a teacher can hand to students: to a whole learning book, or to
@@ -176,6 +181,9 @@ export function StudentLinkDialog({ initialSource, initialTargetId, onClose, onE
   }, [source, treeReady, initialTargetId, loadSection])
 
   const ambiguous = !!(targetId && tree && countId(tree, targetId) > 1)
+  // A simple learning book is addressed as `simplebook:<folder>`; the student
+  // link has to say so, or the same folder would be fetched as a manifest.
+  const simple = !!source && isSimpleBookUrl(source.rootUrl)
 
   const shell = (body: React.ReactNode) => (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70" onClick={onClose}>
@@ -226,7 +234,6 @@ export function StudentLinkDialog({ initialSource, initialTargetId, onClose, onE
       <div className="max-h-52 overflow-y-auto rounded border border-slate-700 bg-slate-900/40 py-1">
         <TargetRow label="The whole book" kind="book" depth={0}
           selected={targetId === null} onSelect={() => setTargetId(null)} />
-        {treeError && <div className="px-2 py-1.5 text-red-400 text-[11px]">{treeError}</div>}
         {!tree && !treeError && <div className="px-2 py-1.5 text-slate-500">Loading contents…</div>}
         {/* Index-prefixed key: ids are not guaranteed unique within a book
             (the same guard the Book panel's own list uses). */}
@@ -263,11 +270,25 @@ export function StudentLinkDialog({ initialSource, initialTargetId, onClose, onE
         </label>
       )}
 
-      <ShareLinkRow resourceUrl={publicUrl}
-        options={{ challengeId: targetId ?? undefined, mode: mode || undefined, showFirst }}
-        label={targetId === null
-          ? 'Student link — opens this book directly:'
-          : 'Student link — opens this activity directly:'} />
+      {/* No link until the address is known to hold a book: a link built from
+          one that does not would silently open to an error for every student. */}
+      {treeError ? (
+        <div className="mt-3 rounded border border-red-500/40 bg-red-950/30 px-2.5 py-2 text-[11px] leading-relaxed text-red-200">
+          <div className="font-semibold text-red-100">No learning book here.</div>
+          <div className="mt-1">{treeError}</div>
+          <div className="mt-1.5 text-red-200/80">
+            Choose another book and point at the <code className="font-mono">book.json</code> or ZIP inside
+            the repository — or, if this is a plain folder of <code className="font-mono">.py</code> exercises,
+            tick &ldquo;simple learning book&rdquo; when you choose it.
+          </div>
+        </div>
+      ) : (
+        <ShareLinkRow resourceUrl={publicUrl}
+          options={{ challengeId: targetId ?? undefined, mode: mode || undefined, showFirst, simple }}
+          label={targetId === null
+            ? 'Student link — opens this book directly:'
+            : 'Student link — opens this activity directly:'} />
+      )}
 
       {footer}
     </>
@@ -280,6 +301,8 @@ function SourcePicker({ onPick, onClose }: { onPick: (s: StudentLinkSource) => v
   const [catalog, setCatalog] = useState<LearningTutorial[] | null>(null)
   const [catalogError, setCatalogError] = useState('')
   const [url, setUrl] = useState('')
+  const [simple, setSimple] = useState(false)
+  const [selection, setSelection] = useState<RepoSelection | null>(null)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -291,6 +314,31 @@ function SourcePicker({ onPick, onClose }: { onPick: (s: StudentLinkSource) => v
 
   const pasted = url.trim()
   const pastedValid = /^https?:\/\//i.test(pasted)
+  const location = pastedValid ? parseGitHubLocation(pasted) : null
+  // A repository or folder address has to be browsed; a file address does not.
+  const repoStart = location && !location.isFile ? location : null
+
+  const chosenUrl = repoStart
+    ? (selection && (simple ? selection.kind === 'folder' : selection.kind !== 'folder') ? selection.url : null)
+    : (pastedValid ? pasted : null)
+
+  const lastSegment = (chosenUrl ?? pasted).split('?')[0].split('/').pop() ?? ''
+  const hint = repoStart
+    ? (selection
+        ? (simple && selection.kind !== 'folder' ? 'Choose a folder — a simple learning book has no book.json to point at.'
+          : !simple && selection.kind === 'folder' ? 'Choose a book.json or a ZIP, or tick “simple learning book” above.'
+          : '')
+        : simple ? 'Open the folder holding the .py exercises, then choose “Use this folder as the book”.'
+        : 'Choose the book.json or ZIP inside this repository.')
+    : !chosenUrl ? ''
+    : simple && !/\.zip$/i.test(lastSegment) ? 'A simple learning book from another host has to be a ZIP of the folder.'
+    : !simple && !isBookFileName(lastSegment) ? 'That address is neither a book.json nor a ZIP — check it opens a book before handing the link out.'
+    : ''
+
+  const use = (rootUrl: string) => onPick({
+    rootUrl: simple ? simpleBookRootUrl(rootUrl) : rootUrl,
+    label: simple ? `${rootUrl} (simple learning book)` : rootUrl,
+  })
 
   return (
     <>
@@ -326,13 +374,26 @@ function SourcePicker({ onPick, onClose }: { onPick: (s: StudentLinkSource) => v
 
       <div className="text-[11px] uppercase tracking-wider text-slate-500 mt-3 mb-1">Or a book at any public URL</div>
       <div className="flex gap-2">
-        <input type="url" value={url} onChange={e => setUrl(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter' && pastedValid) onPick({ rootUrl: pasted, label: pasted }) }}
-          placeholder="https://…/book.json — or a book ZIP" className={inputClass} />
-        <button type="button" disabled={!pastedValid}
-          onClick={() => onPick({ rootUrl: pasted, label: pasted })}
+        <input type="url" value={url}
+          onChange={e => { setUrl(e.target.value); setSelection(null) }}
+          onKeyDown={e => { if (e.key === 'Enter' && chosenUrl) use(chosenUrl) }}
+          placeholder="https://github.com/you/your-repo — or a link to a book.json / ZIP"
+          className={inputClass} />
+        <button type="button" disabled={!chosenUrl}
+          onClick={() => chosenUrl && use(chosenUrl)}
           className={primaryBtnClass}>Use</button>
       </div>
+
+      <SimpleBookCheckbox checked={simple} onChange={v => { setSimple(v); setSelection(null) }} />
+
+      {/* A repository address names no book file, so look inside it rather than
+          building a link that would open to "Cannot parse book.json". */}
+      {repoStart && (
+        <GitHubRepoBrowser start={repoStart} token={getStoredGitHubToken()} allowFolder={simple}
+          selected={selection} onSelect={setSelection} />
+      )}
+
+      {hint && <div className="dialog-warning-text mt-2 text-[11px] text-amber-300">{hint}</div>}
 
       <div className="flex justify-end mt-4">
         <button type="button" onClick={onClose} className={secondaryBtnClass}>Cancel</button>

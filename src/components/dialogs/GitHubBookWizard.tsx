@@ -1,30 +1,22 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { getStoredGitHubToken, persistGitHubToken } from '../../utils/storage'
+import {
+  gitHubLocationLabel, gitHubRawUrl, isBookFileName, listUserRepos, parseGitHubLocation,
+  type GitHubLocation, type GitHubRepoSummary,
+} from '../../utils/githubRepo'
+import { GitHubRepoBrowser, type RepoSelection } from './GitHubRepoBrowser'
+import { SimpleBookCheckbox } from './SimpleBookOption'
 import { WizardHeader, WizardFooter, ShareLinkRow, inputClass, secondaryBtnClass, type WizardProps } from './webWizardShared'
 
-// Open a learning book from a public GitHub repo — either by pasting a URL to a
-// book.json / book ZIP, or by browsing a user's public repos. GitHub content is
-// fetched directly from raw.githubusercontent.com (CORS *), so no proxy and no
-// jsDelivr cache — teachers' updates show up immediately.
-
-interface Repo { name: string; full_name: string; default_branch: string }
-interface TreeEntry { path: string; type: string }
-
-async function ghFetch<T>(path: string, token: string): Promise<T> {
-  const headers: Record<string, string> = { Accept: 'application/vnd.github+json' }
-  if (token.trim()) headers.Authorization = `Bearer ${token.trim()}`
-  const resp = await fetch(`https://api.github.com${path}`, { headers })
-  if (resp.status === 403 && resp.headers.get('x-ratelimit-remaining') === '0') {
-    throw new Error('GitHub API rate limit reached. Add a Personal Access Token below to raise the limit.')
-  }
-  if (resp.status === 404) throw new Error('Not found. Check the username / repository is public.')
-  if (!resp.ok) throw new Error(`GitHub API error: HTTP ${resp.status}`)
-  return resp.json() as Promise<T>
-}
-
-function rawUrl(fullName: string, branch: string, path: string): string {
-  return `https://raw.githubusercontent.com/${fullName}/${branch}/${path}`
-}
+// Open a learning book from a public GitHub repo — either by pasting an address
+// or by browsing a user's public repos. GitHub content is fetched directly from
+// raw.githubusercontent.com (CORS *), so no proxy and no jsDelivr cache:
+// teachers' updates show up immediately.
+//
+// A pasted *repository* address is not a book file, and used to be accepted
+// anyway — producing a link that opened to a parse error. It now opens the repo
+// browser so the actual book.json / ZIP gets picked, or (for a simple learning
+// book) the folder itself.
 
 export function GitHubBookWizard({ onBack, onOpen }: WizardProps) {
   const [mode, setMode] = useState<'url' | 'browse'>('url')
@@ -32,51 +24,69 @@ export function GitHubBookWizard({ onBack, onOpen }: WizardProps) {
   const [showToken, setShowToken] = useState(false)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [simple, setSimple] = useState(false)
+  const [selection, setSelection] = useState<RepoSelection | null>(null)
 
   // URL mode
   const [url, setUrl] = useState('')
+  const [submittedUrl, setSubmittedUrl] = useState('')
 
   // Browse mode
   const [username, setUsername] = useState('')
-  const [repos, setRepos] = useState<Repo[] | null>(null)
-  const [selectedRepo, setSelectedRepo] = useState<Repo | null>(null)
-  const [candidates, setCandidates] = useState<string[] | null>(null)
-  const [selectedFile, setSelectedFile] = useState<string | null>(null)
+  const [repos, setRepos] = useState<GitHubRepoSummary[] | null>(null)
+  const [selectedRepo, setSelectedRepo] = useState<GitHubRepoSummary | null>(null)
 
   const saveToken = (t: string) => { setToken(t); persistGitHubToken(t) }
 
   const loadRepos = async () => {
     const user = username.trim()
     if (!user) return
-    setBusy(true); setError(''); setRepos(null); setSelectedRepo(null); setCandidates(null); setSelectedFile(null)
+    setBusy(true); setError(''); setRepos(null); setSelectedRepo(null); setSelection(null)
     try {
-      const list = await ghFetch<Repo[]>(`/users/${encodeURIComponent(user)}/repos?per_page=100&sort=updated`, token)
+      const list = await listUserRepos(user, token)
       setRepos(list)
       if (list.length === 0) setError('No public repositories found for that user.')
     } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
     finally { setBusy(false) }
   }
 
-  const loadCandidates = async (repo: Repo) => {
-    setBusy(true); setError(''); setSelectedRepo(repo); setCandidates(null); setSelectedFile(null)
-    try {
-      const tree = await ghFetch<{ tree: TreeEntry[] }>(
-        `/repos/${repo.full_name}/git/trees/${repo.default_branch}?recursive=1`, token)
-      const found = tree.tree
-        .filter(t => t.type === 'blob' &&
-          (t.path.toLowerCase().endsWith('book.json') || t.path.toLowerCase().endsWith('.zip')))
-        .map(t => t.path)
-        .sort((a, b) => a.localeCompare(b))
-      setCandidates(found)
-      if (found.length === 0) setError('No book.json or .zip found in that repository.')
-    } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
-    finally { setBusy(false) }
+  const submitUrl = () => {
+    const pasted = url.trim()
+    setSelection(null)
+    setSubmittedUrl(pasted)
+    setError('')
+    if (!pasted) return
+    if (!parseGitHubLocation(pasted)) {
+      setError('That is not a GitHub address. For another host, go back and choose “Other public URL”.')
+    }
   }
 
-  const selectedResourceUrl =
-    mode === 'url'
-      ? (/^https?:\/\//i.test(url.trim()) ? url.trim() : null)
-      : (selectedRepo && selectedFile ? rawUrl(selectedRepo.full_name, selectedRepo.default_branch, selectedFile) : null)
+  // The address the browser starts at: the pasted repository/folder, or the repo
+  // chosen from the user's list. A pasted *file* address needs no browsing.
+  const browseStart = useMemo<GitHubLocation | null>(() => {
+    if (mode === 'browse') {
+      if (!selectedRepo) return null
+      const [owner, repo] = selectedRepo.full_name.split('/')
+      return { owner, repo, branch: selectedRepo.default_branch, path: '', isFile: false }
+    }
+    const location = submittedUrl ? parseGitHubLocation(submittedUrl) : null
+    return location && !location.isFile ? location : null
+  }, [mode, selectedRepo, submittedUrl])
+
+  const pastedFile = mode === 'url' && submittedUrl ? parseGitHubLocation(submittedUrl) : null
+  const pastedFileUrl = pastedFile?.isFile ? gitHubRawUrl(pastedFile, pastedFile.path) : null
+
+  // A file address is usable as it is; a browsed choice has to match what the
+  // teacher said they were opening.
+  const resourceUrl = pastedFileUrl ?? (
+    selection && (simple ? selection.kind === 'folder' : selection.kind !== 'folder') ? selection.url : null)
+
+  const mismatch = !resourceUrl && (
+    (pastedFile?.isFile && !simple && !isBookFileName(pastedFile.path.split('/').pop() ?? ''))
+      ? 'That file is not a book.json or a ZIP.'
+      : selection && simple ? 'Choose a folder — a simple learning book has no book.json to point at.'
+      : selection ? 'Choose a book.json or a ZIP, or tick “simple learning book” to use a folder as it is.'
+      : '')
 
   return (
     <div>
@@ -86,7 +96,7 @@ export function GitHubBookWizard({ onBack, onOpen }: WizardProps) {
       {/* Mode tabs */}
       <div className="flex gap-1 mb-3">
         {(['url', 'browse'] as const).map(m => (
-          <button key={m} type="button" onClick={() => { setMode(m); setError('') }}
+          <button key={m} type="button" onClick={() => { setMode(m); setError(''); setSelection(null) }}
             className={`px-3 py-1 rounded text-xs transition-colors ${mode === m ? 'bg-sky-600 text-white' : 'bg-slate-700 text-slate-300 hover:bg-slate-600'}`}>
             {m === 'url' ? 'Paste a URL' : 'Browse a user'}
           </button>
@@ -94,9 +104,16 @@ export function GitHubBookWizard({ onBack, onOpen }: WizardProps) {
       </div>
 
       {mode === 'url' ? (
-        <input autoFocus type="url" value={url} onChange={e => setUrl(e.target.value)}
-          placeholder="https://github.com/user/repo/blob/main/book.json"
-          className={inputClass} />
+        <div className="flex gap-2">
+          <input autoFocus type="url" value={url}
+            onChange={e => setUrl(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') submitUrl() }}
+            placeholder="https://github.com/user/repo — or a link to a book.json"
+            className={inputClass} />
+          <button type="button" onClick={submitUrl} disabled={!url.trim()} className={secondaryBtnClass}>
+            Look inside
+          </button>
+        </div>
       ) : (
         <div>
           <div className="flex gap-2">
@@ -110,27 +127,27 @@ export function GitHubBookWizard({ onBack, onOpen }: WizardProps) {
           {repos && (
             <div className="mt-2 max-h-32 overflow-y-auto rounded border border-slate-700 divide-y divide-slate-800">
               {repos.map(r => (
-                <button key={r.full_name} type="button" onClick={() => void loadCandidates(r)}
+                <button key={r.full_name} type="button"
+                  onClick={() => { setSelectedRepo(r); setSelection(null); setError('') }}
                   className={`w-full text-left px-2 py-1.5 text-xs transition-colors ${selectedRepo?.full_name === r.full_name ? 'bg-slate-700 text-emerald-400' : 'text-slate-300 hover:bg-slate-700'}`}>
                   {r.name}
                 </button>
               ))}
             </div>
           )}
+        </div>
+      )}
 
-          {candidates && candidates.length > 0 && (
-            <div className="mt-2">
-              <div className="text-[11px] text-slate-400 mb-1">Choose a book file:</div>
-              <div className="max-h-32 overflow-y-auto rounded border border-slate-700 divide-y divide-slate-800">
-                {candidates.map(p => (
-                  <button key={p} type="button" onClick={() => setSelectedFile(p)}
-                    className={`w-full text-left px-2 py-1.5 text-xs font-mono transition-colors ${selectedFile === p ? 'bg-slate-700 text-emerald-400' : 'text-slate-300 hover:bg-slate-700'}`}>
-                    {p}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
+      <SimpleBookCheckbox checked={simple} onChange={setSimple} />
+
+      {browseStart && (
+        <GitHubRepoBrowser start={browseStart} token={token} allowFolder={simple}
+          selected={selection} onSelect={setSelection} />
+      )}
+
+      {pastedFileUrl && (
+        <div className="mt-2 truncate font-mono text-[11px] text-emerald-300" title={gitHubLocationLabel(pastedFile!)}>
+          {gitHubLocationLabel(pastedFile!)}
         </div>
       )}
 
@@ -152,11 +169,12 @@ export function GitHubBookWizard({ onBack, onOpen }: WizardProps) {
       </div>
 
       {error && <div className="text-red-400 text-[11px] mt-2">{error}</div>}
-      {selectedResourceUrl && <ShareLinkRow resourceUrl={selectedResourceUrl} />}
+      {!error && mismatch && <div className="dialog-warning-text text-amber-300 text-[11px] mt-2">{mismatch}</div>}
+      {resourceUrl && <ShareLinkRow resourceUrl={resourceUrl} options={{ simple }} />}
 
       <WizardFooter onBack={onBack} busy={busy}
-        onOpen={() => selectedResourceUrl && onOpen(selectedResourceUrl)}
-        openLabel="Open book" openDisabled={!selectedResourceUrl} />
+        onOpen={() => resourceUrl && onOpen(resourceUrl, { simple })}
+        openLabel="Open book" openDisabled={!resourceUrl} />
     </div>
   )
 }

@@ -7,7 +7,11 @@ import { buildShareLink, type ShareLinkOptions } from '../../utils/bookSource'
 
 export interface WizardProps {
   onBack: () => void
-  onOpen: (url: string) => void
+  /**
+   * `simple` reads the address as a simple learning book — a flat folder, repo
+   * or ZIP of `.py` exercises with no `book.json`.
+   */
+  onOpen: (url: string, opts?: { simple?: boolean }) => void
 }
 
 export const inputClass =

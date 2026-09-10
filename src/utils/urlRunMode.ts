@@ -27,3 +27,16 @@ export function getShowFirstFromSearch(search: string): boolean {
   const requested = params.get('showFirst')?.trim().toLowerCase() ?? ''
   return requested === '' || requested === '1' || requested === 'true' || requested === 'yes'
 }
+
+/**
+ * Whether `?book=` should be read as a *simple* learning book — a flat folder,
+ * repo or ZIP of `.py` exercises with no `book.json`. A bare `?simple` counts,
+ * matching `?showFirst`.
+ */
+export function getSimpleBookFromSearch(search: string): boolean {
+  const params = new URLSearchParams(search)
+  if (!params.has('simple')) return false
+
+  const requested = params.get('simple')?.trim().toLowerCase() ?? ''
+  return requested === '' || requested === '1' || requested === 'true' || requested === 'yes'
+}

@@ -342,6 +342,7 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
   // guide and flicker the WYSIWYG editor.
   const activeGuidePath = manifest && navState.activeChallengeId
     ? findChallenge(manifest, navState.activeChallengeId)?.guide : undefined
+  const isPlainTextGuide = !!activeGuidePath && /\.txt$/i.test(activeGuidePath)
 
   useEffect(() => {
     if (!navState.activeChallengeId || !manifest) {
@@ -562,7 +563,11 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
   const crumbItems = [
     { label: navState.breadcrumb[0]?.name ?? manifest?.name ?? 'Book', index: -1 },
     ...navState.breadcrumb.slice(1).map((b, i) => ({ label: b.name, index: i })),
-    ...(manifest && !navState.activeChallengeId ? [{ label: manifest.name ?? '…', index: navState.breadcrumb.length }] : []),
+    // The current section's own name, but only once we are inside one: at the
+    // root the first crumb already *is* the book's name, and appending it again
+    // read as "Exercises › Exercises".
+    ...(manifest && !navState.activeChallengeId && navState.breadcrumb.length > 0
+      ? [{ label: manifest.name ?? '…', index: navState.breadcrumb.length }] : []),
   ]
 
   const activeChallenge = manifest && navState.activeChallengeId
@@ -751,6 +756,14 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
                   initialMarkdown={guideMarkdown}
                   onSave={md => onSaveGuide?.(activeChallenge.guide!, md)}
                 />
+              ) : isPlainTextGuide ? (
+                // A .txt guide is exactly what it says — a simple learning book's
+                // instructions are typed in Notepad, and running them through the
+                // markdown renderer would eat the asterisks and underscores that
+                // a teacher writing about Python is very likely to use.
+                <div className={`text-slate-300 leading-relaxed whitespace-pre-wrap book-font-${bookFontSize}`}>
+                  {guideMarkdown}
+                </div>
               ) : (
                 <div
                   className={`text-slate-300 leading-relaxed book-font-${bookFontSize}`}

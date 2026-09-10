@@ -1,6 +1,9 @@
 import type { BookAdditionalFile, BookChild, BookChallenge, BookManifest, BookRef, BreadcrumbEntry } from '../types'
 import { listFilesystems, createFilesystem, writeFile, guessMimeType, deleteFilesystem, getEntryByPath } from './virtualFS'
 import { fetchResourceBuffer, fetchResourceText } from './bookSource'
+import {
+  fetchSimpleBookManifest, isSimpleBookUrl, readSimpleBookFile, simpleBookFileUrl, simpleBookSource,
+} from './simpleBook'
 
 function isVfsUrl(url: string): boolean {
   return url.startsWith('vfs://fs:')
@@ -27,6 +30,9 @@ export function isBookUrl(url: string): boolean {
 }
 
 export function resolveBookUrl(baseUrl: string, relative: string): string {
+  // A simple learning book has no directory structure to resolve against — the
+  // folder is flat — so a file is named directly against its source.
+  if (isSimpleBookUrl(baseUrl)) return simpleBookFileUrl(baseUrl, relative)
   const base = baseUrl.endsWith('/') ? baseUrl : baseUrl.slice(0, baseUrl.lastIndexOf('/') + 1)
   if (base.startsWith('vfs://')) {
     return base + relative.replace(/^\.\//, '')
@@ -35,6 +41,7 @@ export function resolveBookUrl(baseUrl: string, relative: string): string {
 }
 
 export async function fetchBookManifest(url: string): Promise<BookManifest> {
+  if (isSimpleBookUrl(url)) return fetchSimpleBookManifest(url)
   if (isVfsUrl(url)) {
     const { fsId, path } = parseVfsUrl(url)
     const entry = await getEntryByPath(fsId, path)
@@ -147,6 +154,12 @@ export async function findBookTargetById(
  * or locally imported book is not.
  */
 export async function resolveBookShareSource(rootUrl: string): Promise<string | null> {
+  // A simple book links to the folder it was read from, so long as that folder
+  // is public — one open in this browser is not.
+  if (isSimpleBookUrl(rootUrl)) {
+    const source = simpleBookSource(rootUrl)
+    return /^https?:\/\//i.test(source) ? source : null
+  }
   if (/^https?:\/\//i.test(rootUrl)) return rootUrl
   if (!isVfsUrl(rootUrl)) return null
   const { fsId } = parseVfsUrl(rootUrl)
@@ -168,6 +181,9 @@ function challengeFilePath(p: string): string {
 }
 
 function bookDirUrl(bookUrl: string): string {
+  // A simple book's root URL is already the folder it names; trimming to the
+  // last slash would cut into the source address.
+  if (isSimpleBookUrl(bookUrl)) return bookUrl
   return bookUrl.endsWith('/') ? bookUrl : bookUrl.slice(0, bookUrl.lastIndexOf('/') + 1)
 }
 
@@ -225,15 +241,27 @@ export function getBookFsDisplayName(fsName: string): string {
   return colon === -1 ? inner : inner.slice(colon + 1)
 }
 
+/**
+ * Copy one of a book's files into a challenge filesystem.
+ *
+ * `relPath` is where the exercise expects it; `sourcePath` is what the book
+ * stores it under, which differs only for a simple learning book's shared files
+ * (`challenge01_data.txt` on disk, `data.txt` to the exercise).
+ */
 async function fetchFileIntoFs(
   fsId: string,
   bases: string[],
   relPath: string,
-  mime: string
+  mime: string,
+  sourcePath: string = relPath,
 ): Promise<boolean> {
   for (const base of bases) {
-    const url = resolveBookUrl(base, relPath)
+    const url = resolveBookUrl(base, sourcePath)
     try {
+      if (isSimpleBookUrl(url)) {
+        await writeFile(fsId, `/${relPath}`, await readSimpleBookFile(url), mime)
+        return true
+      }
       if (isVfsUrl(url)) {
         const { fsId: srcFsId, path } = parseVfsUrl(url)
         const entry = await getEntryByPath(srcFsId, path)
@@ -370,7 +398,7 @@ export async function getOrCreateChallengeFs(
     for (const af of (challenge.additionalFiles ?? []) as BookAdditionalFile[]) {
       const rel = challengeFilePath(af.filename)
       const mime = guessMimeType(rel)
-      const ok = await fetchFileIntoFs(fsId, bases, rel, mime)
+      const ok = await fetchFileIntoFs(fsId, bases, rel, mime, challengeFilePath(af.source ?? af.filename))
       if (!ok) throw new Error(`Could not load the exercise file "${rel}"`)
       if (!af.visible) hiddenPaths.push(`/${rel}`)
     }
@@ -393,6 +421,7 @@ export async function fetchGuideContent(bookUrl: string, guide: string, rootBook
   for (const base of bookFileBaseUrls(bookUrl, rootBookUrl)) {
     const url = resolveBookUrl(base, rel)
     try {
+      if (isSimpleBookUrl(url)) return new TextDecoder().decode(await readSimpleBookFile(url))
       if (isVfsUrl(url)) {
         const { fsId, path } = parseVfsUrl(url)
         const entry = await getEntryByPath(fsId, path)
