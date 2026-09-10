@@ -49,7 +49,27 @@ if (setupStart < 0 || setupEnd < 0) {
 // bridge has only the callbacks normally supplied by Pyodide; every assertion
 // below is against the JSON protocol delivered to JS, not a copied recorder.
 const setupCode = workerSource.slice(setupStart + setupMarker.length, setupEnd)
-const pythonAvailable = spawnSync('python', ['--version'], { encoding: 'utf8' }).status === 0
+// The worker's Python only ever executes under Pyodide, which is CPython 3.13.
+// This harness runs the same source under whatever `python` is on PATH, and the
+// recorder leans on interpreter detail that older versions do not have:
+// `co_qualname` and instruction `positions` both arrived in 3.11, and without
+// them a closure cannot be tied back to the activation that defined it. Below
+// that the suite would report a handful of confusing failures rather than the
+// truth, which is that this machine cannot run it — so check the version, not
+// merely that a `python` exists.
+const MIN_PYTHON = [3, 11] as const
+const pythonVersion = (() => {
+  const probe = spawnSync('python', ['--version'], { encoding: 'utf8' })
+  if (probe.status !== 0) return null
+  const match = /(\d+)\.(\d+)/.exec(`${probe.stdout ?? ''}${probe.stderr ?? ''}`)
+  return match ? ([Number(match[1]), Number(match[2])] as const) : null
+})()
+const pythonAvailable = !!pythonVersion &&
+  (pythonVersion[0] > MIN_PYTHON[0] ||
+    (pythonVersion[0] === MIN_PYTHON[0] && pythonVersion[1] >= MIN_PYTHON[1]))
+const skipReason = !pythonVersion
+  ? 'no native Python on PATH'
+  : `native Python is ${pythonVersion.join('.')}, older than the ${MIN_PYTHON.join('.')} this harness needs`
 
 function record(code: string, options: {
   pauseOnFirstLine?: boolean
@@ -59,7 +79,7 @@ function record(code: string, options: {
   eventLimit?: number
   rejectBatch?: boolean
 } = {}): RecorderResult {
-  if (!pythonAvailable) throw new Error('Native Python is unavailable; recorder integration tests cannot run.')
+  if (!pythonAvailable) throw new Error(`Recorder integration tests cannot run: ${skipReason}.`)
 
   const harness = `
 import json
@@ -714,8 +734,10 @@ describe.skipIf(!pythonAvailable)('tracer worker embedded Python recorder', () =
 })
 
 describe.skipIf(pythonAvailable)('tracer worker embedded Python recorder', () => {
-  it('is skipped because native Python is unavailable', () => {
-    // The worker itself runs in Pyodide. This integration harness uses native
-    // Python only to make the recorder contract deterministic in CI.
+  it('is skipped because a suitable native Python is unavailable', () => {
+    // The worker itself runs in Pyodide (CPython 3.13). This harness uses native
+    // Python only to make the recorder contract deterministic in CI, and needs
+    // 3.11 or newer to do so; see `skipReason` for what this machine has.
+    expect(pythonAvailable).toBe(false)
   })
 })

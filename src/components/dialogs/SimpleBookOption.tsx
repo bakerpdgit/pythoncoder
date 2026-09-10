@@ -39,36 +39,40 @@ function SimpleBookInfoDialog({ onClose }: { onClose: () => void }) {
         <p className="leading-relaxed text-slate-400">
           Any folder, repository, sub-folder of a repository or ZIP can be a learning book — no{' '}
           <code className="book-inline-code rounded px-1 font-mono">book.json</code> and no set-up.
-          The Python files in it become the exercises, in name order.
+          Number the exercises <code className="book-inline-code rounded px-1 font-mono">01.py</code>,{' '}
+          <code className="book-inline-code rounded px-1 font-mono">02.py</code>, … and that is the book.
         </p>
 
         <div className="mt-3 rounded border border-slate-700 bg-slate-900/60 p-2.5 font-mono text-[11px] leading-relaxed text-slate-300">
-          <div>challenge01.py<span className="text-slate-500"> — exercise 1</span></div>
-          <div>challenge01.txt<span className="text-slate-500"> — its instructions</span></div>
-          <div>challenge01_data.txt<span className="text-slate-500"> — mounted as data.txt</span></div>
-          <div>challenge02.py<span className="text-slate-500"> — exercise 2, no instructions</span></div>
+          <div>01.py<span className="text-slate-500"> — exercise 01</span></div>
+          <div>01.txt<span className="text-slate-500"> — its instructions</span></div>
+          <div className="pl-4 text-slate-500">#! data.txt<span className="pl-2">← first line: put data.txt beside it</span></div>
+          <div>02.py<span className="text-slate-500"> — exercise 02, no instructions</span></div>
+          <div>data.txt<span className="text-slate-500"> — the file exercise 01 asked for</span></div>
         </div>
 
         <ul className="mt-3 space-y-1.5 leading-relaxed text-slate-400">
           <li>
-            <span className="text-slate-200">Titles.</span> The file name without{' '}
-            <code className="book-inline-code rounded px-1 font-mono">.py</code> — so{' '}
-            <code className="book-inline-code rounded px-1 font-mono">challenge01.py</code> shows as{' '}
-            <em>challenge01</em>. Ordering is name order, counting numbers properly (challenge2 before
-            challenge10).
+            <span className="text-slate-200">Two digits, no gaps.</span> The book is read as{' '}
+            <code className="book-inline-code rounded px-1 font-mono">01.py</code>,{' '}
+            <code className="book-inline-code rounded px-1 font-mono">02.py</code>, … up to{' '}
+            <code className="book-inline-code rounded px-1 font-mono">99.py</code>, and stops at the first
+            number that is not there — so numbering 01, 02, 04 publishes two exercises. Nothing has to be
+            listed, which is why a whole class can open books together without hitting a limit.
           </li>
           <li>
-            <span className="text-slate-200">Instructions.</span> A{' '}
-            <code className="book-inline-code rounded px-1 font-mono">.txt</code> with the same name,
-            shown as plain text where the guide normally goes. Entirely optional.
+            <span className="text-slate-200">Instructions.</span> An optional{' '}
+            <code className="book-inline-code rounded px-1 font-mono">01.txt</code>, shown as plain text
+            under the heading <em>01 Instructions</em>. Without one the exercise says so.
           </li>
           <li>
-            <span className="text-slate-200">Extra files.</span> Name them{' '}
-            <code className="book-inline-code rounded px-1 font-mono">&lt;exercise&gt;_&lt;filename&gt;</code>
-            {' '}— <code className="book-inline-code rounded px-1 font-mono">challenge01_data.txt</code> appears in
-            that exercise&apos;s file browser as <code className="book-inline-code rounded px-1 font-mono">data.txt</code>,
-            and <code className="book-inline-code rounded px-1 font-mono">challenge01_utils.py</code> as{' '}
-            <code className="book-inline-code rounded px-1 font-mono">utils.py</code> for it to import.
+            <span className="text-slate-200">Extra files.</span> Start{' '}
+            <code className="book-inline-code rounded px-1 font-mono">01.txt</code> with one{' '}
+            <code className="book-inline-code rounded px-1 font-mono">#! name</code> line per file to put in
+            that exercise&apos;s file browser —{' '}
+            <code className="book-inline-code rounded px-1 font-mono">#! data.txt</code> for data to read,{' '}
+            <code className="book-inline-code rounded px-1 font-mono">#! utils.py</code> for a module to
+            import. Those lines are never shown to the student.
           </li>
           <li>
             <span className="text-slate-200">Flat.</span> Only the folder itself is read; sub-folders are

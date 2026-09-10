@@ -2,7 +2,8 @@ import type { BookAdditionalFile, BookChild, BookChallenge, BookManifest, BookRe
 import { listFilesystems, createFilesystem, writeFile, guessMimeType, deleteFilesystem, getEntryByPath } from './virtualFS'
 import { fetchResourceBuffer, fetchResourceText } from './bookSource'
 import {
-  fetchSimpleBookManifest, isSimpleBookUrl, readSimpleBookFile, simpleBookFileUrl, simpleBookSource,
+  fetchSimpleBookManifest, isSimpleBookUrl, readSimpleBookFile, readSimpleBookGuide,
+  simpleBookFileUrl, simpleBookSource,
 } from './simpleBook'
 
 function isVfsUrl(url: string): boolean {
@@ -241,22 +242,15 @@ export function getBookFsDisplayName(fsName: string): string {
   return colon === -1 ? inner : inner.slice(colon + 1)
 }
 
-/**
- * Copy one of a book's files into a challenge filesystem.
- *
- * `relPath` is where the exercise expects it; `sourcePath` is what the book
- * stores it under, which differs only for a simple learning book's shared files
- * (`challenge01_data.txt` on disk, `data.txt` to the exercise).
- */
+/** Copy one of a book's files into a challenge filesystem. */
 async function fetchFileIntoFs(
   fsId: string,
   bases: string[],
   relPath: string,
   mime: string,
-  sourcePath: string = relPath,
 ): Promise<boolean> {
   for (const base of bases) {
-    const url = resolveBookUrl(base, sourcePath)
+    const url = resolveBookUrl(base, relPath)
     try {
       if (isSimpleBookUrl(url)) {
         await writeFile(fsId, `/${relPath}`, await readSimpleBookFile(url), mime)
@@ -398,7 +392,7 @@ export async function getOrCreateChallengeFs(
     for (const af of (challenge.additionalFiles ?? []) as BookAdditionalFile[]) {
       const rel = challengeFilePath(af.filename)
       const mime = guessMimeType(rel)
-      const ok = await fetchFileIntoFs(fsId, bases, rel, mime, challengeFilePath(af.source ?? af.filename))
+      const ok = await fetchFileIntoFs(fsId, bases, rel, mime)
       if (!ok) throw new Error(`Could not load the exercise file "${rel}"`)
       if (!af.visible) hiddenPaths.push(`/${rel}`)
     }
@@ -421,7 +415,7 @@ export async function fetchGuideContent(bookUrl: string, guide: string, rootBook
   for (const base of bookFileBaseUrls(bookUrl, rootBookUrl)) {
     const url = resolveBookUrl(base, rel)
     try {
-      if (isSimpleBookUrl(url)) return new TextDecoder().decode(await readSimpleBookFile(url))
+      if (isSimpleBookUrl(url)) return await readSimpleBookGuide(url)
       if (isVfsUrl(url)) {
         const { fsId, path } = parseVfsUrl(url)
         const entry = await getEntryByPath(fsId, path)

@@ -331,7 +331,7 @@ function SourcePicker({ onPick, onClose }: { onPick: (s: StudentLinkSource) => v
         : simple ? 'Open the folder holding the .py exercises, then choose “Use this folder as the book”.'
         : 'Choose the book.json or ZIP inside this repository.')
     : !chosenUrl ? ''
-    : simple && !/\.zip$/i.test(lastSegment) ? 'A simple learning book from another host has to be a ZIP of the folder.'
+    : simple && !/\.zip$/i.test(lastSegment) && !pasted.endsWith('/') ? 'A simple learning book from another host is either a ZIP of the folder, or the folder’s own address.'
     : !simple && !isBookFileName(lastSegment) ? 'That address is neither a book.json nor a ZIP — check it opens a book before handing the link out.'
     : ''
 

@@ -4,40 +4,61 @@
 // per-file visibility. That is the right shape for a published course and quite
 // the wrong shape for a teacher who has a folder of exercises and one lesson to
 // give. A *simple* learning book is that folder, read as a book with no manifest
-// at all:
+// at all — the exercises are numbered, and nothing else has to be declared:
 //
-//   challenge01.py            → the first activity, named "challenge01"
-//   challenge01.txt           → its instructions, shown as plain text
-//   challenge01_data.txt      → mounted into its filesystem as "data.txt"
-//   challenge02.py            → the second activity, no instructions
+//   01.py   → the first activity, titled "01"
+//   01.txt  → its instructions (optional), with `#! data.txt` lines at the top
+//             naming any files the exercise needs beside it
+//   02.py   → the second activity
 //
-// Activities appear in name order (numeric-aware, so challenge2 precedes
-// challenge10). The folder is flat: subfolders are ignored. Nothing declares a
-// test, so every activity is an example.
+// ── The folder is never listed ──────────────────────────────────────────────
+//
+// The numbering is not decoration: it is what removes the need to *list* the
+// folder. The book is discovered by asking for `01.py`, then `02.py`, and so on
+// until a number is not there, which is the end of the book. Listing a GitHub
+// folder means the GitHub API, which allows ~60 unauthenticated requests an hour
+// *per IP* — and a school NATs a whole cohort behind one address, so a class
+// opening two books in a lesson could exhaust it and be told the book does not
+// exist. Fetching numbered files goes to raw.githubusercontent.com, which has no
+// such limit, so a class of thirty is no different from one student.
+//
+// It also means a missing file has to be told apart from an unreachable one
+// (`fetchResourceBufferOptional`), or a dropped connection would quietly
+// shorten the book rather than report a problem.
 //
 // ── How it plugs in ─────────────────────────────────────────────────────────
 //
 // A simple book is addressed as `simplebook:<source>`, and one of its files as
 // `simplebook:<source>#<name>`. That is deliberately a URL the rest of the book
 // machinery can carry around: `fetchBookManifest` synthesises the manifest,
-// `resolveBookUrl` builds the file URLs, and the loader reads them out of the
-// listing cache. Everything downstream — challenge filesystems, guides, student
-// links, completion ticks, Reset book — then works with no branch of its own.
+// `resolveBookUrl` builds the file URLs, and the loader reads them back out.
+// Everything downstream — challenge filesystems, guides, student links,
+// completion ticks, Reset book — then works with no branch of its own.
 //
 // The root URL is the source address itself, never a freshly-minted filesystem
 // id, so a student's completion ticks (keyed `${rootUrl}::${challengeId}`)
 // survive closing and reopening the book.
 
 import type { BookChallenge, BookManifest } from '../types'
-import { fetchResourceBuffer, MIN_PLAUSIBLE_ZIP_BYTES } from './bookSource'
-import {
-  gitHubRawUrl, listDirectory, parseGitHubLocation, resolveBranch, type GitHubLocation,
-} from './githubRepo'
-import { getStoredGitHubToken } from './storage'
+import { fetchResourceBuffer, fetchResourceBufferOptional, MIN_PLAUSIBLE_ZIP_BYTES } from './bookSource'
+import { gitHubRawUrl, parseGitHubLocation, type GitHubLocation } from './githubRepo'
 import { getAllFiles, listFilesystems } from './virtualFS'
 
 export const SIMPLE_BOOK_PREFIX = 'simplebook:'
 const FILE_SEPARATOR = '#'
+
+/** Shown where the guide goes when an exercise has no instructions of its own. */
+export const SIMPLE_BOOK_NO_INSTRUCTIONS = 'No instructions are available for this exercise.'
+
+/** Exercises are numbered `01`…`99` — two digits, so they read in book order. */
+export const SIMPLE_BOOK_MAX_EXERCISES = 99
+
+/**
+ * How many numbers are asked for at once. The book ends at the first gap, so
+ * everything a batch asks for beyond that gap is wasted — but one round trip
+ * covering a lesson's worth of exercises is worth a handful of 404s.
+ */
+const PROBE_BATCH = 10
 
 export function isSimpleBookUrl(url: string): boolean {
   return url.startsWith(SIMPLE_BOOK_PREFIX)
@@ -66,74 +87,220 @@ function simpleBookFileName(url: string): string {
   return url.slice(url.indexOf(FILE_SEPARATOR) + 1)
 }
 
-// ── Reading the folder's shape ──────────────────────────────────────────────
-
-export interface SimpleBookAdditionalFile {
-  /** The file's name in the source folder, e.g. `challenge01_data.txt`. */
-  sourceName: string
-  /** What it is mounted as in the activity's filesystem, e.g. `data.txt`. */
-  mountAs: string
+/** `1` → `01`. The exercise's title, and the stem of both of its files. */
+export function simpleBookExerciseNumber(index: number): string {
+  return String(index).padStart(2, '0')
 }
 
-export interface SimpleBookActivity {
-  /** The `.py` file's name without its extension — the activity's title. */
-  stem: string
-  pyName: string
-  guideName?: string
-  additional: SimpleBookAdditionalFile[]
+// ── The instructions file ───────────────────────────────────────────────────
+
+export interface SimpleBookGuide {
+  /** Files named by `#!` lines at the top of the guide, in order, deduplicated. */
+  additional: string[]
+  /** What the student reads — the `#!` lines removed. Blank when there is none. */
+  text: string
 }
 
-function compareNames(a: string, b: string): number {
-  return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
+const GUIDE_DIRECTIVE = /^\s*#!\s*(.*)$/
+
+/**
+ * Read an exercise's `.txt`.
+ *
+ * A simple book has nowhere to declare the data file an exercise reads, so the
+ * instructions declare it: lines of the form `#! data.txt` at the top of the
+ * file name files to put beside the exercise. They are directives, not prose,
+ * so they never appear in the panel — and a `.txt` holding nothing else leaves
+ * the exercise with no instructions at all, exactly as if the file were absent.
+ */
+export function parseSimpleBookGuide(raw: string): SimpleBookGuide {
+  const lines = raw.replace(/^\uFEFF/, '').split(/\r\n|\r|\n/)
+  const additional: string[] = []
+  let body = 0
+  for (; body < lines.length; body++) {
+    const directive = GUIDE_DIRECTIVE.exec(lines[body])
+    if (directive) {
+      const name = directive[1].trim().replace(/^\.?\//, '')
+      if (name && !additional.includes(name)) additional.push(name)
+      continue
+    }
+    // Blank lines between (or before) the directives are still the top of the
+    // file; the first line with prose on it starts the instructions.
+    if (lines[body].trim() !== '') break
+  }
+  return { additional, text: lines.slice(body).join('\n').trim() }
+}
+
+// ── Where the files are read from ───────────────────────────────────────────
+
+/**
+ * Somewhere a simple book's files can be read from, and what to call the book.
+ *
+ * `read` answers null for a file that is not there rather than throwing, which
+ * is what lets the numbered convention work without ever listing the folder.
+ */
+interface SimpleBookSource {
+  name: string
+  read: (name: string) => Promise<ArrayBuffer | null>
+}
+
+/** Memoise reads so entering an activity does not re-fetch what the probe read. */
+function memoise(source: SimpleBookSource): SimpleBookSource {
+  const reads = new Map<string, Promise<ArrayBuffer | null>>()
+  return {
+    name: source.name,
+    read: name => {
+      const pending = reads.get(name)
+      if (pending) return pending
+      const reading = source.read(name).catch(error => { reads.delete(name); throw error })
+      reads.set(name, reading)
+      return reading
+    },
+  }
 }
 
 /**
- * Work out the activities in a flat list of file names.
+ * A repository, or a folder inside one.
  *
- * A `.py` file is an activity unless its name extends another activity's stem
- * with an underscore — `challenge01_utils.py` beside `challenge01.py` is that
- * activity's helper module, mounted as `utils.py`, not an activity of its own.
- * The longest matching stem wins, so a file is attached to the most specific
- * activity that could claim it.
+ * Nothing here touches GitHub's API — not even to resolve the default branch,
+ * because raw.githubusercontent.com accepts `HEAD` as a ref, which is what
+ * `gitHubRawUrl` uses for an address that named no branch.
  */
-export function readSimpleBookActivities(fileNames: string[]): SimpleBookActivity[] {
-  // Flat only: a name carrying a separator lives in a subfolder.
-  const names = fileNames.filter(name => name && !name.includes('/'))
-  const pyNames = names.filter(name => name.toLowerCase().endsWith('.py'))
-  const allStems = pyNames.map(name => name.slice(0, -3))
+function openGitHubFolder(location: GitHubLocation): SimpleBookSource {
+  return {
+    name: location.path.split('/').filter(Boolean).pop() ?? location.repo,
+    read: name => fetchResourceBufferOptional(
+      gitHubRawUrl(location, [location.path, name].filter(Boolean).join('/'))),
+  }
+}
 
-  const claimedBy = (name: string, stems: string[]): string | null => {
-    let best: string | null = null
-    for (const stem of stems) {
-      if (name.length > stem.length + 1 && name.startsWith(`${stem}_`)) {
-        if (!best || stem.length > best.length) best = stem
-      }
+/** Turn an already-materialised set of files into a source. */
+function fromFiles(name: string, files: Map<string, ArrayBuffer>): SimpleBookSource {
+  return { name, read: async fileName => files.get(fileName) ?? null }
+}
+
+async function openFilesystem(source: string): Promise<SimpleBookSource> {
+  const fsId = source.slice('vfs://fs:'.length).split('/')[0]
+  const filesystem = (await listFilesystems()).find(entry => entry.id === fsId)
+  const files = new Map<string, ArrayBuffer>()
+  for (const file of await getAllFiles(fsId)) files.set(file.path.replace(/^\//, ''), file.content)
+  return fromFiles(filesystem?.name ?? 'Exercises', files)
+}
+
+async function openZip(payload: ArrayBuffer, source: string): Promise<SimpleBookSource> {
+  const { default: JSZip } = await import('jszip')
+  const zip = await JSZip.loadAsync(payload)
+  const entries = Object.values(zip.files).filter(file => !file.dir && !file.name.startsWith('__MACOSX'))
+  if (!entries.length) throw new Error('That ZIP has nothing in it.')
+  // A ZIP made by right-clicking a folder wraps everything in that folder.
+  const firstSegments = new Set(entries.map(file =>
+    file.name.includes('/') ? file.name.slice(0, file.name.indexOf('/')) : ''))
+  const only = firstSegments.size === 1 ? [...firstSegments][0] : ''
+  const prefix = only && !only.includes('.') ? `${only}/` : ''
+  const files = new Map<string, ArrayBuffer>()
+  for (const file of entries) {
+    const name = prefix && file.name.startsWith(prefix) ? file.name.slice(prefix.length) : file.name
+    if (name) files.set(name, await file.async('arraybuffer'))
+  }
+  const label = source.split('/').pop()?.split('?')[0].replace(/\.zip$/i, '') || 'Exercises'
+  return fromFiles(decodeURIComponent(label), files)
+}
+
+/** Any other web address: the folder the numbered exercises sit in. */
+function openUrlFolder(source: string): SimpleBookSource {
+  const base = source.endsWith('/') ? source : `${source}/`
+  const segments = base.split(/[/?#]/).filter(segment => segment && !segment.includes(':'))
+  return {
+    name: decodeURIComponent(segments.pop() ?? 'Exercises'),
+    read: name => fetchResourceBufferOptional(base + name),
+  }
+}
+
+/**
+ * A ZIP is downloaded whole; any other address is the folder itself. The two
+ * are told apart by trying to open the address as a ZIP rather than by its
+ * extension, because a Google Drive download link has no `.zip` on the end.
+ */
+async function openWebSource(source: string): Promise<SimpleBookSource> {
+  let payload: ArrayBuffer
+  try {
+    payload = await fetchResourceBuffer(source, { minBytes: MIN_PLAUSIBLE_ZIP_BYTES })
+  } catch {
+    return openUrlFolder(source)
+  }
+  try {
+    return await openZip(payload, source)
+  } catch {
+    return openUrlFolder(source)
+  }
+}
+
+async function openSource(source: string): Promise<SimpleBookSource> {
+  if (source.startsWith('vfs://fs:')) return memoise(await openFilesystem(source))
+  const location = parseGitHubLocation(source)
+  if (location && !location.isFile) return memoise(openGitHubFolder(location))
+  if (/^https?:\/\//i.test(source)) return memoise(await openWebSource(source))
+  throw new Error(
+    'A simple learning book must be a public GitHub repository (or a folder inside one), a ZIP, or a folder open in this browser.')
+}
+
+// ── Finding the exercises ───────────────────────────────────────────────────
+
+export interface SimpleBookExercise {
+  /** `01`, `02`, … — the activity's title and the stem of its files. */
+  number: string
+  /** Whether a `NN.txt` was found, so the manifest can point the guide at it. */
+  hasGuide: boolean
+  /** Files the guide's `#!` lines asked for, mounted beside the exercise. */
+  additional: string[]
+}
+
+/**
+ * Whether a probe came back with a web page rather than the file asked for.
+ *
+ * Not every host answers a missing file with a 404: a single-page app's server
+ * (this app's own dev server included) hands back its index page with a cheerful
+ * 200, and so do plenty of "sorry, not found" pages. Taking those at face value
+ * would end the book at 99 exercises, 97 of them holding a copy of somebody's
+ * HTML. No exercise or instructions file opens `<!doctype html>`.
+ */
+function looksLikeWebPage(payload: ArrayBuffer): boolean {
+  const head = new TextDecoder().decode(payload.slice(0, 200)).trimStart().toLowerCase()
+  return head.startsWith('<!doctype html') || head.startsWith('<html')
+}
+
+/**
+ * Ask for `01.py`, `02.py`, … until a number is not there.
+ *
+ * A gap ends the book, so numbering 01, 02, 04 publishes two exercises — which
+ * is the price of never having to list the folder, and is what the info dialog
+ * tells teachers.
+ */
+async function probeExercises(source: SimpleBookSource): Promise<SimpleBookExercise[]> {
+  const exercises: SimpleBookExercise[] = []
+  for (let start = 1; start <= SIMPLE_BOOK_MAX_EXERCISES; start += PROBE_BATCH) {
+    const numbers: string[] = []
+    for (let n = start; n < start + PROBE_BATCH && n <= SIMPLE_BOOK_MAX_EXERCISES; n++) {
+      numbers.push(simpleBookExerciseNumber(n))
     }
-    return best
+    const batch = await Promise.all(numbers.map(async number => {
+      const found = async (name: string) => {
+        const payload = await source.read(name)
+        return payload && !looksLikeWebPage(payload) ? payload : null
+      }
+      if (!(await found(`${number}.py`))) return null
+      const guide = await found(`${number}.txt`)
+      return {
+        number,
+        hasGuide: !!guide,
+        additional: guide ? parseSimpleBookGuide(new TextDecoder().decode(guide)).additional : [],
+      }
+    }))
+    for (const exercise of batch) {
+      if (!exercise) return exercises
+      exercises.push(exercise)
+    }
   }
-
-  const stems = allStems
-    .filter(stem => !claimedBy(`${stem}.py`, allStems.filter(other => other !== stem)))
-    .sort(compareNames)
-  const stemSet = new Set(stems)
-
-  const activities = stems.map<SimpleBookActivity>(stem => ({
-    stem,
-    pyName: `${stem}.py`,
-    guideName: names.find(name => name === `${stem}.txt`),
-    additional: [],
-  }))
-  const byStem = new Map(activities.map(activity => [activity.stem, activity]))
-
-  for (const name of names) {
-    if (stemSet.has(name.slice(0, -3)) && name.toLowerCase().endsWith('.py')) continue
-    const owner = claimedBy(name, stems)
-    if (!owner) continue
-    byStem.get(owner)?.additional.push({ sourceName: name, mountAs: name.slice(owner.length + 1) })
-  }
-  for (const activity of activities) activity.additional.sort((a, b) => compareNames(a.mountAs, b.mountAs))
-
-  return activities
+  return exercises
 }
 
 /**
@@ -141,9 +308,9 @@ export function readSimpleBookActivities(fileNames: string[]): SimpleBookActivit
  *
  * Activity ids have to be unique across every book a student opens — the
  * challenge filesystem is named `__book__:<id>` — and a simple book has no
- * author-assigned ids at all, so two folders that each hold a `challenge01.py`
- * would otherwise share one workspace. FNV-1a over the source address keeps the
- * ids stable across sessions while telling those two folders apart.
+ * author-assigned ids at all, so two folders that each hold an `01.py` would
+ * otherwise share one workspace. FNV-1a over the source address keeps the ids
+ * stable across sessions while telling those two folders apart.
  */
 export function simpleBookIdPrefix(source: string): string {
   let hash = 0x811c9dc5
@@ -155,153 +322,70 @@ export function simpleBookIdPrefix(source: string): string {
 }
 
 export function buildSimpleBookManifest(
-  fileNames: string[],
+  exercises: SimpleBookExercise[],
   opts: { source: string; name: string },
 ): BookManifest {
   const idPrefix = simpleBookIdPrefix(opts.source)
-  const children = readSimpleBookActivities(fileNames).map<BookChallenge>(activity => ({
-    id: `${idPrefix}${activity.stem}`,
-    name: activity.stem,
-    py: activity.pyName,
-    guide: activity.guideName,
+  const children = exercises.map<BookChallenge>(exercise => ({
+    id: `${idPrefix}${exercise.number}`,
+    name: exercise.number,
+    py: `${exercise.number}.py`,
+    guide: exercise.hasGuide ? `${exercise.number}.txt` : undefined,
     // Nothing here can declare a test, so everything is an example: reaching
     // the end of a run is what ticks it off.
     isExample: true,
-    // `source` is what the folder calls the file, `filename` what the exercise
-    // sees: `challenge01_data.txt` is mounted as plain `data.txt`.
-    additionalFiles: activity.additional.map(file => ({
-      filename: file.mountAs, visible: true, source: file.sourceName,
-    })),
+    additionalFiles: exercise.additional.map(filename => ({ filename, visible: true })),
   }))
   return { id: idPrefix, name: opts.name, children }
 }
 
-// ── Loading a source ────────────────────────────────────────────────────────
+// ── The book-loader hooks ───────────────────────────────────────────────────
 
-/**
- * A source's *listing* — its name and the names of the files in it — plus a way
- * to read one of those files.
- *
- * Listing and reading are separate because the book panel, the student-link
- * picker and the contents page all need the shape of the book and none of them
- * needs its contents; downloading every exercise just to title them would make
- * opening a book as slow as opening all of it. A ZIP is the exception, since it
- * arrives whole either way.
- */
-interface SimpleBookListing {
-  name: string
-  names: string[]
-  read: (name: string) => Promise<ArrayBuffer>
+interface OpenSimpleBook {
+  source: SimpleBookSource
+  exercises: SimpleBookExercise[]
 }
 
-const listingCache = new Map<string, Promise<SimpleBookListing>>()
+const bookCache = new Map<string, Promise<OpenSimpleBook>>()
 
-/** Drop a cached listing so the next read re-fetches — used when a book opens. */
+/** Drop a cached book so the next read re-fetches — used when a book opens. */
 export function invalidateSimpleBook(url: string): void {
-  listingCache.delete(simpleBookSource(url))
+  bookCache.delete(simpleBookSource(url))
 }
 
-function loadListing(source: string): Promise<SimpleBookListing> {
-  const cached = listingCache.get(source)
+function loadBook(source: string): Promise<OpenSimpleBook> {
+  const cached = bookCache.get(source)
   if (cached) return cached
-  const pending = fetchListing(source).catch(error => {
-    listingCache.delete(source)
+  const pending = (async () => {
+    const opened = await openSource(source)
+    return { source: opened, exercises: await probeExercises(opened) }
+  })().catch(error => {
+    bookCache.delete(source)
     throw error
   })
-  listingCache.set(source, pending)
+  bookCache.set(source, pending)
   return pending
 }
 
-async function fetchListing(source: string): Promise<SimpleBookListing> {
-  if (source.startsWith('vfs://fs:')) return listFilesystemFolder(source)
-  const location = parseGitHubLocation(source)
-  if (location && !location.isFile) return listGitHubFolder(location)
-  if (/^https?:\/\//i.test(source)) return listZip(source)
-  throw new Error(
-    'A simple learning book must be a public GitHub repository (or a folder inside one), a ZIP, or a folder open in this browser.')
-}
-
-/** Turn an already-materialised set of files into a listing. */
-function fromFiles(name: string, files: Map<string, ArrayBuffer>): SimpleBookListing {
-  return {
-    name,
-    names: [...files.keys()],
-    read: async fileName => {
-      const file = files.get(fileName)
-      if (!file) throw new Error(`"${fileName}" is not in this folder.`)
-      return file
-    },
-  }
-}
-
-async function listFilesystemFolder(source: string): Promise<SimpleBookListing> {
-  const fsId = source.slice('vfs://fs:'.length).split('/')[0]
-  const filesystem = (await listFilesystems()).find(entry => entry.id === fsId)
-  const files = new Map<string, ArrayBuffer>()
-  for (const file of await getAllFiles(fsId)) {
-    const name = file.path.replace(/^\//, '')
-    if (name.includes('/')) continue
-    files.set(name, file.content)
-  }
-  return fromFiles(filesystem?.name ?? 'Exercises', files)
-}
-
-async function listGitHubFolder(rawLocation: GitHubLocation): Promise<SimpleBookListing> {
-  // A teacher's stored token raises their own rate limit; a student has none and
-  // falls back to jsDelivr's listing if GitHub's API is exhausted.
-  const token = getStoredGitHubToken()
-  const location = await resolveBranch(rawLocation, token)
-  const entries = await listDirectory(location, token)
-  const reads = new Map<string, Promise<ArrayBuffer>>()
-  return {
-    name: location.path.split('/').filter(Boolean).pop() ?? location.repo,
-    names: entries.filter(entry => entry.type === 'file').map(entry => entry.name),
-    // Memoised so re-entering an activity (which re-reads its guide) does not
-    // go back to the network for a file this session already has.
-    read: name => {
-      const pending = reads.get(name)
-      if (pending) return pending
-      const path = [location.path, name].filter(Boolean).join('/')
-      const fetching = fetchResourceBuffer(gitHubRawUrl(location, path))
-        .catch(error => { reads.delete(name); throw error })
-      reads.set(name, fetching)
-      return fetching
-    },
-  }
-}
-
-async function listZip(source: string): Promise<SimpleBookListing> {
-  const { default: JSZip } = await import('jszip')
-  const zip = await JSZip.loadAsync(await fetchResourceBuffer(source, { minBytes: MIN_PLAUSIBLE_ZIP_BYTES }))
-  const entries = Object.values(zip.files).filter(file => !file.dir && !file.name.startsWith('__MACOSX'))
-  // A ZIP made by right-clicking a folder wraps everything in that folder.
-  const firstSegments = new Set(entries.map(file =>
-    file.name.includes('/') ? file.name.slice(0, file.name.indexOf('/')) : ''))
-  const only = firstSegments.size === 1 ? [...firstSegments][0] : ''
-  const prefix = only && !only.includes('.') ? `${only}/` : ''
-  const files = new Map<string, ArrayBuffer>()
-  for (const file of entries) {
-    const name = prefix && file.name.startsWith(prefix) ? file.name.slice(prefix.length) : file.name
-    if (!name || name.includes('/')) continue
-    files.set(name, await file.async('arraybuffer'))
-  }
-  const label = source.split('/').pop()?.replace(/\.zip$/i, '') || 'Exercises'
-  return fromFiles(decodeURIComponent(label), files)
-}
-
-// ── The book-loader hooks ───────────────────────────────────────────────────
-
 export async function fetchSimpleBookManifest(url: string): Promise<BookManifest> {
   const source = simpleBookSource(url)
-  const listing = await loadListing(source)
-  const manifest = buildSimpleBookManifest(listing.names, { source, name: listing.name })
-  if (!manifest.children.length) {
-    throw new Error('No Python files found here. A simple learning book needs at least one .py file in the folder itself.')
+  const book = await loadBook(source)
+  if (!book.exercises.length) {
+    throw new Error(
+      'No exercises found here. A simple learning book numbers its files 01.py, 02.py, 03.py … and reads them until a number is missing.')
   }
-  return manifest
+  return buildSimpleBookManifest(book.exercises, { source, name: book.source.name })
 }
 
 export async function readSimpleBookFile(fileUrl: string): Promise<ArrayBuffer> {
-  const listing = await loadListing(simpleBookSource(fileUrl))
-  return listing.read(simpleBookFileName(fileUrl))
+  const book = await loadBook(simpleBookSource(fileUrl))
+  const name = simpleBookFileName(fileUrl)
+  const content = await book.source.read(name)
+  if (!content) throw new Error(`"${name}" is not in this folder.`)
+  return content
+}
+
+/** One exercise's instructions, with the `#!` lines it opens with taken out. */
+export async function readSimpleBookGuide(fileUrl: string): Promise<string> {
+  return parseSimpleBookGuide(new TextDecoder().decode(await readSimpleBookFile(fileUrl))).text
 }

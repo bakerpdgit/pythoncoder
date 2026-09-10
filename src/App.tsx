@@ -1879,7 +1879,12 @@ export default function App() {
     setCurrentLine(-1); setCurrentFunc(''); setCurrentClass(''); setSimState(null)
     setInputRequest(null); setInputValue(''); setOutputLog(''); setActiveRuntime('')
     traceSessionRef.current = null; setTraceSession(null); setConsoleTab('console')
-    mainThreadMountedPathsRef.current = []
+    // mainThreadMountedPathsRef is deliberately left alone. It records what is
+    // sitting in the cached main-thread Pyodide's filesystem, which switching
+    // the editor to another filesystem does not change. Clearing it here meant
+    // the next run unlinked nothing, and the post-run walk of the working
+    // directory then swept the last activity's files into the new activity's
+    // filesystem — a student opening exercise 04 found exercise 03's file in it.
     setHtmlPreview(null)
     return true
   }
