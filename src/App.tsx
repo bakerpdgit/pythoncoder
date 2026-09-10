@@ -2877,7 +2877,7 @@ export default function App() {
     }
 
     worker.onmessage = (e: MessageEvent) => {
-      if (workerRef.current !== worker) return
+      if (testerWorkerRef.current !== worker) return
       const data = e.data
       if (data.type === 'status') {
         setTestRunnerStatus(data.message as string)
