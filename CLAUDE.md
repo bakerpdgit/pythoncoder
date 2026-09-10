@@ -161,6 +161,13 @@ These are set in:
 - **Reset Pyodide is the only full teardown** — and therefore drops a worker
   mid-run as well as the parked one, or the next Debug would pick the same
   runtime straight back up.
+- The main thread's equivalent of `touchedPaths` is
+  `mainThreadMountedPathsRef`, unlinked by `cleanFilesFromPyodide` before the
+  next run mounts. It must **not** be cleared when the editor switches
+  filesystem: it records what is in the cached Pyodide's own filesystem, which a
+  UI-level switch does not change, and forgetting it left the last activity's
+  files in place for the post-run walk to sweep into the next activity's
+  filesystem.
 
 ### UI conventions
 
@@ -226,21 +233,44 @@ These are set in:
   NATs a whole cohort behind one, so `listDirectory` falls back to jsDelivr's
   data API on a rate-limit. jsDelivr is the fallback and not the default because
   its cache can lag a teacher's push by hours.
+- Only a **teacher browsing for a book** ever reaches any of this. Opening a book
+  does not: a `book.json` or ZIP is fetched by address, and a simple learning book
+  finds its exercises by number (see below). A class of thirty opening a student
+  link therefore spends no API requests at all.
 - What counts as openable is `isBookFileName`, matched exactly as `isBookUrl`
   routes it, so nothing is offered in the picker that the loader would then
   decline to read.
 
 ### Simple learning books (no book.json)
 
-- A folder, repo, sub-folder of a repo or ZIP of plain `.py` files is a learning
-  book with no manifest: `challenge01.py` is an activity titled *challenge01*,
-  `challenge01.txt` is its instructions, and `challenge01_data.txt` is mounted
-  into its filesystem as `data.txt`. Activities are ordered by name,
-  numeric-aware (challenge2 before challenge10). Subfolders are ignored. Nothing
-  can declare a test, so every activity is an example.
-- `utils/simpleBook.ts` owns it. The shape-reading half
-  (`readSimpleBookActivities`, `buildSimpleBookManifest`) is pure and tested; the
-  loading half turns a source into a listing.
+- A folder, repo, sub-folder of a repo or ZIP of numbered `.py` files is a
+  learning book with no manifest: `01.py` is an activity titled *01*, `01.txt`
+  is its instructions, and `#! data.txt` lines at the top of that `.txt` name
+  files to mount beside the exercise. Subfolders are ignored. Nothing can
+  declare a test, so every activity is an example.
+- **The folder is never listed.** The book is found by asking for `01.py`, then
+  `02.py`, up to `99.py`, and it ends at the first number that is not there.
+  Listing a GitHub folder means the GitHub API, which allows ~60 unauthenticated
+  requests an hour *per IP* — and a school NATs a whole cohort behind one, so a
+  class opening two books in a lesson could exhaust it and be told the book does
+  not exist. Numbered files come from raw.githubusercontent.com instead, which
+  has no such limit, and `HEAD` as the ref means not even the default branch is
+  looked up. (`GitHubRepoBrowser` still uses the API, but only a teacher
+  building a link ever opens it.)
+- Because a missing file is now *data*, it has to be told apart from an
+  unreachable one: `fetchResourceBufferOptional` (`utils/bookSource.ts`) returns
+  null only on a 404 and throws when no mirror could be reached, so a dropped
+  connection reports a problem instead of quietly shortening the book.
+- A probe answered with a **web page** counts as missing (`looksLikeWebPage`).
+  Plenty of hosts — this app's own dev server included — answer anything they do
+  not have with their index page and a cheerful 200, and believing that publishes
+  99 exercises, 97 of them holding somebody's HTML.
+- Numbers are probed `PROBE_BATCH` at a time, so a lesson's worth of exercises
+  costs one round trip. Everything a batch asks for past the gap is wasted, which
+  is the trade for not listing.
+- `utils/simpleBook.ts` owns it. The pure half (`parseSimpleBookGuide`,
+  `buildSimpleBookManifest`, `simpleBookExerciseNumber`) is tested directly; the
+  rest turns a source address into something with a `read(name)` on it.
 - **It is addressed as a URL, not special-cased.** A root is
   `simplebook:<source>` and a file `simplebook:<source>#<name>`, which
   `fetchBookManifest` and `resolveBookUrl` recognise. Everything downstream —
@@ -249,20 +279,23 @@ These are set in:
 - The root URL is the **source address**, never a freshly-minted filesystem id,
   so completion ticks (`${rootUrl}::${challengeId}`) survive closing and
   reopening the book. Activity ids carry an FNV-1a digest of that address
-  (`simpleBookIdPrefix`) because two folders may each hold a `challenge01.py` and
-  the challenge filesystem is named `__book__:<id>`.
-- `BookAdditionalFile.source` exists for this: the folder stores the file as
-  `challenge01_data.txt` so the flat folder can tell whose it is, and the
-  exercise sees `data.txt`. `fetchFileIntoFs` fetches `source` and writes
-  `filename`.
-- **Listing and reading are separate.** The contents page, the book panel and the
-  link picker all need the book's shape and none of them needs its contents, so a
-  GitHub source lists names with one API call and fetches a file only when an
-  activity is entered. A ZIP arrives whole either way.
-- A `.txt` guide renders as plain text (`isPlainTextGuide` in `BookPanel.tsx`) —
-  these are typed in Notepad, and the markdown renderer would eat the asterisks
-  and underscores a teacher writing about Python is very likely to use.
-- The listing is cached per source. Opening the book, **Reset challenge** and
+  (`simpleBookIdPrefix`) because every simple book holds an `01.py` and the
+  challenge filesystem is named `__book__:<id>`.
+- **`#!` lines are directives, not prose.** `parseSimpleBookGuide` takes them off
+  the top of the `.txt` (blank lines between them are still the top) and mounts
+  each named file under its own name. A `.txt` with nothing else in it leaves the
+  exercise with no instructions at all, exactly as if the file were absent — the
+  panel then shows `SIMPLE_BOOK_NO_INSTRUCTIONS`.
+- The guide is headed `NN Instructions` by `BookPanel.tsx`, not by anything
+  embedded in the text: a simple book's `.txt` renders as plain text
+  (`isPlainTextGuide`), so a markdown heading would show as literal `#` — and
+  plain text is the point, since these are typed in Notepad and the markdown
+  renderer would eat the asterisks and underscores a teacher writing about
+  Python is very likely to use.
+- Probing has to read every `NN.py` to know it exists, so opening a book reads
+  the book; only the `#!` files are left until an activity is entered. Reads are
+  memoised per source, so re-entering an activity costs nothing.
+- The opened book is cached per source. Opening the book, **Reset challenge** and
   **Reset book** all call `invalidateSimpleBook`, because each of those means
   "give me the teacher's files again".
 

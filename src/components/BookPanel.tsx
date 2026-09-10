@@ -5,6 +5,7 @@ import {
   isBookRef, fetchBookManifest, fetchGuideContent, resolveBookUrl,
   findChallenge, getAdjacentChallenge, getChallengeFsName,
 } from '../utils/bookLoader'
+import { isSimpleBookUrl, SIMPLE_BOOK_NO_INSTRUCTIONS } from '../utils/simpleBook'
 import { listFilesystems, getEntryByPath, getAllFiles } from '../utils/virtualFS'
 import { TestResultsBar } from './TestResultsBar'
 import { useDialogs } from './dialogs/DialogProvider'
@@ -343,6 +344,11 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
   const activeGuidePath = manifest && navState.activeChallengeId
     ? findChallenge(manifest, navState.activeChallengeId)?.guide : undefined
   const isPlainTextGuide = !!activeGuidePath && /\.txt$/i.test(activeGuidePath)
+  // A simple learning book has no manifest to title an exercise from, so the
+  // panel heads the instructions with the exercise's number and says plainly
+  // when there are none — a `.txt` that held only `#!` file directives leaves
+  // exactly as little to read as no `.txt` at all.
+  const isSimpleBook = isSimpleBookUrl(navState.rootUrl)
 
   useEffect(() => {
     if (!navState.activeChallengeId || !manifest) {
@@ -756,13 +762,19 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
                   initialMarkdown={guideMarkdown}
                   onSave={md => onSaveGuide?.(activeChallenge.guide!, md)}
                 />
-              ) : isPlainTextGuide ? (
+              ) : isPlainTextGuide || isSimpleBook ? (
                 // A .txt guide is exactly what it says — a simple learning book's
                 // instructions are typed in Notepad, and running them through the
                 // markdown renderer would eat the asterisks and underscores that
                 // a teacher writing about Python is very likely to use.
-                <div className={`text-slate-300 leading-relaxed whitespace-pre-wrap book-font-${bookFontSize}`}>
-                  {guideMarkdown}
+                <div className={`text-slate-300 leading-relaxed book-font-${bookFontSize}`}>
+                  {isSimpleBook && activeChallenge && (
+                    <div className="mb-2 font-semibold text-slate-200">{activeChallenge.name} Instructions</div>
+                  )}
+                  <div className="whitespace-pre-wrap">
+                    {guideMarkdown.trim() ||
+                      (isSimpleBook ? SIMPLE_BOOK_NO_INSTRUCTIONS : guideMarkdown)}
+                  </div>
                 </div>
               ) : (
                 <div

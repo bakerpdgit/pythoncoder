@@ -89,6 +89,7 @@ _builtin_names = frozenset(dir(builtins))
 # filesystem by the post-run walk, and served back stale after an edit.
 sys.dont_write_bytecode = True
 if trace_table_enabled:
+    import bisect
     import dis
 
 # User code executes in an isolated namespace. Recorder/debugger functions keep
@@ -877,11 +878,25 @@ def trace_table_values_equal(left, right):
 
 def trace_table_instruction(frame):
     code = frame.f_code
-    opcode_map = trace_table_opcode_maps.get(code)
-    if opcode_map is None:
-        opcode_map = {instruction.offset: instruction for instruction in dis.get_instructions(code)}
-        trace_table_opcode_maps[code] = opcode_map
-    return opcode_map.get(frame.f_lasti)
+    entry = trace_table_opcode_maps.get(code)
+    if entry is None:
+        by_offset = {instruction.offset: instruction for instruction in dis.get_instructions(code)}
+        entry = (by_offset, sorted(by_offset))
+        trace_table_opcode_maps[code] = entry
+    by_offset, offsets = entry
+    found = by_offset.get(frame.f_lasti)
+    if found is not None:
+        return found
+    # f_lasti does not always land on an instruction dis lists. A CALL carries
+    # inline CACHE entries that dis hides, and on CPython 3.11 a frame suspended
+    # in a call reports the offset of one of those caches, so the exact lookup
+    # misses and every call-site expression (which is how a closure is tied back
+    # to the activation that defined it) silently resolves to nothing. Falling
+    # back to the nearest preceding instruction recovers the CALL itself. On
+    # 3.12+ — including the 3.13 Pyodide runs — the exact lookup always hits and
+    # this never runs.
+    index = bisect.bisect_right(offsets, frame.f_lasti) - 1
+    return by_offset[offsets[index]] if index >= 0 else None
 
 def trace_table_finalize_opcode(frame):
     meta = trace_table_frame_meta(frame)

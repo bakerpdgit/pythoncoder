@@ -73,25 +73,56 @@ export interface FetchOptions {
   minBytes?: number
 }
 
-/**
- * Fetch a resource as an ArrayBuffer, trying direct → proxy → jsDelivr as
- * appropriate for the host. Throws if every candidate fails.
- */
-export async function fetchResourceBuffer(url: string, opts: FetchOptions = {}): Promise<ArrayBuffer> {
+async function fetchCandidates(
+  url: string, opts: FetchOptions, allowMissing: boolean,
+): Promise<{ buffer: ArrayBuffer } | { missing: true } | { error: string }> {
   const min = opts.minBytes ?? 0
   let lastErr = ''
   for (const candidate of buildCandidates(url)) {
     try {
       const r = await fetch(candidate)
+      // A 404 answers the caller's question rather than failing it, so stop
+      // here: trying the remaining mirrors would turn one probe into three
+      // requests, and a simple learning book probes on every open.
+      if (allowMissing && r.status === 404) return { missing: true }
       if (!r.ok) { lastErr = `HTTP ${r.status}`; continue }
       const buf = await r.arrayBuffer()
       if (min && buf.byteLength < min) { lastErr = 'empty/too-small response'; continue }
-      return buf
+      return { buffer: buf }
     } catch (e) {
       lastErr = e instanceof Error ? e.message : String(e)
     }
   }
-  throw new Error(`Failed to fetch ${url}${lastErr ? ` (${lastErr})` : ''}`)
+  return { error: lastErr }
+}
+
+/**
+ * Fetch a resource as an ArrayBuffer, trying direct → proxy → jsDelivr as
+ * appropriate for the host. Throws if every candidate fails.
+ */
+export async function fetchResourceBuffer(url: string, opts: FetchOptions = {}): Promise<ArrayBuffer> {
+  const result = await fetchCandidates(url, opts, false)
+  if ('buffer' in result) return result.buffer
+  const detail = 'error' in result ? result.error : ''
+  throw new Error(`Failed to fetch ${url}${detail ? ` (${detail})` : ''}`)
+}
+
+/**
+ * Fetch a resource that is allowed not to exist: null means the host said so,
+ * and only a resource that could not be reached at all throws.
+ *
+ * This is what lets a simple learning book find its exercises by asking for
+ * `01.py`, `02.py`, … in turn — a missing file has to be distinguishable from a
+ * network that is down, or a blocked school connection would silently truncate
+ * a student's book instead of reporting a problem.
+ */
+export async function fetchResourceBufferOptional(
+  url: string, opts: FetchOptions = {},
+): Promise<ArrayBuffer | null> {
+  const result = await fetchCandidates(url, opts, true)
+  if ('buffer' in result) return result.buffer
+  if ('missing' in result) return null
+  throw new Error(`Failed to fetch ${url}${result.error ? ` (${result.error})` : ''}`)
 }
 
 /** Fetch a resource as UTF-8 text (used for book.json and guide markdown). */
