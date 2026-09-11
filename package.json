@@ -9,7 +9,9 @@
     "preview": "vite preview --port 3000",
     "start": "node server.mjs",
     "test": "vitest run --pool=forks",
-    "test:watch": "vitest --pool=forks"
+    "test:watch": "vitest --pool=forks",
+    "test:e2e": "playwright test",
+    "test:all": "tsc -b && vitest run --pool=forks && playwright test"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.6.0",

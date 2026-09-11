@@ -1,0 +1,52 @@
+name: CI
+
+# The checks that used to depend on someone remembering to run them.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    name: Types and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      # The tracer's embedded Python is executed by the recorder integration
+      # tests under whatever `python` is on PATH. It needs 3.11 or newer (see
+      # tracer.worker.integration.test.ts); below that the suite skips itself
+      # and the recorder's contract silently stops being checked.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: npm ci
+      - run: npx tsc -b
+      - run: npm test
+      - run: npm run build
+
+  e2e:
+    name: Browser smoke tests
+    runs-on: ubuntu-latest
+    # Kept separate: these download Pyodide and its packages from a CDN, so a
+    # bad day upstream must not be mistaken for a broken unit test.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7

@@ -4,9 +4,22 @@ export type DiagramView = 'hierarchy' | 'outline' | 'uml' | 'notes' | 'inputs'
 /**
  * A surface of the Display pane — every kind of visual program output.
  * 'canvas' is the shared main-thread canvas (pygame and the pyo-js turtle),
- * 'turtle' is the Basthon SVG turtle, 'stdctx' is the sys.stdctx canvas.
+ * 'turtle' is the Basthon SVG turtle, 'stdctx' is the sys.stdctx canvas, and
+ * 'plot' holds the PNGs matplotlib renders with Agg.
  */
-export type DisplaySurface = 'canvas' | 'turtle' | 'stdctx'
+export type DisplaySurface = 'canvas' | 'turtle' | 'stdctx' | 'plot'
+
+/**
+ * One chart on the Display pane's Plot surface.
+ *
+ * matplotlib (and seaborn, which draws through it) renders a finished PNG with
+ * Agg. plotly has no static renderer available in wasm — kaleido is a native
+ * binary — so it produces the interactive HTML document it was always going to,
+ * and the pane shows it in a sandboxed iframe.
+ */
+export type PlotFigure =
+  | { kind: 'image'; uri: string }
+  | { kind: 'html'; html: string }
 export type TurtleMode = 'pyo-js-turtle' | 'basthon-svg'
 export type InputMode = 'inline-console' | 'input-bar' | 'popup-dialog'
 export type ViewMode = 'minimal' | 'developer'

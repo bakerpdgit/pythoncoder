@@ -453,8 +453,21 @@ except SystemExit:
 except CoderMainThreadStop:
     js_append_main_thread_log("[INFO] Main-thread pygame run stopped.")
 finally:
+    # pygame.quit() tears down the SDL window, and on the Emscripten backend
+    # that resizes the shared canvas element to 0x0 — wiping the drawing the
+    # moment the program that made it ends. Skipping quit() is not the answer
+    # (this Pyodide is reused, and the next run needs a clean SDL), so the
+    # picture is lifted off the canvas first and painted back afterwards.
+    try:
+        js_pygame_snapshot_canvas()
+    except Exception:
+        pass
     try:
         pygame.quit()
+    except Exception:
+        pass
+    try:
+        js_pygame_restore_canvas()
     except Exception:
         pass
 `

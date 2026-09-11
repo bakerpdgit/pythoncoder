@@ -30,9 +30,40 @@ Vite's own preview server serving `dist/` on `http://localhost:3000`.
 
 ## Testing / verifying changes
 
+Three layers, all of which should pass before a change is called done:
+
+- **`npm test`** — vitest, ~29 files. Pure logic, plus
+  `tracer.worker.integration.test.ts`, which executes the tracer's *actual*
+  embedded Python under native `python` and asserts the JSON protocol. That
+  harness needs Python **3.11+** and skips itself (with a stated reason) below
+  that — `co_qualname` and instruction `positions` arrived in 3.11, and without
+  them closures cannot be tied to their defining activation.
+- **`npm run test:e2e`** — Playwright (`e2e/`), a real browser driving the real
+  dev server and the real Pyodide. `smoke.spec.ts`: the app loads, a program runs
+  and prints, a syntax error is reported against `simulation.py`, matplotlib draws
+  a figure. `book.spec.ts`: the student's path — open a numbered book, read the
+  instructions, run an exercise, see it tick — with the book served by the test
+  itself through `page.route`, so it needs no fixture in `public/` (which would be
+  deployed) and no repository staying where it is. Shared helpers live in
+  `e2e/helpers.ts`; `watchForErrors` takes `ignoreRequestsTo` because a numbered
+  book finds its end by asking for a file that is not there, and the browser logs
+  that 404 as a console error. Needs network (Pyodide comes from a CDN), ~50s.
+- **`npm run test:all`** — typecheck, then both of the above.
+
+`.github/workflows/ci.yml` runs the first two on every push and PR.
+
 - When driving the app with Playwright to verify a change, **also capture the browser
   console** (`page.on('console', …)` for `error`/`warning` and `page.on('pageerror', …)`)
   and confirm no new errors appear. Don't rely on screenshots alone.
+- **Never set editor text with `page.keyboard.type`.** Monaco closes brackets and
+  quotes as you type, so `print("hi")` becomes `print("hi")")` and the test then
+  asserts against a program nobody wrote. Use `page.keyboard.insertText`.
+- **The console is an xterm terminal, and xterm paints on `requestAnimationFrame`.**
+  A browser tab that is hidden or throttled does not paint, so reading
+  `.xterm-rows` back from an automated session that is not actually displaying
+  the page returns blank rows while `term.buffer.active` holds every line. This
+  has been mistaken for "the runtime swallowed the output" more than once — read
+  the buffer, or force a paint, before believing output is missing.
 - `@monaco-editor/react` throws a harmless `Canceled` rejection when a Monaco editor model
   is disposed mid-operation. It is suppressed in `main.tsx` (unhandledrejection/error
   listeners), and the code editor keeps Monaco mounted (overlaying a placeholder rather than
@@ -70,6 +101,8 @@ src/
     githubRepo.ts             # Parse/browse a public GitHub repo (directory listings)
     htmlPreview.ts            # HTML file preview helpers
     stdctx.ts                 # sys.stdctx / sys.stdaud (Python bootstrap + renderers)
+    matplotlib.ts             # Agg backend bootstrap; plt.show() → a PNG in the Display pane
+    plotly.ts                 # plotly bootstrap (fig.show() → HTML) + micropip installs
     vfsMediaUrl.ts            # deduped blob URLs for VFS-backed media (stdaud, drawImage)
     pyodideFs.ts              # which Pyodide MEMFS dirs are off-limits when syncing back
     pyodideReset.ts           # Python-side reset that makes a reused Pyodide look fresh
@@ -85,6 +118,7 @@ src/
     BookPanel.tsx             # Learning book navigation + challenge runner
     ConsoleTerminal.tsx       # xterm-based interactive console (inline-console input mode)
     DisplayPane.tsx           # All visual output, directly below the Console
+                              #   surfaces: canvas | turtle | stdctx | plot
     CanvasPane.tsx            # stdctx canvas (a surface of the Display pane)
     TurtleScrubber.tsx        # Turtle SVG history scrubber (Display pane header)
     HtmlPreviewDialog.tsx     # Sandboxed HTML preview
@@ -158,6 +192,13 @@ These are set in:
   proves the worker's Python has unwound and it is back in its own event loop.
   A forced stop, a failed worker, and a trace that hit the event limit (it parks
   itself in `Atomics.wait` on purpose) all terminate instead.
+- A pygame run ends with `pygame.quit()`, which tears down SDL and resizes the
+  shared canvas to 0x0 — wiping the drawing the instant the program that made it
+  ends. Skipping quit() is not an option (this Pyodide is reused and the next run
+  needs a clean SDL), so `js_pygame_snapshot_canvas` lifts the finished frame off
+  the canvas and `js_pygame_restore_canvas` paints it back, either side of the
+  quit. A pygame drawing then outlives its program exactly as a turtle drawing
+  does.
 - **Reset Pyodide is the only full teardown** — and therefore drops a worker
   mid-run as well as the parked one, or the next Debug would pick the same
   runtime straight back up.
@@ -493,6 +534,94 @@ These are set in:
   `beginStdctxRun` and `beginMainThreadCanvasRun` each force `visiblePanels.output`
   true and select their surface. Without that, a debug run draws into a hidden
   panel and looks as though it did nothing.
+
+### Data science: matplotlib, seaborn, numpy and plotly
+
+- `numpy`, `pandas`, `scipy` and `matplotlib` ship with Pyodide, so they need no
+  installing. **seaborn and plotly do not** — they are pure Python wheels fetched
+  from PyPI with micropip (`micropipPackagesFor`), which is why a plotting run
+  says "Installing seaborn..." the first time.
+- The student cannot install them: their code is compiled without
+  `PyCF_ALLOW_TOP_LEVEL_AWAIT`, so `await micropip.install(...)` is a SyntaxError
+  in user code. `micropipInstallCode` runs through `runPythonAsync`, which allows
+  it, before the program starts.
+- `pyodidePackagesFor` loads two more from Pyodide's own repository: **matplotlib**
+  for seaborn (a seaborn program need never name it) and **pandas** for plotly
+  (`plotly.express` refuses plain lists without it — "Pandas installation is
+  required if no dataframe is provided").
+- `plotly[express]`, not plain `plotly`: without the extra, `plotly.express`
+  raises an ImportError telling the student to run pip, which is advice they
+  cannot act on in a browser.
+- **seaborn needs no rendering support of its own.** It is a styling and
+  statistics layer over pyplot, so `detectPlottingLibs` sets `matplotlib` too and
+  everything below applies unchanged.
+- The shipped **Data Science** book (`DataScience/`, in the tutorial catalog) is
+  twelve worked examples across all four libraries. All are `isExample: true`.
+
+### matplotlib has no screen, so it is given a picture frame
+
+- Pyodide ships matplotlib and `loadPackagesFromImports` installs it as soon as
+  a student's `import matplotlib.pyplot` is scanned. What it cannot supply is a
+  display: matplotlib's default interactive backend is webagg, whose first act is
+  `from js import document`. There is no document in a Web Worker, so `plt.show()`
+  died with `ImportError: cannot import name 'document' from 'js'`.
+- `utils/matplotlib.ts` fixes the backend to **Agg**, which needs no DOM at all,
+  and replaces `plt.show()` with one that renders each open figure to a PNG and
+  hands the data URI to `js_matplotlib_figure`. The Display pane's `plot`
+  surface shows it.
+- **The backend must be chosen before pyplot is imported** — it binds at import
+  time — so `MATPLOTLIB_BOOTSTRAP` sets `MPLBACKEND` and imports pyplot itself
+  *before* the user's code, ahead of every other bootstrap.
+- Plotting therefore stays on **whichever runtime the student is using**, rather
+  than forcing the main thread. A chart-drawing program can still be stepped
+  through in Debug and recorded in Trace, which moving it to the main thread
+  would have cost.
+- `MATPLOTLIB_FLUSH_CODE` runs after the program and delivers figures that were
+  built but never shown — forgetting `plt.show()` is a beginner's mistake, and an
+  empty Display pane teaches nothing. On the main thread it runs in the `finally`,
+  so a run that failed halfway still shows what it drew.
+- The tester worker installs the same bootstrap with a bridge that discards the
+  figures: a plotting challenge still has to import and run under test, and there
+  is nowhere in a tester to show a chart.
+- Figures are cleared at the start of each run. Unlike the canvases (latched so a
+  drawing outlives its program) they are a list, which would otherwise grow
+  without bound across runs.
+
+### plotly is shown, not drawn
+
+- plotly does not render a picture: it describes one, and plotly.js draws it in a
+  browser. The static renderer (kaleido) is a native binary with no wasm build, so
+  there is nothing to turn a figure into a PNG.
+- So a plotly figure reaches the Display pane as what it actually is — a small
+  HTML document — in an **iframe sandboxed without `allow-same-origin`**. It runs
+  on an opaque origin and can touch nothing of ours. Hovering for values, zooming
+  a range and toggling a series off the legend all survive, which is most of why
+  anyone reaches for plotly.
+- `include_plotlyjs='cdn'` keeps a figure a few KB. Inlining the bundle would add
+  ~4MB to every single one. The CDN script loads because the page's COEP is
+  `credentialless`, which permits cross-origin subresources without credentials.
+- `PLOTLY_BOOTSTRAP` patches `plotly.io.show`, not `Figure.show`: `BaseFigure.show()`
+  defers to `pio.show`, so the one patch catches `fig.show()`, `pio.show(fig)` and
+  anything built on them.
+- `PlotFigure` (`types/index.ts`) is the union the Display pane's Plot surface
+  renders: `{kind:'image'}` for an Agg PNG, `{kind:'html'}` for plotly.
+
+### Getting console output out of the page
+
+- The console is an xterm terminal: it owns its own selection and scrollback, so
+  the browser's own Copy and any page text selection cannot reach it. Without
+  help there is **no way at all** to get an error message out — which is what a
+  student needs when asking for help.
+- `Ctrl+C` is two things in a terminal. With text selected it copies; with
+  nothing selected it keeps its terminal meaning and stops the running program.
+  Right-click copies a selection too, because xterm draws its selection as an
+  overlay the native context menu cannot see.
+- The **Copy** button in the console header copies the selection if there is one
+  and the whole buffer otherwise, and works in the non-terminal console mode too.
+- `copyTextToClipboard` falls back to `execCommand('copy')` when
+  `navigator.clipboard` is refused — a school network is exactly where that
+  permission gets denied — and returns false rather than pretending, so the
+  button never claims a copy that did not happen.
 
 ### stdctx canvas and stdaud audio
 

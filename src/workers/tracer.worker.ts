@@ -1405,6 +1405,10 @@ self.onmessage = async function (e: MessageEvent) {
 
   const useSvgTurtle = Boolean(e.data.svgTurtleBootstrap)
   const stdctxBootstrap = String(e.data.stdctxBootstrap ?? '')
+  const matplotlibBootstrap = String(e.data.matplotlibBootstrap ?? '')
+  const plotlyBootstrap = String(e.data.plotlyBootstrap ?? '')
+  const micropipInstall = String(e.data.micropipInstall ?? '')
+  const extraPackages = (e.data.extraPackages ?? []) as string[]
   // stdctx key state is a separate SharedArrayBuffer so the tightly packed
   // trace SAB layout above stays untouched.
   const stdctxKeys: Uint8Array | null = e.data.stdctxKeyBuffer
@@ -1548,6 +1552,16 @@ self.onmessage = async function (e: MessageEvent) {
   pyodide.globals.set('js_stdaud_send', (commandJson: string) => {
     self.postMessage({ type: 'stdaud', command: String(commandJson) })
   })
+  // A rendered matplotlib figure, as a PNG data URI. Agg draws it here in the
+  // worker; only the finished image crosses to the Display pane.
+  pyodide.globals.set('js_matplotlib_figure', (dataUri: string) => {
+    self.postMessage({ type: 'matplotlib_figure', figure: String(dataUri) })
+  })
+  // plotly has no static renderer in wasm, so what crosses is the interactive
+  // HTML document the figure always was.
+  pyodide.globals.set('js_plotly_figure', (html: string) => {
+    self.postMessage({ type: 'plotly_figure', figure: String(html) })
+  })
   pyodide.globals.set('js_stdctx_sleep', (seconds: number) => {
     const ms = Number(seconds) * 1000
     if (!Number.isFinite(ms) || ms <= 0) return
@@ -1645,6 +1659,24 @@ self.onmessage = async function (e: MessageEvent) {
     if (stdctxBootstrap) {
       await pyodide.runPythonAsync(stdctxBootstrap)
     }
+    // seaborn and plotly are not Pyodide packages; micropip fetches their pure
+    // Python wheels. Done here rather than by the student, whose own code is
+    // compiled without top-level await and so cannot await an install.
+    if (extraPackages.length) {
+      await pyodide.loadPackage(extraPackages)
+    }
+    if (micropipInstall) {
+      await pyodide.loadPackage('micropip')
+      await pyodide.runPythonAsync(micropipInstall)
+    }
+    // Before the user's own `import matplotlib.pyplot`: the backend is chosen
+    // at import time, and webagg's `from js import document` cannot work here.
+    if (matplotlibBootstrap) {
+      await pyodide.runPythonAsync(matplotlibBootstrap)
+    }
+    if (plotlyBootstrap) {
+      await pyodide.runPythonAsync(plotlyBootstrap)
+    }
     const initialBreakpoints = new Map<number, string>()
     for (const breakpoint of (e.data.breakpoints ?? []) as Array<{ line: number; condition: string }>) {
       initialBreakpoints.set(breakpoint.line, breakpoint.condition)
@@ -1664,6 +1696,10 @@ exec(code_obj, user_namespace, user_namespace)
     `)
     await pyodide.runPythonAsync('trace_table_flush()')
     traceStdoutCapture = null
+    // Figures the student built but never showed still belong on screen.
+    if (matplotlibBootstrap) {
+      await pyodide.runPythonAsync(String(e.data.matplotlibFlush ?? ''))
+    }
     if (traceTableTransportError) throw new Error(`Trace table transport failed: ${traceTableTransportError}`)
     const updatedFiles = collectUpdatedFiles()
     let finalTurtleSvg = ''

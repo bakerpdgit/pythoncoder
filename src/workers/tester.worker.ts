@@ -2,7 +2,8 @@
 
 import { SVG_TURTLE_WORKER_SETUP } from '../utils/mainThread'
 import { STDCTX_TEST_BOOTSTRAP } from '../utils/stdctx'
-import { detectSpongeLibs } from '../utils/codeAnalysis'
+import { MATPLOTLIB_BOOTSTRAP } from '../utils/matplotlib'
+import { detectMatplotlib, detectSpongeLibs } from '../utils/codeAnalysis'
 import { normalizeTestInputs } from '../utils/testInputs'
 
 const PYODIDE_BASE_URL = 'https://cdn.jsdelivr.net/pyodide/v0.29.3/full'
@@ -135,6 +136,15 @@ function installStdctxForTests(): void {
   pyodide.runPython(STDCTX_TEST_BOOTSTRAP)
 }
 
+// A plotting challenge still has to import and run under test. Agg needs no
+// screen, so the figures are simply rendered and dropped — the assertions are
+// about the program's output, and there is nowhere here to show a chart.
+function installMatplotlibForTests(): void {
+  pyodide.globals.set('js_matplotlib_figure', () => undefined)
+  pyodide.globals.set('js_plotly_figure', () => undefined)
+  try { pyodide.runPython(MATPLOTLIB_BOOTSTRAP) } catch { /* no matplotlib in this build */ }
+}
+
 function readFileFromFs(filename: string): string {
   for (const p of [filename, '/' + filename.replace(/^\//, '')]) {
     try {
@@ -206,6 +216,7 @@ self.onmessage = async (e: MessageEvent) => {
 
     const spongeLibs = detectSpongeLibs(code, files ?? [])
     if (spongeLibs.usesStdctx || spongeLibs.usesStdaud) installStdctxForTests()
+    if (detectMatplotlib(code, files ?? [])) installMatplotlibForTests()
 
     const results: Array<{
       caseIndex: number

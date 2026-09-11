@@ -1,0 +1,90 @@
+{
+  "name": "Data Science",
+  "id": "data-science",
+  "children": [
+    {
+      "id": "ds-arrays",
+      "name": "1. Arrays: whole columns at a time",
+      "guide": "01_arrays.md",
+      "py": "01_arrays.py",
+      "isExample": true
+    },
+    {
+      "id": "ds-statistics",
+      "name": "2. Describing a column of numbers",
+      "guide": "02_statistics.md",
+      "py": "02_statistics.py",
+      "isExample": true
+    },
+    {
+      "id": "ds-tables",
+      "name": "3. Rows, columns and axis",
+      "guide": "03_tables.md",
+      "py": "03_tables.py",
+      "isExample": true
+    },
+    {
+      "id": "ds-filtering",
+      "name": "4. Filtering with masks",
+      "guide": "04_filtering.md",
+      "py": "04_filtering.py",
+      "isExample": true
+    },
+    {
+      "id": "ds-first-chart",
+      "name": "5. Your first chart",
+      "guide": "05_first_chart.md",
+      "py": "05_first_chart.py",
+      "isExample": true
+    },
+    {
+      "id": "ds-bar-chart",
+      "name": "6. Bars worth reading",
+      "guide": "06_bar_chart.md",
+      "py": "06_bar_chart.py",
+      "isExample": true
+    },
+    {
+      "id": "ds-subplots",
+      "name": "7. Four charts, one story",
+      "guide": "07_subplots.md",
+      "py": "07_subplots.py",
+      "isExample": true
+    },
+    {
+      "id": "ds-trend-line",
+      "name": "8. Fitting a trend line",
+      "guide": "08_trend_line.md",
+      "py": "08_trend_line.py",
+      "isExample": true
+    },
+    {
+      "id": "ds-seaborn-style",
+      "name": "9. Seaborn: style and distributions",
+      "guide": "09_seaborn_style.md",
+      "py": "09_seaborn_style.py",
+      "isExample": true
+    },
+    {
+      "id": "ds-seaborn-categories",
+      "name": "10. Comparing groups",
+      "guide": "10_seaborn_categories.md",
+      "py": "10_seaborn_categories.py",
+      "isExample": true
+    },
+    {
+      "id": "ds-heatmap",
+      "name": "11. Everything against everything",
+      "guide": "11_heatmap.md",
+      "py": "11_heatmap.py",
+      "isExample": true
+    },
+    {
+      "id": "ds-plotly-interactive",
+      "name": "12. An interactive chart",
+      "guide": "12_plotly_interactive.md",
+      "py": "12_plotly_interactive.py",
+      "isExample": true
+    }
+  ]
+}

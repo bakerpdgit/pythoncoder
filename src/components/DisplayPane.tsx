@@ -1,5 +1,5 @@
 import type { MutableRefObject } from 'react'
-import type { DisplaySurface } from '../types'
+import type { DisplaySurface, PlotFigure } from '../types'
 import { CanvasPane, type CanvasPaneHandle } from './CanvasPane'
 import { TurtleScrubber } from './TurtleScrubber'
 
@@ -7,6 +7,7 @@ const SURFACE_LABELS: Record<DisplaySurface, string> = {
   canvas: 'Canvas',
   turtle: 'Turtle',
   stdctx: 'Draw',
+  plot: 'Plot',
 }
 
 interface DisplayPaneProps {
@@ -21,6 +22,8 @@ interface DisplayPaneProps {
   onStdctxKeyDown: (key: string) => void
   onStdctxKeyUp: (key: string) => void
   resolveStdctxImageUri: (uri: string) => string | Promise<string>
+  /** Charts this run has produced, oldest first. */
+  plotFigures: PlotFigure[]
   /** Basthon SVG turtle: the frame to show, plus the scrubber's own state. */
   turtleSvg: string
   turtleHistory: string[]
@@ -53,6 +56,7 @@ export function DisplayPane({
   onStdctxKeyDown,
   onStdctxKeyUp,
   resolveStdctxImageUri,
+  plotFigures,
   turtleSvg,
   turtleHistory,
   showScrubber,
@@ -117,6 +121,30 @@ export function DisplayPane({
         {/* Basthon SVG turtle */}
         <div className={`mx-auto h-full flex items-start justify-center p-3 ${activeSurface !== 'turtle' ? 'hidden' : ''}`}>
           <div dangerouslySetInnerHTML={{ __html: turtleSvg }} className="max-w-full" />
+        </div>
+
+        {/* Charts — one per show(), newest last */}
+        <div className={`h-full overflow-auto p-3 ${activeSurface !== 'plot' ? 'hidden' : ''}`}>
+          <div className="mx-auto flex max-w-4xl flex-col items-stretch gap-3">
+            {plotFigures.map((figure, i) => figure.kind === 'image' ? (
+              <img
+                key={i}
+                src={figure.uri}
+                alt={plotFigures.length > 1 ? `Figure ${i + 1}` : 'Figure'}
+                className="mx-auto max-w-full rounded border border-slate-600 bg-white"
+              />
+            ) : (
+              // sandbox without allow-same-origin: the chart runs its own
+              // plotly.js on an opaque origin and can touch nothing of ours.
+              <iframe
+                key={i}
+                title={plotFigures.length > 1 ? `Figure ${i + 1}` : 'Figure'}
+                srcDoc={figure.html}
+                sandbox="allow-scripts"
+                className="h-[440px] w-full rounded border border-slate-600 bg-white"
+              />
+            ))}
+          </div>
         </div>
 
         {/* sys.stdctx canvas */}

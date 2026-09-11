@@ -8,6 +8,39 @@ export interface ConsoleTerminalHandle {
   write: (text: string) => void
   clear: () => void
   focus: () => void
+  /** What the user has highlighted, or '' when nothing is selected. */
+  getSelection: () => string
+  /** Everything the terminal holds, scrollback included, trailing blanks trimmed. */
+  getAllText: () => string
+}
+
+/**
+ * Put text on the clipboard.
+ *
+ * `navigator.clipboard` needs a secure context and can be refused outright, so
+ * the old `execCommand` route stays as a fallback — students on a school
+ * network are exactly the people most likely to hit a blocked permission.
+ */
+export async function copyTextToClipboard(text: string): Promise<boolean> {
+  if (!text) return false
+  try {
+    await navigator.clipboard.writeText(text)
+    return true
+  } catch { /* fall through */ }
+  try {
+    const area = document.createElement('textarea')
+    area.value = text
+    area.setAttribute('readonly', '')
+    area.style.position = 'fixed'
+    area.style.opacity = '0'
+    document.body.appendChild(area)
+    area.select()
+    const ok = document.execCommand('copy')
+    document.body.removeChild(area)
+    return ok
+  } catch {
+    return false
+  }
 }
 
 interface Props {
@@ -128,6 +161,18 @@ export const ConsoleTerminal = forwardRef<ConsoleTerminalHandle, Props>(
       focus: () => {
         termRef.current?.focus()
       },
+      getSelection: () => termRef.current?.getSelection() ?? '',
+      getAllText: () => {
+        const term = termRef.current
+        if (!term) return ''
+        const buffer = term.buffer.active
+        const lines: string[] = []
+        for (let i = 0; i < buffer.length; i++) {
+          lines.push(buffer.getLine(i)?.translateToString(true) ?? '')
+        }
+        while (lines.length && !lines[lines.length - 1].trim()) lines.pop()
+        return lines.join('\n')
+      },
     }), [])
 
     // Initialise xterm once
@@ -155,6 +200,19 @@ export const ConsoleTerminal = forwardRef<ConsoleTerminalHandle, Props>(
 
       termRef.current = term
       fitAddonRef.current = fitAddon
+
+      // Ctrl+C is two things in a terminal. With text selected it is Copy —
+      // which is what a student pressing it expects, and there was previously no
+      // way at all to get console output out of the page. With nothing selected
+      // it keeps its terminal meaning and stops the running program.
+      term.attachCustomKeyEventHandler(event => {
+        if (event.type !== 'keydown') return true
+        const isCopy = (event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'c'
+        if (!isCopy || !term.hasSelection()) return true
+        void copyTextToClipboard(term.getSelection())
+        term.clearSelection()
+        return false
+      })
 
       // ── User data handler (typing + paste) ──────────────────────────────────
       term.onData((data) => {
@@ -196,6 +254,13 @@ export const ConsoleTerminal = forwardRef<ConsoleTerminalHandle, Props>(
       const el = containerRef.current
       const handleContextMenu = async (e: MouseEvent) => {
         e.preventDefault()
+        // xterm draws its own selection overlay, so the browser's own
+        // right-click Copy never sees it. Offer the obvious thing instead.
+        if (term.hasSelection()) {
+          await copyTextToClipboard(term.getSelection())
+          term.clearSelection()
+          return
+        }
         if (!inInputModeRef.current) return
         try {
           const text = await navigator.clipboard.readText()

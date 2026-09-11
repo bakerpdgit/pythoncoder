@@ -12,7 +12,7 @@ if (import.meta.env.DEV) {
 import type { editor as MonacoEditor } from 'monaco-editor'
 import {
   buildPythonStructureModel, analyzePythonClasses, analyzePythonFunctions,
-  analyzePythonOutline, cleanCodeText, codeUsesPygame, codeUsesStdctx, codeUsesTurtle, codeUsesTurtleKeyboard, detectSpongeLibs, getExpandableOutlineIds,
+  analyzePythonOutline, cleanCodeText, codeUsesPygame, codeUsesStdctx, codeUsesTurtle, codeUsesTurtleKeyboard, detectPlottingLibs, detectSpongeLibs, getExpandableOutlineIds, micropipPackagesFor, pyodidePackagesFor,
 } from './utils/codeAnalysis'
 import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides, getStoredSettings, persistSettings, getStoredBookNavState, persistBookNavState, getStoredFixedInputs, persistFixedInputs, getStoredEditorFontSize, persistEditorFontSize, getStoredConsoleFontSize, persistConsoleFontSize, getStoredWatches, persistWatches, getStoredNamedLayouts, persistNamedLayouts, getStoredCompletions, persistCompletion, clearCompletionsForBook, getStoredParsonsState, persistParsonsState, clearParsonsState, clearParsonsStateForBook, getStoredLayoutPrefs, persistLayoutPrefs, defaultPanelsForView, MINIMAL_VISIBLE_PANELS, DEFAULT_DISPLAY_SPLIT, DEFAULT_PRESENTATION_DISPLAY_SPLIT, DISPLAY_SPLIT_MIN, DISPLAY_SPLIT_MAX } from './utils/storage'
 import { triggerDownload, getBaseFileStem } from './utils/download'
@@ -56,9 +56,11 @@ import { OutlinePanel } from './components/diagrams/OutlinePanel'
 import { DisplayPane } from './components/DisplayPane'
 import { shouldShowTurtleScrubber } from './utils/turtleScrubber'
 import { InspectorPane } from './components/InspectorPane'
-import { ConsoleTerminal, type ConsoleTerminalHandle } from './components/ConsoleTerminal'
+import { ConsoleTerminal, copyTextToClipboard, type ConsoleTerminalHandle } from './components/ConsoleTerminal'
 import { type CanvasPaneHandle } from './components/CanvasPane'
 import { STDCTX_KEY_BUFFER_SIZE, STDCTX_WORKER_BOOTSTRAP, keyToVirtualKeyCode, processAudioCommand, type StdaudCommand, type StdctxCommand } from './utils/stdctx'
+import { MATPLOTLIB_BOOTSTRAP, MATPLOTLIB_FLUSH_CODE } from './utils/matplotlib'
+import { PLOTLY_BOOTSTRAP, micropipInstallCode } from './utils/plotly'
 import { createVfsMediaUrlCache, isDirectMediaUrl } from './utils/vfsMediaUrl'
 import { TraceTable } from './components/trace/TraceTable'
 import { clampDiagramFontSize } from './components/diagrams/diagramLayout'
@@ -69,7 +71,7 @@ import {
 } from './constants'
 import type {
   Theme, RuntimeKey, PanelVisibility, InputRequest, SabRef, SimState, InspectorPath,
-  StructureModel, DiagramModel, HierarchyModel, OutlineModel, DiagramView, DisplaySurface, VFSEntry,
+  StructureModel, DiagramModel, HierarchyModel, OutlineModel, DiagramView, DisplaySurface, PlotFigure, VFSEntry,
   LocalFolderSyncOp,
   AppSettings, BookNavState, BookChallenge, BookManifest, BookTestCase, BookAdditionalFile, NamedLayout, InspectorNode,
   OverallTestResult, TesterRunOutput, ViewMode, Breakpoint, TurtleMode,
@@ -210,6 +212,10 @@ export default function App() {
   const [turtleScrubSpeed, setTurtleScrubSpeed] = useState(400)
   // Latched once a stdctx program has drawn, so its Display surface stays available.
   const [hasCanvasOutput, setHasCanvasOutput] = useState(false)
+  const [consoleCopied, setConsoleCopied] = useState(false)
+  // Charts this run has produced, oldest first: matplotlib/seaborn PNGs and
+  // plotly's interactive HTML.
+  const [plotFigures, setPlotFigures] = useState<PlotFigure[]>([])
   // Which visual surface the Display pane shows when a program drives more than one.
   const [displaySurface, setDisplaySurface] = useState<DisplaySurface>('canvas')
   const [isConsolePresentationMode, setIsConsolePresentationMode] = useState(false)
@@ -568,10 +574,12 @@ export default function App() {
   const hasCanvasSurface = isPygameRunActive || isTurtleCanvasRunActive || hasMainThreadCanvasOutput
   const hasTurtleSurface = !!turtleSvg || turtleSvgHistory.length > 0
   const hasStdctxSurface = usesStdctx || hasCanvasOutput
+  const hasPlotSurface = plotFigures.length > 0
   const availableDisplaySurfaces: DisplaySurface[] = [
     ...(hasCanvasSurface ? ['canvas' as const] : []),
     ...(hasTurtleSurface ? ['turtle' as const] : []),
     ...(hasStdctxSurface ? ['stdctx' as const] : []),
+    ...(hasPlotSurface ? ['plot' as const] : []),
   ]
   const hasDisplay = availableDisplaySurfaces.length > 0
   const activeDisplaySurface: DisplaySurface = availableDisplaySurfaces.includes(displaySurface)
@@ -1652,6 +1660,24 @@ export default function App() {
     consoleTermRef.current?.clear()
   }
 
+  /**
+   * Put the console on the clipboard.
+   *
+   * The terminal owns its own selection and scrollback, so neither the
+   * browser's Copy nor a text selection in the page can reach it — without a
+   * button there is no way to get an error message out of the page at all.
+   * A selection wins when there is one; otherwise the whole console is copied.
+   */
+  const copyConsoleOutput = async () => {
+    const terminal = consoleTermRef.current
+    const text = terminal
+      ? (terminal.getSelection() || terminal.getAllText())
+      : (window.getSelection()?.toString() || outputLog)
+    if (!(await copyTextToClipboard(text.trim()))) return
+    setConsoleCopied(true)
+    window.setTimeout(() => setConsoleCopied(false), 1500)
+  }
+
   const getWatchValue = (expr: string): string => {
     if (!isRunning) return '—'
     const node = watchValues[expr]
@@ -1961,6 +1987,30 @@ export default function App() {
     canvasPaneRef.current?.draw(commands)
   }
 
+  /**
+   * A finished matplotlib figure. Agg has already rendered it to a PNG in
+   * whichever runtime ran the program, so there is nothing to draw here — only
+   * somewhere to put it. Showing the Plot surface is unconditional: a chart the
+   * student asked for must not land in a hidden panel.
+   */
+  const showPlotFigure = (figure: PlotFigure) => {
+    setPlotFigures(previous => [...previous, figure])
+    setVisiblePanels(p => (p.output ? p : { ...p, output: true }))
+    setDisplaySurface('plot')
+  }
+
+  const addPlotImage = (dataUri: unknown) => {
+    const uri = String(dataUri ?? '')
+    if (!uri.startsWith('data:image/')) return
+    showPlotFigure({ kind: 'image', uri })
+  }
+
+  const addPlotHtml = (markup: unknown) => {
+    const html = String(markup ?? '')
+    if (!html.trim()) return
+    showPlotFigure({ kind: 'html', html })
+  }
+
   /** Wipe the canvas at the start of a stdctx run and reveal its Display surface. */
   const beginStdctxRun = () => {
     setHasCanvasOutput(true)
@@ -2084,6 +2134,10 @@ export default function App() {
     // runs that do) put them back.
     setHasCanvasOutput(false)
     setHasMainThreadCanvasOutput(false)
+    // Last run's charts are not this run's. Unlike the canvases (latched so a
+    // drawing outlives its program), figures are a list that would otherwise
+    // grow without bound across runs.
+    setPlotFigures([])
     setCurrentLine(-1); setCurrentFunc(''); setCurrentClass(''); setSimState(null)
     setWatchValues({})
     setInputRequest(null); setInputValue('')
@@ -3224,6 +3278,9 @@ export default function App() {
     const spongeLibs = detectSpongeLibs(capturedCode, vfsFiles)
     const usesStdctxForRun = spongeLibs.usesStdctx
     const usesSpongeLibsForRun = spongeLibs.usesStdctx || spongeLibs.usesStdaud
+    const plottingLibsForRun = detectPlottingLibs(capturedCode, vfsFiles)
+    const usesMatplotlibForRun = plottingLibsForRun.matplotlib
+    const micropipPackagesForRun = micropipPackagesFor(plottingLibsForRun)
     const isSvgTurtleRun = (choice === 'run') && hasTurtleForMode && effectiveTurtleMode(capturedCode) === 'basthon-svg'
 
     workerRunModeRef.current = choice
@@ -3454,6 +3511,10 @@ export default function App() {
         drawStdctxCommands(data.commands)
       } else if (data.type === 'stdaud') {
         handleStdaudCommand(data.command)
+      } else if (data.type === 'matplotlib_figure') {
+        addPlotImage(data.figure)
+      } else if (data.type === 'plotly_figure') {
+        addPlotHtml(data.figure)
       }
     }
 
@@ -3481,6 +3542,11 @@ export default function App() {
         cwd: capturedCwd,
         svgTurtleBootstrap,
         stdctxBootstrap: usesSpongeLibsForRun ? STDCTX_WORKER_BOOTSTRAP : '',
+        matplotlibBootstrap: usesMatplotlibForRun ? MATPLOTLIB_BOOTSTRAP : '',
+        matplotlibFlush: usesMatplotlibForRun ? MATPLOTLIB_FLUSH_CODE : '',
+        plotlyBootstrap: plottingLibsForRun.plotly ? PLOTLY_BOOTSTRAP : '',
+        extraPackages: pyodidePackagesFor(plottingLibsForRun),
+        micropipInstall: micropipPackagesForRun.length ? micropipInstallCode(micropipPackagesForRun) : '',
         stdctxKeyBuffer: stdctxKeyBufferRef.current?.buffer ?? null,
         watches: watchesRef.current,
         breakpoints: initialBreakpoints,
@@ -3514,6 +3580,9 @@ export default function App() {
     const shouldRunTurtleCanvas = turtleMode === 'pyo-js-turtle'
     const shouldRunTurtleSvg = turtleMode === 'basthon-svg'
     const spongeLibs = detectSpongeLibs(codeText, vfsFiles)
+    const plottingLibs = detectPlottingLibs(codeText, vfsFiles)
+    const shouldRunMatplotlib = plottingLibs.matplotlib
+    const micropipPackages = micropipPackagesFor(plottingLibs)
     const shouldRunSpongeLibs = !shouldRunPygame && !shouldRunTurtle
       && (spongeLibs.usesStdctx || spongeLibs.usesStdaud)
     const shouldRunStdctx = shouldRunSpongeLibs && spongeLibs.usesStdctx
@@ -3600,6 +3669,32 @@ export default function App() {
         js_set_main_thread_status: (message: string) => setMainThreadStatus(String(message ?? '')),
         js_append_main_thread_log: (message: string) => appendOutput(String(message ?? '')),
       }
+      if (shouldRunPygame) {
+        // pygame.quit() blanks the canvas as it tears SDL down; these lift the
+        // finished frame off it and paint it back, so the drawing outlives the
+        // program exactly as a turtle drawing does.
+        let pygameSnapshot: HTMLCanvasElement | null = null
+        execGlobalsObj.js_pygame_snapshot_canvas = () => {
+          const canvas = mainThreadCanvasRef.current
+          if (!canvas?.width || !canvas.height) { pygameSnapshot = null; return }
+          const copy = document.createElement('canvas')
+          copy.width = canvas.width
+          copy.height = canvas.height
+          copy.getContext('2d')?.drawImage(canvas, 0, 0)
+          pygameSnapshot = copy
+        }
+        execGlobalsObj.js_pygame_restore_canvas = () => {
+          const canvas = mainThreadCanvasRef.current
+          const snapshot = pygameSnapshot
+          pygameSnapshot = null
+          if (!canvas || !snapshot) return
+          // Assigning width/height also clears the canvas, so both happen before
+          // the frame goes back on.
+          canvas.width = snapshot.width
+          canvas.height = snapshot.height
+          canvas.getContext('2d')?.drawImage(snapshot, 0, 0)
+        }
+      }
       if (shouldRunTurtleCanvas) {
         execGlobalsObj.js_turtle_canvas_id = 'canvas'
         execGlobalsObj.js_turtle_resize = (w: number, h: number) => {
@@ -3614,6 +3709,12 @@ export default function App() {
           canvas.focus()
         }
         execGlobalsObj.js_turtle_poll_keys = () => pyodide.toPy(turtlePendingKeys.splice(0))
+      }
+      if (plottingLibs.matplotlib) {
+        execGlobalsObj.js_matplotlib_figure = (dataUri: string) => addPlotImage(dataUri)
+      }
+      if (plottingLibs.plotly) {
+        execGlobalsObj.js_plotly_figure = (html: string) => addPlotHtml(html)
       }
       if (shouldRunSpongeLibs) {
         execGlobalsObj.js_stdctx_send = (commandsJson: string) => drawStdctxCommands(commandsJson)
@@ -3632,6 +3733,21 @@ export default function App() {
       const execGlobals = pyodide.toPy(execGlobalsObj)
 
       try {
+        // Ahead of every other bootstrap, and ahead of the user's own
+        // `import matplotlib.pyplot`: pyplot binds its backend at import time.
+        if (micropipPackages.length) {
+          setMainThreadStatus(`Installing ${micropipPackages.join(', ')}...`)
+          await pyodide.loadPackage('micropip')
+          await pyodide.runPythonAsync(micropipInstallCode(micropipPackages))
+        }
+        const extraPackages = pyodidePackagesFor(plottingLibs)
+        if (extraPackages.length) await pyodide.loadPackage(extraPackages)
+        if (shouldRunMatplotlib) {
+          await pyodide.runPythonAsync(MATPLOTLIB_BOOTSTRAP, { globals: execGlobals })
+        }
+        if (plottingLibs.plotly) {
+          await pyodide.runPythonAsync(PLOTLY_BOOTSTRAP, { globals: execGlobals })
+        }
         if (shouldRunPygame) {
           await pyodide.loadPackage('pygame-ce')
           await pyodide.runPythonAsync(PYGAME_MAIN_THREAD_BOOTSTRAP, { globals: execGlobals })
@@ -3651,6 +3767,11 @@ exec(code_obj, globals())
           `, { globals: execGlobals })
         }
       } finally {
+        // Figures built but never shown still belong on screen — and a failed
+        // run may well have drawn one before it failed.
+        if (shouldRunMatplotlib) {
+          try { await pyodide.runPythonAsync(MATPLOTLIB_FLUSH_CODE, { globals: execGlobals }) } catch { /* best effort */ }
+        }
         execGlobals.destroy?.()
         if (turtleKeyListener && mainThreadCanvasRef.current) {
           mainThreadCanvasRef.current.removeEventListener('keydown', turtleKeyListener)
@@ -4744,6 +4865,11 @@ exec(code_obj, globals())
                   )}
                   {(consoleTab === 'console') && (
                     <div className="flex items-center gap-1.5">
+                      <button type="button" onClick={() => void copyConsoleOutput()}
+                        title="Copy the console output to the clipboard (or Ctrl+C with text selected)"
+                        className="rounded border border-slate-600 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-slate-400 transition-colors hover:border-teal-500 hover:text-teal-300">
+                        {consoleCopied ? 'Copied' : 'Copy'}
+                      </button>
                       <label className="text-[10px] text-slate-500 uppercase tracking-wider">Size</label>
                       <select
                         value={consoleFontSize}
@@ -4864,6 +4990,7 @@ exec(code_obj, globals())
                 <DisplayPane
                   availableSurfaces={availableDisplaySurfaces}
                   activeSurface={activeDisplaySurface}
+                  plotFigures={plotFigures}
                   onSelectSurface={setDisplaySurface}
                   mainThreadCanvasRef={mainThreadCanvasRef}
                   canvasPaneRef={canvasPaneRef}

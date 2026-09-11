@@ -1,4 +1,6 @@
 import { PYGAME_IMPORT_REGEX, STDAUD_USAGE_REGEX, STDCTX_USAGE_REGEX, TURTLE_IMPORT_REGEX, TURTLE_KEYBOARD_REGEX } from '../constants'
+import { MATPLOTLIB_IMPORT_REGEX, SEABORN_IMPORT_REGEX } from './matplotlib'
+import { PLOTLY_IMPORT_REGEX } from './plotly'
 import type {
   StructureModel,
   FunctionDef,
@@ -74,6 +76,86 @@ export const detectSpongeLibs = (
   }
   return { usesStdctx, usesStdaud }
 }
+
+export const codeUsesMatplotlib = (source: string): boolean =>
+  MATPLOTLIB_IMPORT_REGEX.test(cleanCodeText(source))
+
+export const codeUsesPlotly = (source: string): boolean =>
+  PLOTLY_IMPORT_REGEX.test(cleanCodeText(source))
+
+export const codeUsesSeaborn = (source: string): boolean =>
+  SEABORN_IMPORT_REGEX.test(cleanCodeText(source))
+
+/** Which plotting libraries a program reaches for, and how they are served. */
+export interface PlottingLibs {
+  /** Needs the Agg backend and the patched `plt.show()`. */
+  matplotlib: boolean
+  /** Needs the patched `fig.show()` and an iframe to live in. */
+  plotly: boolean
+  /** Draws through matplotlib, so it implies it. */
+  seaborn: boolean
+}
+
+/**
+ * Whether a *whole program* plots, and with what — same reasoning as
+ * `detectSpongeLibs`: the chart is often drawn by an imported module, so every
+ * Python file that will be mounted is checked, not just the open one.
+ *
+ * seaborn sets `matplotlib` too. It is a styling and statistics layer over
+ * pyplot, and a program that only ever names seaborn still needs the Agg
+ * backend and the patched `show()` underneath it.
+ */
+export const detectPlottingLibs = (
+  editorSource: string,
+  files: Iterable<{ path: string; content: ArrayBuffer }> = [],
+): PlottingLibs => {
+  const found = { matplotlib: false, plotly: false, seaborn: false }
+  const scan = (source: string) => {
+    if (!found.matplotlib) found.matplotlib = codeUsesMatplotlib(source)
+    if (!found.plotly) found.plotly = codeUsesPlotly(source)
+    if (!found.seaborn) found.seaborn = codeUsesSeaborn(source)
+  }
+  scan(editorSource)
+  const decoder = new TextDecoder()
+  for (const file of files) {
+    if (found.matplotlib && found.plotly && found.seaborn) break
+    if (!/\.py$/i.test(file.path)) continue
+    try {
+      scan(decoder.decode(file.content))
+    } catch { /* unreadable file — nothing to detect in it */ }
+  }
+  if (found.seaborn) found.matplotlib = true
+  return found
+}
+
+/**
+ * Packages a run needs that Pyodide does not ship, installed with micropip.
+ *
+ * `plotly[express]` rather than plain `plotly`: `plotly.express` is what almost
+ * every example uses, and without the extra it raises an ImportError telling the
+ * student to run pip — advice they cannot act on in a browser. The extra
+ * resolves to pandas, which Pyodide does ship, so it costs a local load rather
+ * than another download.
+ */
+export const pyodidePackagesFor = (libs: PlottingLibs): string[] => [
+  // A seaborn program need never name matplotlib, and plotly.express refuses to
+  // take plain lists without pandas ("Pandas installation is required if no
+  // dataframe is provided"). Both ship with Pyodide, so this is a local load
+  // rather than another trip to PyPI.
+  ...(libs.matplotlib ? ['matplotlib'] : []),
+  ...(libs.plotly ? ['pandas'] : []),
+]
+
+export const micropipPackagesFor = (libs: PlottingLibs): string[] => [
+  ...(libs.seaborn ? ['seaborn'] : []),
+  ...(libs.plotly ? ['plotly[express]'] : []),
+]
+
+/** Kept for callers that only care whether matplotlib's backend must be fixed. */
+export const detectMatplotlib = (
+  editorSource: string,
+  files: Iterable<{ path: string; content: ArrayBuffer }> = [],
+): boolean => detectPlottingLibs(editorSource, files).matplotlib
 
 // ── Structure model ────────────────────────────────────────────────────────
 
