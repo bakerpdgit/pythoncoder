@@ -86,7 +86,7 @@ src/
       ConfirmDialog.tsx       # Styled confirm dialog (with optional warning + checkbox)
       SaveFileDialog.tsx      # Save-to-VFS path/name picker
     ui/
-      IconButton.tsx  ThemeToggleButton.tsx  RuntimeSettingsMenu.tsx
+      IconButton.tsx  ThemeToggleButton.tsx  ExecutionModeDialog.tsx
       PanelVisibilityMenu.tsx  DiagramFontControls.tsx  SettingsDialog.tsx
     diagrams/
       diagramLayout.ts        # Layout algorithms for SVG diagrams

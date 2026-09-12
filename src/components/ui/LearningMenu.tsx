@@ -76,9 +76,6 @@ export function LearningMenu({ menuRef, isOpen, onToggleOpen, onOpenTutorial }: 
               ))}
             </div>
           )}
-          <div className="mt-1 border-t border-slate-700 px-2 pt-2 text-[11px] text-slate-500">
-            Tutorials are loaded live from their GitHub repositories.
-          </div>
         </div>
       )}
     </div>

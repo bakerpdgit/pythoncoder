@@ -4,7 +4,6 @@ import type { PanelVisibility, NamedLayout, ViewMode } from '../../types'
 interface PanelOption {
   key: string
   label: string
-  description: string
 }
 
 interface Props {
@@ -33,6 +32,7 @@ export const PanelVisibilityMenu = ({
   viewMode, onSelectViewMode,
 }: Props) => {
   const visibleCount = panelOptions.filter(({ key }) => visiblePanels[key as keyof PanelVisibility]).length
+  const hasLayoutActions = Boolean(onRestoreDefaults || onSaveLayout)
 
   return (
     <div className="relative" ref={menuRef}>
@@ -53,76 +53,29 @@ export const PanelVisibilityMenu = ({
 
       {isOpen && (
         <div className="absolute right-0 z-30 mt-2 w-64 rounded-lg border border-slate-600 bg-slate-800 p-2 shadow-2xl">
-          {onSelectViewMode && viewMode && (
-            <>
-              <div className="px-2 pb-2 text-[11px] uppercase tracking-wider text-slate-500">View</div>
-              <div className="space-y-0.5">
-                {([
-                  { key: 'minimal' as const, label: 'Minimal', desc: 'Code + console, hide-able sidebar.' },
-                  { key: 'developer' as const, label: 'Developer', desc: 'All panels, classic layout.' },
-                ]).map(({ key, label, desc }) => (
-                  <button key={key} type="button" onClick={() => onSelectViewMode(key)}
-                    className={`w-full flex items-start gap-2 rounded-md px-2 py-2 text-left transition-colors hover:bg-slate-900/70 ${viewMode === key ? 'bg-slate-900/40' : ''}`}>
-                    <span className={`mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center text-emerald-400 text-xs`}>
-                      {viewMode === key ? '✓' : ''}
-                    </span>
-                    <span className="min-w-0">
-                      <span className="block text-sm font-medium text-slate-200">{label}</span>
-                      <span className="block text-[11px] text-slate-500">{desc}</span>
-                    </span>
-                  </button>
-                ))}
-              </div>
-              <div className="my-1.5 border-t border-slate-700" />
-            </>
-          )}
-          <div className="px-2 pb-2 text-[11px] uppercase tracking-wider text-slate-500">Panel Visibility</div>
-          <div className="space-y-1">
-            {panelOptions.map(({ key, label, description }) => {
-              const isVisible = visiblePanels[key as keyof PanelVisibility]
-              const isLastVisible = visibleCount === 1 && isVisible
-              return (
-                <label key={key} className={`flex cursor-pointer items-start gap-3 rounded-md px-2 py-2 transition-colors hover:bg-slate-900/70 ${isLastVisible ? 'opacity-60' : ''}`}>
-                  <input
-                    type="checkbox"
-                    checked={isVisible}
-                    onChange={() => onTogglePanel(key)}
-                    disabled={isLastVisible}
-                    className="mt-0.5 h-4 w-4 rounded border-slate-500 bg-slate-900"
-                    style={{ accentColor: checkboxAccent }}
-                  />
-                  <span className="min-w-0">
-                    <span className="block text-sm font-medium text-slate-200">{label}</span>
-                    <span className="block text-[11px] text-slate-500">{description}</span>
-                  </span>
-                </label>
-              )
-            })}
-          </div>
-
-          <div className="my-1.5 border-t border-slate-700" />
-
           {/* Layout actions */}
-          <div className="flex gap-1.5 px-2 py-1">
-            {onRestoreDefaults && (
-              <button
-                type="button"
-                onClick={onRestoreDefaults}
-                className="flex-1 rounded border border-slate-600 px-2 py-1.5 text-[11px] text-slate-300 hover:border-slate-400 hover:text-slate-100 transition-colors"
-              >
-                Restore defaults
-              </button>
-            )}
-            {onSaveLayout && (
-              <button
-                type="button"
-                onClick={onSaveLayout}
-                className="flex-1 rounded border border-slate-600 px-2 py-1.5 text-[11px] text-slate-300 hover:border-emerald-400 hover:text-emerald-300 transition-colors"
-              >
-                Save layout…
-              </button>
-            )}
-          </div>
+          {hasLayoutActions && (
+            <div className="flex gap-1.5 px-2 py-1">
+              {onRestoreDefaults && (
+                <button
+                  type="button"
+                  onClick={onRestoreDefaults}
+                  className="flex-1 rounded border border-slate-600 px-2 py-1.5 text-[11px] text-slate-300 hover:border-slate-400 hover:text-slate-100 transition-colors"
+                >
+                  Restore defaults
+                </button>
+              )}
+              {onSaveLayout && (
+                <button
+                  type="button"
+                  onClick={onSaveLayout}
+                  className="flex-1 rounded border border-slate-600 px-2 py-1.5 text-[11px] text-slate-300 hover:border-emerald-400 hover:text-emerald-300 transition-colors"
+                >
+                  Save layout…
+                </button>
+              )}
+            </div>
+          )}
 
           {/* Saved layouts list */}
           {savedLayouts.length > 0 && (
@@ -155,7 +108,48 @@ export const PanelVisibilityMenu = ({
             </>
           )}
 
-          <div className="px-2 pt-1 text-[11px] text-slate-500">Focus a checkbox and press Space to toggle it.</div>
+          {(hasLayoutActions || savedLayouts.length > 0) && <div className="my-1.5 border-t border-slate-700" />}
+
+          {onSelectViewMode && viewMode && (
+            <>
+              <div className="px-2 pb-1 text-[11px] uppercase tracking-wider text-slate-500">View</div>
+              <div className="space-y-0.5">
+                {([
+                  { key: 'minimal' as const, label: 'Minimal' },
+                  { key: 'developer' as const, label: 'Developer' },
+                ]).map(({ key, label }) => (
+                  <button key={key} type="button" onClick={() => onSelectViewMode(key)}
+                    className={`w-full flex items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-slate-900/70 ${viewMode === key ? 'bg-slate-900/40' : ''}`}>
+                    <span className="flex h-4 w-4 flex-shrink-0 items-center justify-center text-emerald-400 text-xs">
+                      {viewMode === key ? '✓' : ''}
+                    </span>
+                    <span className="text-sm font-medium text-slate-200">{label}</span>
+                  </button>
+                ))}
+              </div>
+              <div className="my-1.5 border-t border-slate-700" />
+            </>
+          )}
+          <div className="px-2 pb-1 text-[11px] uppercase tracking-wider text-slate-500">Panel Visibility</div>
+          <div className="space-y-0.5">
+            {panelOptions.map(({ key, label }) => {
+              const isVisible = visiblePanels[key as keyof PanelVisibility]
+              const isLastVisible = visibleCount === 1 && isVisible
+              return (
+                <label key={key} className={`flex cursor-pointer items-center gap-3 rounded-md px-2 py-1.5 transition-colors hover:bg-slate-900/70 ${isLastVisible ? 'opacity-60' : ''}`}>
+                  <input
+                    type="checkbox"
+                    checked={isVisible}
+                    onChange={() => onTogglePanel(key)}
+                    disabled={isLastVisible}
+                    className="h-4 w-4 rounded border-slate-500 bg-slate-900"
+                    style={{ accentColor: checkboxAccent }}
+                  />
+                  <span className="text-sm font-medium text-slate-200">{label}</span>
+                </label>
+              )
+            })}
+          </div>
         </div>
       )}
     </div>

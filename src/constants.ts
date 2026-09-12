@@ -27,9 +27,10 @@ export const DIAGRAM_FONT_DEFAULT = 11
 export const DIAGRAM_FONT_MIN = 8
 export const DIAGRAM_FONT_MAX = 20
 
-export const RUNTIME_LABELS: Record<string, string> = {
-  'trace-worker': 'Trace Worker',
-  'main-thread': 'Main Thread',
+/** Short names for the settings menu row, e.g. "Execution: Trace…". */
+export const RUNTIME_SHORT_LABELS: Record<string, string> = {
+  'trace-worker': 'Trace',
+  'main-thread': 'Main',
 }
 
 export const RUNTIME_OPTIONS = [
@@ -46,36 +47,12 @@ export const RUNTIME_OPTIONS = [
 ] as const
 
 export const PANEL_OPTIONS = [
-  {
-    key: 'filesystem',
-    label: 'File System',
-    description: 'Virtual file browser, multiple projects, Pyodide FS integration.',
-  },
-  {
-    key: 'code',
-    label: 'Code Trace',
-    description: 'Editor, breakpoints, and line focus.',
-  },
-  {
-    key: 'visualizer',
-    label: 'Variable Inspector',
-    description: 'Globals and locals inspectors stacked below the file system.',
-  },
-  {
-    key: 'output',
-    label: 'Console Output',
-    description: 'stdout, stderr and runtime messages, plus the Display pane for visual output.',
-  },
-  {
-    key: 'diagram',
-    label: 'Structure',
-    description: 'Outline, hierarchy, UML and notes tabs.',
-  },
-  {
-    key: 'teacherTools',
-    label: 'Teacher Tools',
-    description: 'Create and edit learning books: exercises, tests, guides and files.',
-  },
+  { key: 'filesystem', label: 'File System' },
+  { key: 'code', label: 'Code Trace' },
+  { key: 'visualizer', label: 'Variable Inspector' },
+  { key: 'output', label: 'Console Output' },
+  { key: 'diagram', label: 'Structure' },
+  { key: 'teacherTools', label: 'Teacher Tools' },
 ] as const
 
 export const FS_SIDEBAR_WIDTH = 240

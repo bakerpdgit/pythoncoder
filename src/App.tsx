@@ -44,7 +44,7 @@ import { SaveFileDialog } from './components/dialogs/SaveFileDialog'
 import { StudentLinkDialog, type StudentLinkSource } from './components/dialogs/StudentLinkDialog'
 import { getExplanation, getDefinitionKey } from './data/explanations'
 import { ThemeToggleButton } from './components/ui/ThemeToggleButton'
-import { RuntimeSettingsMenu } from './components/ui/RuntimeSettingsMenu'
+import { ExecutionModeDialog } from './components/ui/ExecutionModeDialog'
 import { PanelVisibilityMenu } from './components/ui/PanelVisibilityMenu'
 import { LearningMenu, type LearningTutorial } from './components/ui/LearningMenu'
 import { DiagramFontControls } from './components/ui/DiagramFontControls'
@@ -67,7 +67,7 @@ import { clampDiagramFontSize } from './components/diagrams/diagramLayout'
 import {
   TRACE_CMD_STEP_INTO, TRACE_CMD_STEP_OVER, TRACE_CMD_STEP_OUT_BLOCK, TRACE_CMD_CONTINUE,
   DEFAULT_CODE_FILENAME, DIAGRAM_FONT_DEFAULT, DIAGRAM_FONT_MIN, DIAGRAM_FONT_MAX,
-  PANEL_OPTIONS,
+  PANEL_OPTIONS, RUNTIME_SHORT_LABELS,
 } from './constants'
 import type {
   Theme, RuntimeKey, PanelVisibility, InputRequest, SabRef, SimState, InspectorPath,
@@ -263,7 +263,8 @@ export default function App() {
   const [diagramFontSize, setDiagramFontSize] = useState(DIAGRAM_FONT_DEFAULT)
   const [isPanelMenuOpen, setIsPanelMenuOpen] = useState(false)
   const [isLearningMenuOpen, setIsLearningMenuOpen] = useState(false)
-  const [isRuntimeMenuOpen, setIsRuntimeMenuOpen] = useState(false)
+  const [isExecutionDialogOpen, setIsExecutionDialogOpen] = useState(false)
+  const closeExecutionDialog = useCallback(() => setIsExecutionDialogOpen(false), [])
   const [isQuickSettingsOpen, setIsQuickSettingsOpen] = useState(false)
   const [fixedInputsText, setFixedInputsText] = useState<string>('')
   // Active tab of the console panel. Trace Table appears after a Trace session starts.
@@ -396,7 +397,6 @@ export default function App() {
   const teacherZipInputRef = useRef<HTMLInputElement | null>(null)
   const panelMenuRef = useRef<HTMLDivElement | null>(null)
   const learningMenuRef = useRef<HTMLDivElement | null>(null)
-  const runtimeMenuRef = useRef<HTMLDivElement | null>(null)
   const quickSettingsRef = useRef<HTMLDivElement | null>(null)
   const fixedInputsQueueRef = useRef<string[]>([])
   const mainThreadCanvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -806,7 +806,7 @@ export default function App() {
   useEffect(() => {
     if (!isRunning) return
     setIsPanelMenuOpen(false)
-    setIsRuntimeMenuOpen(false)
+    setIsExecutionDialogOpen(false)
     setIsQuickSettingsOpen(false)
     setIsRunDropdownOpen(false)
   }, [isRunning])
@@ -834,18 +834,18 @@ export default function App() {
   }, [bpMenu, isBpToolMenuOpen])
 
   useEffect(() => {
-    if (!isPanelMenuOpen && !isLearningMenuOpen && !isRuntimeMenuOpen && !isQuickSettingsOpen) return
+    if (!isPanelMenuOpen && !isLearningMenuOpen && !isQuickSettingsOpen) return
     const handlePointerDown = (event: MouseEvent) => {
-      if (panelMenuRef.current?.contains(event.target as Node) || learningMenuRef.current?.contains(event.target as Node) || runtimeMenuRef.current?.contains(event.target as Node) || quickSettingsRef.current?.contains(event.target as Node)) return
-      setIsPanelMenuOpen(false); setIsLearningMenuOpen(false); setIsRuntimeMenuOpen(false); setIsQuickSettingsOpen(false)
+      if (panelMenuRef.current?.contains(event.target as Node) || learningMenuRef.current?.contains(event.target as Node) || quickSettingsRef.current?.contains(event.target as Node)) return
+      setIsPanelMenuOpen(false); setIsLearningMenuOpen(false); setIsQuickSettingsOpen(false)
     }
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') { setIsPanelMenuOpen(false); setIsLearningMenuOpen(false); setIsRuntimeMenuOpen(false); setIsQuickSettingsOpen(false) }
+      if (event.key === 'Escape') { setIsPanelMenuOpen(false); setIsLearningMenuOpen(false); setIsQuickSettingsOpen(false) }
     }
     document.addEventListener('mousedown', handlePointerDown)
     document.addEventListener('keydown', handleKeyDown)
     return () => { document.removeEventListener('mousedown', handlePointerDown); document.removeEventListener('keydown', handleKeyDown) }
-  }, [isPanelMenuOpen, isLearningMenuOpen, isRuntimeMenuOpen, isQuickSettingsOpen])
+  }, [isPanelMenuOpen, isLearningMenuOpen, isQuickSettingsOpen])
 
   useEffect(() => {
     const onMouseMove = (e: MouseEvent) => {
@@ -4071,10 +4071,10 @@ exec(code_obj, globals())
 
         <div className="flex items-center gap-3">
           <LearningMenu menuRef={learningMenuRef} isOpen={isLearningMenuOpen}
-            onToggleOpen={() => { setIsPanelMenuOpen(false); setIsRuntimeMenuOpen(false); setIsQuickSettingsOpen(false); setIsLearningMenuOpen(o => !o) }}
+            onToggleOpen={() => { setIsPanelMenuOpen(false); setIsQuickSettingsOpen(false); setIsLearningMenuOpen(o => !o) }}
             onOpenTutorial={handleLearningTutorialOpen} />
           <PanelVisibilityMenu menuRef={panelMenuRef} isOpen={isPanelMenuOpen}
-            onToggleOpen={() => { setIsLearningMenuOpen(false); setIsRuntimeMenuOpen(false); setIsQuickSettingsOpen(false); setIsPanelMenuOpen(o => !o) }}
+            onToggleOpen={() => { setIsLearningMenuOpen(false); setIsQuickSettingsOpen(false); setIsPanelMenuOpen(o => !o) }}
             panelOptions={PANEL_OPTIONS} visiblePanels={visiblePanels} onTogglePanel={togglePanelVisibility}
             buttonHoverClass="hover:border-emerald-400" checkboxAccent="#34d399" disabled={isRunPresentationMode}
             onRestoreDefaults={handleRestoreDefaults}
@@ -4084,14 +4084,9 @@ exec(code_obj, globals())
             onDeleteLayout={handleDeleteLayout}
             viewMode={viewMode}
             onSelectViewMode={handleSelectViewMode} />
-          <RuntimeSettingsMenu menuRef={runtimeMenuRef} isOpen={isRuntimeMenuOpen}
-            onToggleOpen={() => { setIsLearningMenuOpen(false); setIsPanelMenuOpen(false); setIsQuickSettingsOpen(false); setIsRuntimeMenuOpen(o => !o) }}
-            runtimePreference={runtimePreference} selectedRuntime={selectedRuntime}
-            onSelectRuntime={key => { setRuntimePreference(key); setIsRuntimeMenuOpen(false) }}
-            isPygameLocked={isPygameLocked || isTurtleLocked} hasSab={hasSab} disabled={isRunning} />
           <div ref={quickSettingsRef} className="relative">
             <button type="button" title="Settings"
-              onClick={() => { setIsLearningMenuOpen(false); setIsPanelMenuOpen(false); setIsRuntimeMenuOpen(false); setIsQuickSettingsOpen(o => !o) }}
+              onClick={() => { setIsLearningMenuOpen(false); setIsPanelMenuOpen(false); setIsQuickSettingsOpen(o => !o) }}
               className={`rounded border p-1.5 transition-colors ${isQuickSettingsOpen ? 'border-slate-400 text-slate-200' : 'border-slate-600 text-slate-400 hover:border-slate-400 hover:text-slate-200'}`}>
               <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065zM15 12a3 3 0 11-6 0 3 3 0 016 0z" />
@@ -4115,6 +4110,15 @@ exec(code_obj, globals())
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h5M20 20v-5h-5M5.64 18.36A9 9 0 1020 12" />
                   </svg>
                   Reset Pyodide…
+                </button>
+                <button type="button" disabled={isRunning}
+                  title="Choose the execution mode"
+                  onClick={() => { setIsExecutionDialogOpen(true); setIsQuickSettingsOpen(false) }}
+                  className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-slate-400 hover:bg-slate-700 hover:text-slate-200 transition-colors disabled:cursor-not-allowed disabled:opacity-50">
+                  <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                  </svg>
+                  Execution: {RUNTIME_SHORT_LABELS[selectedRuntime]}…
                 </button>
                 <button type="button"
                   onClick={() => { setIsSettingsOpen(true); setIsQuickSettingsOpen(false) }}
@@ -4331,7 +4335,7 @@ exec(code_obj, globals())
                 You can switch to main-thread execution instead. That uses browser prompt pop-ups for input, and step debugging plus live inspection are currently disabled there.
               </div>
             </div>
-            <button type="button" onClick={() => { setRuntimePreference('main-thread'); setIsRuntimeMenuOpen(false) }}
+            <button type="button" onClick={() => setRuntimePreference('main-thread')}
               className="shrink-0 rounded border border-amber-400 bg-amber-500/15 px-4 py-2 text-sm font-semibold text-amber-100 transition-colors hover:bg-amber-500/25">
               Use Main Thread
             </button>
@@ -4866,9 +4870,18 @@ exec(code_obj, globals())
                   {(consoleTab === 'console') && (
                     <div className="flex items-center gap-1.5">
                       <button type="button" onClick={() => void copyConsoleOutput()}
-                        title="Copy the console output to the clipboard (or Ctrl+C with text selected)"
-                        className="rounded border border-slate-600 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-slate-400 transition-colors hover:border-teal-500 hover:text-teal-300">
-                        {consoleCopied ? 'Copied' : 'Copy'}
+                        title={consoleCopied ? 'Copied' : 'Copy the console output to the clipboard (or Ctrl+C with text selected)'}
+                        aria-label={consoleCopied ? 'Copied' : 'Copy console output'}
+                        className={`rounded border border-slate-600 p-1 transition-colors hover:border-teal-500 hover:text-teal-300 ${consoleCopied ? 'text-teal-300' : 'text-slate-400'}`}>
+                        {consoleCopied ? (
+                          <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5 13l4 4L19 7" />
+                          </svg>
+                        ) : (
+                          <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                          </svg>
+                        )}
                       </button>
                       <label className="text-[10px] text-slate-500 uppercase tracking-wider">Size</label>
                       <select
@@ -5166,6 +5179,10 @@ exec(code_obj, globals())
       </div>
 
       <SettingsDialog isOpen={isSettingsOpen} settings={appSettings} onClose={() => setIsSettingsOpen(false)} onSettingsChange={setAppSettings} />
+      <ExecutionModeDialog isOpen={isExecutionDialogOpen} onClose={closeExecutionDialog}
+        runtimePreference={runtimePreference} selectedRuntime={selectedRuntime}
+        onSelectRuntime={key => { setRuntimePreference(key); closeExecutionDialog() }}
+        isPygameLocked={isPygameLocked || isTurtleLocked} hasSab={hasSab} />
 
       {showBookJsonEditor && editManifest && (
         <BookJsonEditor

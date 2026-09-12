@@ -130,7 +130,7 @@ src/
       GitHubRepoBrowser.tsx   # Pick a book.json / ZIP / folder inside a repository
       SimpleBookOption.tsx    # The "simple learning book" tick and its (i) explainer
     ui/
-      IconButton.tsx  ThemeToggleButton.tsx  RuntimeSettingsMenu.tsx
+      IconButton.tsx  ThemeToggleButton.tsx  ExecutionModeDialog.tsx
       PanelVisibilityMenu.tsx  DiagramFontControls.tsx  SettingsDialog.tsx
     diagrams/
       diagramLayout.ts        # Layout algorithms for SVG diagrams
@@ -616,7 +616,7 @@ These are set in:
   nothing selected it keeps its terminal meaning and stops the running program.
   Right-click copies a selection too, because xterm draws its selection as an
   overlay the native context menu cannot see.
-- The **Copy** button in the console header copies the selection if there is one
+- The copy icon in the console header copies the selection if there is one
   and the whole buffer otherwise, and works in the non-terminal console mode too.
 - `copyTextToClipboard` falls back to `execCommand('copy')` when
   `navigator.clipboard` is refused — a school network is exactly where that
