@@ -1652,6 +1652,11 @@ self.onmessage = async function (e: MessageEvent) {
     // simulation.py, which is the name the student can actually act on.
     await pyodide.runPythonAsync('import warnings; warnings.simplefilter("ignore", SyntaxWarning)')
     await pyodide.loadPackagesFromImports(userCode)
+    // The open file is not the whole program. A module it imports may need
+    // numpy just as much, and Pyodide installs only what it is shown.
+    for (const source of (e.data.moduleSources ?? []) as string[]) {
+      await pyodide.loadPackagesFromImports(source)
+    }
     await pyodide.runPythonAsync('warnings.simplefilter("once", SyntaxWarning)')
     if (useSvgTurtle) {
       await pyodide.runPythonAsync(e.data.svgTurtleBootstrap as string)

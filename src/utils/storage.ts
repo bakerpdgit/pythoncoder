@@ -1,5 +1,5 @@
 import { THEME_STORAGE_KEY, NOTES_STORAGE_KEY, SETTINGS_STORAGE_KEY } from '../constants'
-import type { Theme, AppSettings, BookNavState, InputMode, NamedLayout, LayoutPrefs, PanelVisibility, ViewMode } from '../types'
+import type { Theme, AppSettings, BookNavState, DisplayZoom, InputMode, NamedLayout, LayoutPrefs, PanelVisibility, ViewMode } from '../types'
 import type { ParsonsArrangement } from './parsons'
 
 const EDITOR_FONT_SIZE_KEY = 'coder_editor_font_size'
@@ -27,6 +27,22 @@ export const getStoredConsoleFontSize = (): number => {
 
 export const persistConsoleFontSize = (size: number): void => {
   try { localStorage.setItem(CONSOLE_FONT_SIZE_KEY, String(size)) } catch { /* ignore */ }
+}
+
+const DISPLAY_ZOOM_KEY = 'coder_display_zoom'
+
+/** Zoom levels the Display pane offers besides Fit, as percentages of actual size. */
+export const DISPLAY_ZOOM_LEVELS = [25, 50, 75, 100, 125, 150, 200, 300, 400]
+
+export const getStoredDisplayZoom = (): DisplayZoom => {
+  try {
+    const n = Number(localStorage.getItem(DISPLAY_ZOOM_KEY))
+    return DISPLAY_ZOOM_LEVELS.includes(n) ? n : 'fit'
+  } catch { return 'fit' }
+}
+
+export const persistDisplayZoom = (zoom: DisplayZoom): void => {
+  try { localStorage.setItem(DISPLAY_ZOOM_KEY, String(zoom)) } catch { /* ignore */ }
 }
 
 const FIXED_INPUTS_KEY_PREFIX = 'pythoncoder-fixed-inputs-'
@@ -259,6 +275,8 @@ export const DEFAULT_LAYOUT_PREFS: LayoutPrefs = {
   rightSidebarCollapsed: false,
   displaySplit: DEFAULT_DISPLAY_SPLIT,
   presentationDisplaySplit: DEFAULT_PRESENTATION_DISPLAY_SPLIT,
+  editorCollapsed: false,
+  consoleCollapsed: false,
 }
 
 const sanitiseSplit = (raw: unknown, fallback: number): number => {
@@ -297,6 +315,8 @@ export const getStoredLayoutPrefs = (): LayoutPrefs => {
       rightSidebarCollapsed: parsed?.rightSidebarCollapsed === true,
       displaySplit: sanitiseSplit(parsed?.displaySplit, DEFAULT_DISPLAY_SPLIT),
       presentationDisplaySplit: sanitiseSplit(parsed?.presentationDisplaySplit, DEFAULT_PRESENTATION_DISPLAY_SPLIT),
+      editorCollapsed: parsed?.editorCollapsed === true,
+      consoleCollapsed: parsed?.consoleCollapsed === true,
     }
   } catch {
     return { ...DEFAULT_LAYOUT_PREFS, visiblePanels: { ...DEFAULT_LAYOUT_PREFS.visiblePanels } }

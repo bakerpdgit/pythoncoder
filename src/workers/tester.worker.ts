@@ -4,6 +4,7 @@ import { SVG_TURTLE_WORKER_SETUP } from '../utils/mainThread'
 import { STDCTX_TEST_BOOTSTRAP } from '../utils/stdctx'
 import { MATPLOTLIB_BOOTSTRAP } from '../utils/matplotlib'
 import { detectMatplotlib, detectSpongeLibs } from '../utils/codeAnalysis'
+import { programPythonFiles, type ProgramFile } from '../utils/importGraph'
 import { normalizeTestInputs } from '../utils/testInputs'
 
 const PYODIDE_BASE_URL = 'https://cdn.jsdelivr.net/pyodide/v0.29.3/full'
@@ -110,9 +111,14 @@ async function ensurePyodide(): Promise<any> {
   }
 }
 
-async function initPyodide(code: string): Promise<void> {
+async function initPyodide(code: string, modules: ProgramFile[] = []): Promise<void> {
   await ensurePyodide()
-  try { await pyodide.loadPackagesFromImports(code) } catch { /* ignore */ }
+  // The modules a challenge imports may need packages the challenge itself
+  // never names, and Pyodide installs only what it is shown.
+  const decoder = new TextDecoder()
+  for (const source of [code, ...modules.map(file => decoder.decode(file.content))]) {
+    try { await pyodide.loadPackagesFromImports(source) } catch { /* ignore */ }
+  }
 }
 
 function mountFiles(files: Array<{ path: string; content: ArrayBuffer }>): void {
@@ -181,7 +187,7 @@ self.onmessage = async (e: MessageEvent) => {
       files: Array<{ path: string; content: ArrayBuffer }>
     }
     try {
-      await initPyodide(solutionCode)
+      await initPyodide(solutionCode, programPythonFiles(solutionCode, null, files ?? []))
       if (files?.length) mountFiles(files)
       try { pyodide.runPython('import os; os.chdir("/")') } catch { /* ignore */ }
       const svg = runCodeAndCaptureSvg(solutionCode, inputs)
@@ -205,7 +211,9 @@ self.onmessage = async (e: MessageEvent) => {
 
   try {
     self.postMessage({ type: 'status', message: pyodide ? 'Preparing tests…' : 'Finishing Python runtime startup…' })
-    await initPyodide(code)
+    // Only what the challenge can import decides what it needs, as for a run.
+    const programFiles = programPythonFiles(code, null, files ?? [])
+    await initPyodide(code, programFiles)
 
     const hasTurtleTests = tests.some(t =>
       Array.isArray(t.out) && t.out.some((r: { typ?: string }) => r.typ === 't')
@@ -214,9 +222,9 @@ self.onmessage = async (e: MessageEvent) => {
       pyodide.runPython(SVG_TURTLE_WORKER_SETUP)
     }
 
-    const spongeLibs = detectSpongeLibs(code, files ?? [])
+    const spongeLibs = detectSpongeLibs(code, programFiles)
     if (spongeLibs.usesStdctx || spongeLibs.usesStdaud) installStdctxForTests()
-    if (detectMatplotlib(code, files ?? [])) installMatplotlibForTests()
+    if (detectMatplotlib(code, programFiles)) installMatplotlibForTests()
 
     const results: Array<{
       caseIndex: number

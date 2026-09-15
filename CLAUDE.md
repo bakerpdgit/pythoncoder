@@ -95,6 +95,7 @@ src/
     tester.worker.ts          # Pyodide worker for running challenge tests
   utils/
     codeAnalysis.ts           # Python source parsing (classes, functions, outline)
+    importGraph.ts            # which .py files a run can reach through its imports
     virtualFS.ts              # IndexedDB-backed virtual filesystem (multiple named FSes)
     bookLoader.ts             # Learning "book" manifest/challenge loading
     simpleBook.ts             # Books with no book.json — a flat folder of .py exercises
@@ -130,7 +131,7 @@ src/
       GitHubRepoBrowser.tsx   # Pick a book.json / ZIP / folder inside a repository
       SimpleBookOption.tsx    # The "simple learning book" tick and its (i) explainer
     ui/
-      IconButton.tsx  ThemeToggleButton.tsx  ExecutionModeDialog.tsx
+      IconButton.tsx  FoldButton.tsx  ThemeToggleButton.tsx  ExecutionModeDialog.tsx
       PanelVisibilityMenu.tsx  DiagramFontControls.tsx  SettingsDialog.tsx
     diagrams/
       diagramLayout.ts        # Layout algorithms for SVG diagrams
@@ -488,6 +489,29 @@ These are set in:
   developer view, its own column in minimal view). It now has one home in both
   view modes, which is why `rightColSplit` and `structureColWidth` are gone.
 
+### Folding the editor and console
+
+- The Code Editor and Console headers carry a double chevron (`FoldButton`)
+  that folds the panel vertically to its header strip, the up/down counterpart
+  of the sidebars' collapse. Both folds persist in `LayoutPrefs` and
+  `NamedLayout`, and **Restore defaults** and switching view mode clear them.
+- A fold is offered only where a neighbour can take the height it gives up:
+  the editor only in minimal view (the output panel is below it), the console
+  only when the Display pane is below it or the editor above it. Anywhere else
+  it would just leave a gap, so `canCollapseEditor` / `canCollapseConsole` hide
+  the control and a remembered fold waits until it can apply.
+- Both folded with no Display pane would fold neither, so the editor yields and
+  stays open, with the console's header at the bottom of the column
+  (`isOutputHeaderOnly`). The console's chevron then points down, because that
+  is the way that panel folds.
+- Folding hides, never unmounts: Monaco (the dispose churn) and the xterm
+  console (its buffer) stay mounted under `hidden`, and xterm's fit is a no-op
+  while hidden, exactly as on a console tab switch. The other console tabs
+  unmount, as they already do when not selected.
+- Something arriving opens its panel: an `input()` request opens the console
+  (except in popup-dialog input mode), and opening a file or turning to a book
+  activity opens the editor.
+
 ### The Display pane
 
 - **Every** kind of visual output lives in one **Display pane**, rendered directly
@@ -534,6 +558,57 @@ These are set in:
   `beginStdctxRun` and `beginMainThreadCanvasRun` each force `visiblePanels.output`
   true and select their surface. Without that, a debug run draws into a hidden
   panel and looks as though it did nothing.
+
+### Display zoom
+
+- The Display header's Zoom dropdown (`displayZoom`, persisted as
+  `coder_display_zoom`) is **Fit** or a percentage of actual size. Fit is what
+  the surfaces always did — shrink to the pane, never enlarge — except that the
+  stdctx canvas now fits too, rather than scrolling at full size.
+- A percentage is CSS `zoom` on the surface's content, not a transform. `zoom`
+  scales the layout box along with the pixels, so the scroll area grows with it
+  and scroll bars appear exactly when it stops fitting. The wrapper switches to
+  `w-max min-w-full` so wide content scrolls instead of being squeezed.
+- No surface needs to know what a program drew: a canvas zooms from whatever
+  size pygame, turtle or `stdctx.resize` gave it, an SVG from its attributes, a
+  matplotlib PNG from its natural size (`max-w-none`, beating preflight's
+  `img { max-width: 100% }`). A plotly iframe fills any frame it is given, so
+  zoomed it starts from plotly's default 700x440.
+- Input survives zoom, checked at 200% in Chromium: `getBoundingClientRect`
+  reports the zoomed box, which is what SDL maps the mouse through, so a click
+  on pixel (50, 40) of a pygame window reaches pygame as (50, 40). An iframe's
+  content is scaled with its box (the frame still sees a 700px viewport), so
+  plotly's hover labels appear under the pointer.
+- The stdctx canvas's container is a block, not a flex row: `max-width` /
+  `max-height` preserve a block replaced element's aspect ratio when fitting it,
+  and a flex item's are not guaranteed to.
+
+### A run loads only what its imports reach
+
+- A run's source decides what gets installed before it starts: matplotlib's
+  Agg bootstrap, seaborn and plotly from PyPI, the stdctx bootstrap. Those
+  checks used to scan every `.py` in the filesystem, so a sibling file that
+  plots made "Hello, World!" load matplotlib, and one importing seaborn sent it
+  to PyPI.
+- `programPythonFiles` (`utils/importGraph.ts`) follows imports instead, from
+  the file being run through every module they reach, and the detectors
+  (`detectSpongeLibs`, `detectPlottingLibs`, `detectMatplotlib`) are handed that
+  set. Both runtimes and the tester worker use it.
+- It errs towards including a file, because a miss breaks the program while an
+  extra only costs load time. Imports are matched by pattern (inside `if`,
+  `try`, functions, even docstrings); a module is looked for beside the file
+  being run, in the working directory (Pyodide's `sys.path[0]` is `''`), at the
+  root and beside its importer; a package pulls in every `__init__.py` on the
+  way; a star import takes the whole package. Anything no pattern can follow —
+  `importlib`, `__import__`, `exec`, `runpy`, touching `sys.path` or `chdir` —
+  falls back to every file.
+- `loadPackagesFromImports` installs only what it is shown, and it used to be
+  shown only the open file: a helper module's own `import numpy` failed with
+  `ModuleNotFoundError` — unless a plotting file anywhere in the filesystem
+  happened to drag numpy in behind matplotlib, which hid the bug. Every reached
+  module is scanned now too: `moduleSources` in the trace worker's `init`
+  message, a loop in the main-thread run, `initPyodide(code, modules)` in the
+  tester.
 
 ### Data science: matplotlib, seaborn, numpy and plotly
 
@@ -632,8 +707,9 @@ These are set in:
   pane* below).
 - The Python source and the JS renderers all live in `utils/stdctx.ts`;
   `CanvasPane.tsx` hosts the canvas. One bootstrap installs both objects.
-- Detection is `detectSpongeLibs(editorSource, files)`, which scans **every
-  mounted `.py`**, not just the open file. Book challenges routinely keep their
+- Detection is `detectSpongeLibs(editorSource, files)` over **every module the
+  program can import** (see *A run loads only what its imports reach*), not
+  just the open file. Book challenges routinely keep their
   drawing in an imported module (`import UI`), so the file on screen never
   mentions stdctx even though the run needs it — checking only the editor left
   those programs with `ImportError: cannot import name 'stdctx' from 'sys'`.

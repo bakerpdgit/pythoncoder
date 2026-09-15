@@ -14,7 +14,8 @@ import {
   buildPythonStructureModel, analyzePythonClasses, analyzePythonFunctions,
   analyzePythonOutline, cleanCodeText, codeUsesPygame, codeUsesStdctx, codeUsesTurtle, codeUsesTurtleKeyboard, detectPlottingLibs, detectSpongeLibs, getExpandableOutlineIds, micropipPackagesFor, pyodidePackagesFor,
 } from './utils/codeAnalysis'
-import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides, getStoredSettings, persistSettings, getStoredBookNavState, persistBookNavState, getStoredFixedInputs, persistFixedInputs, getStoredEditorFontSize, persistEditorFontSize, getStoredConsoleFontSize, persistConsoleFontSize, getStoredWatches, persistWatches, getStoredNamedLayouts, persistNamedLayouts, getStoredCompletions, persistCompletion, clearCompletionsForBook, getStoredParsonsState, persistParsonsState, clearParsonsState, clearParsonsStateForBook, getStoredLayoutPrefs, persistLayoutPrefs, defaultPanelsForView, MINIMAL_VISIBLE_PANELS, DEFAULT_DISPLAY_SPLIT, DEFAULT_PRESENTATION_DISPLAY_SPLIT, DISPLAY_SPLIT_MIN, DISPLAY_SPLIT_MAX } from './utils/storage'
+import { programPythonFiles } from './utils/importGraph'
+import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides, getStoredSettings, persistSettings, getStoredBookNavState, persistBookNavState, getStoredFixedInputs, persistFixedInputs, getStoredEditorFontSize, persistEditorFontSize, getStoredConsoleFontSize, persistConsoleFontSize, getStoredDisplayZoom, persistDisplayZoom, getStoredWatches, persistWatches, getStoredNamedLayouts, persistNamedLayouts, getStoredCompletions, persistCompletion, clearCompletionsForBook, getStoredParsonsState, persistParsonsState, clearParsonsState, clearParsonsStateForBook, getStoredLayoutPrefs, persistLayoutPrefs, defaultPanelsForView, MINIMAL_VISIBLE_PANELS, DEFAULT_DISPLAY_SPLIT, DEFAULT_PRESENTATION_DISPLAY_SPLIT, DISPLAY_SPLIT_MIN, DISPLAY_SPLIT_MAX } from './utils/storage'
 import { triggerDownload, getBaseFileStem } from './utils/download'
 import { buildCommentExport, buildDocstringExport, replaceExistingDocstring, getDefinitionNote, getDefaultDefinitionNote, sanitizeNoteText } from './utils/export'
 import { loadMainThreadPyodide, resetMainThreadPyodide, PYGAME_MAIN_THREAD_BOOTSTRAP, TURTLE_CANVAS_BOOTSTRAP, TURTLE_SVG_BOOTSTRAP, SVG_TURTLE_WORKER_SETUP, STDCTX_MAIN_THREAD_BOOTSTRAP } from './utils/mainThread'
@@ -49,6 +50,7 @@ import { PanelVisibilityMenu } from './components/ui/PanelVisibilityMenu'
 import { LearningMenu, type LearningTutorial } from './components/ui/LearningMenu'
 import { DiagramFontControls } from './components/ui/DiagramFontControls'
 import { IconButton } from './components/ui/IconButton'
+import { FoldButton } from './components/ui/FoldButton'
 import { SettingsDialog } from './components/ui/SettingsDialog'
 import { HierarchyChart } from './components/diagrams/HierarchyChart'
 import { UmlDiagram } from './components/diagrams/UmlDiagram'
@@ -71,7 +73,7 @@ import {
 } from './constants'
 import type {
   Theme, RuntimeKey, PanelVisibility, InputRequest, SabRef, SimState, InspectorPath,
-  StructureModel, DiagramModel, HierarchyModel, OutlineModel, DiagramView, DisplaySurface, PlotFigure, VFSEntry,
+  StructureModel, DiagramModel, HierarchyModel, OutlineModel, DiagramView, DisplaySurface, DisplayZoom, PlotFigure, VFSEntry,
   LocalFolderSyncOp,
   AppSettings, BookNavState, BookChallenge, BookManifest, BookTestCase, BookAdditionalFile, NamedLayout, InspectorNode,
   OverallTestResult, TesterRunOutput, ViewMode, Breakpoint, TurtleMode,
@@ -226,6 +228,8 @@ export default function App() {
   const [viewMode, setViewMode] = useState<ViewMode>(initialLayoutPrefs.viewMode)
   const [visiblePanels, setVisiblePanels] = useState<PanelVisibility>(() => ({ ...initialLayoutPrefs.visiblePanels }))
   const [leftSidebarCollapsed, setLeftSidebarCollapsed] = useState<boolean>(initialLayoutPrefs.leftSidebarCollapsed)
+  const [editorCollapsed, setEditorCollapsed] = useState<boolean>(initialLayoutPrefs.editorCollapsed)
+  const [consoleCollapsed, setConsoleCollapsed] = useState<boolean>(initialLayoutPrefs.consoleCollapsed)
   const [centerVerticalSplit, setCenterVerticalSplit] = useState<number>(70) // % code editor in minimal mode center
   // notes is now a tab inside Structure, not a separate panel — kept in type for compat
   const [activeFilesystemId, setActiveFilesystemId] = useState<string>('default')
@@ -289,6 +293,7 @@ export default function App() {
   const [isRunDropdownOpen, setIsRunDropdownOpen] = useState(false)
   const [editorFontSize, setEditorFontSize] = useState(() => getStoredEditorFontSize())
   const [consoleFontSize, setConsoleFontSize] = useState(() => getStoredConsoleFontSize())
+  const [displayZoom, setDisplayZoom] = useState<DisplayZoom>(() => getStoredDisplayZoom())
   const [editorCursorLine, setEditorCursorLine] = useState(1)
   const [leftWidth, setLeftWidth] = useState(55)         // % of center for code vs right col
   const [fsSidebarWidth, setFsSidebarWidth] = useState(224)  // px width of left sidebar
@@ -589,6 +594,21 @@ export default function App() {
   const isRunPresentationMode = isPygameRunActive || isTurtleCanvasRunActive || isSvgTurtleRunActive || isConsolePresentationMode
   isRunPresentationModeRef.current = isRunPresentationMode
   const effectiveDisplaySplit = isRunPresentationMode ? presentationDisplaySplit : displaySplit
+
+  // ── Derived: the editor and console folded to their headers ───────────────
+  // Each folds vertically, and only where a neighbour can take the height it
+  // gives up: the editor sits above the output panel in minimal view only, and
+  // the console gives way to the Display pane below it or the editor above it.
+  // Anywhere else a fold would just leave a gap, so the control is not offered
+  // and a remembered fold waits until it can apply.
+  const canCollapseEditor = viewMode === 'minimal' && visiblePanels.code && visiblePanels.output
+  const canCollapseConsole = visiblePanels.output && (showDisplayPane || canCollapseEditor)
+  const isConsoleCollapsed = canCollapseConsole && consoleCollapsed
+  // Only the output panel's header strip is left, so the editor takes the column.
+  const isOutputHeaderOnly = isConsoleCollapsed && !showDisplayPane
+  // Both folded with nothing below to fill the column: the editor stays open.
+  const isEditorCollapsed = canCollapseEditor && editorCollapsed && !isOutputHeaderOnly
+  const outputHasSplitHeight = viewMode === 'minimal' && visiblePanels.code && !isEditorCollapsed && !isOutputHeaderOnly
   const bookName = editManifest?.name ?? null
 
   // ── Derived: is the active challenge a testable task? ─────────────────────
@@ -737,7 +757,7 @@ export default function App() {
     if (!editorRef.current || !visiblePanels.code) return
     const frameId = requestAnimationFrame(() => editorRef.current?.layout())
     return () => cancelAnimationFrame(frameId)
-  }, [leftWidth, fsSidebarWidth, leftSidebarSplit, inspectorSplit, centerVerticalSplit, effectiveDisplaySplit, showDisplayPane, rightSidebarWidth, rightSidebarCollapsed, visiblePanels.code, visiblePanels.visualizer, visiblePanels.diagram, visiblePanels.output, visiblePanels.filesystem])
+  }, [leftWidth, fsSidebarWidth, leftSidebarSplit, inspectorSplit, centerVerticalSplit, effectiveDisplaySplit, showDisplayPane, isEditorCollapsed, isConsoleCollapsed, rightSidebarWidth, rightSidebarCollapsed, visiblePanels.code, visiblePanels.visualizer, visiblePanels.diagram, visiblePanels.output, visiblePanels.filesystem])
 
   useEffect(() => {
     if (!visiblePanels.diagram) setShowExportDialog(false)
@@ -748,9 +768,10 @@ export default function App() {
   useEffect(() => { inputModeRef.current = appSettings.inputMode }, [appSettings.inputMode])
   useEffect(() => { persistEditorFontSize(editorFontSize) }, [editorFontSize])
   useEffect(() => { persistConsoleFontSize(consoleFontSize) }, [consoleFontSize])
+  useEffect(() => { persistDisplayZoom(displayZoom) }, [displayZoom])
   useEffect(() => { persistWatches(watches); watchesRef.current = watches }, [watches])
   useEffect(() => { persistNamedLayouts(savedLayouts) }, [savedLayouts])
-  useEffect(() => { persistLayoutPrefs({ viewMode, visiblePanels, leftSidebarCollapsed, rightSidebarCollapsed, displaySplit, presentationDisplaySplit }) }, [viewMode, visiblePanels, leftSidebarCollapsed, rightSidebarCollapsed, displaySplit, presentationDisplaySplit])
+  useEffect(() => { persistLayoutPrefs({ viewMode, visiblePanels, leftSidebarCollapsed, rightSidebarCollapsed, displaySplit, presentationDisplaySplit, editorCollapsed, consoleCollapsed }) }, [viewMode, visiblePanels, leftSidebarCollapsed, rightSidebarCollapsed, displaySplit, presentationDisplaySplit, editorCollapsed, consoleCollapsed])
 
   // Something arriving in the right sidebar must be visible, or the student sees
   // nothing happen: opening a book, or turning on Teacher Tools or Structure,
@@ -767,6 +788,11 @@ export default function App() {
     // height the previous book was dragged to.
     if (hasBookPanel && !prev.book) setBookSectionHeight(null)
   }, [hasBookPanel, visiblePanels.teacherTools, visiblePanels.diagram])
+
+  // A program waiting on input() must not be waiting behind a folded console.
+  useEffect(() => {
+    if (inputRequest && appSettings.inputMode !== 'popup-dialog') setConsoleCollapsed(false)
+  }, [inputRequest, appSettings.inputMode])
 
   useEffect(() => startVersionPolling(() => setUpdateAvailable(true)), [])
 
@@ -1485,7 +1511,8 @@ export default function App() {
     }
     if (entry.content) {
       const text = new TextDecoder().decode(entry.content)
-      loadCodeText(text, entry.name, entry.path)
+      // Opening a file into a folded editor would look like nothing happened.
+      if (loadCodeText(text, entry.name, entry.path)) setEditorCollapsed(false)
     }
   }
 
@@ -1714,6 +1741,19 @@ export default function App() {
     }
   }
 
+  const toggleEditorCollapsed = () => {
+    if (isEditorCollapsed) { setEditorCollapsed(false); return }
+    setEditorCollapsed(true)
+    // Folding both with nothing below to fill the column would fold neither.
+    if (isOutputHeaderOnly) setConsoleCollapsed(false)
+  }
+
+  const toggleConsoleCollapsed = () => {
+    if (isConsoleCollapsed) { setConsoleCollapsed(false); return }
+    setConsoleCollapsed(true)
+    if (isEditorCollapsed && !showDisplayPane) setEditorCollapsed(false)
+  }
+
   const handleRestoreDefaults = () => {
     setViewMode('minimal')
     setVisiblePanels({ ...MINIMAL_VISIBLE_PANELS })
@@ -1729,6 +1769,8 @@ export default function App() {
     setTeacherSectionHeight(260)
     setDisplaySplit(DEFAULT_DISPLAY_SPLIT)
     setPresentationDisplaySplit(DEFAULT_PRESENTATION_DISPLAY_SPLIT)
+    setEditorCollapsed(false)
+    setConsoleCollapsed(false)
     setIsPanelMenuOpen(false)
   }
 
@@ -1737,6 +1779,8 @@ export default function App() {
     setVisiblePanels(defaultPanelsForView(mode))
     setLeftSidebarCollapsed(mode === 'minimal')
     if (mode === 'minimal') setCenterVerticalSplit(70)
+    setEditorCollapsed(false)
+    setConsoleCollapsed(false)
     setIsPanelMenuOpen(false)
   }
 
@@ -1746,6 +1790,7 @@ export default function App() {
     const layout: NamedLayout = {
       name: name.trim(), visiblePanels: { ...visiblePanels }, leftWidth, fsSidebarWidth, leftSidebarSplit, inspectorSplit, bookPanelWidth: rightSidebarWidth,
       viewMode, leftSidebarCollapsed, rightSidebarCollapsed, centerVerticalSplit, bookSectionHeight, teacherSectionHeight, displaySplit, presentationDisplaySplit,
+      editorCollapsed, consoleCollapsed,
     }
     setSavedLayouts(prev => [...prev.filter(l => l.name !== layout.name), layout])
   }
@@ -1765,6 +1810,8 @@ export default function App() {
     if (typeof layout.teacherSectionHeight === 'number') setTeacherSectionHeight(layout.teacherSectionHeight)
     if (typeof layout.displaySplit === 'number') setDisplaySplit(layout.displaySplit)
     if (typeof layout.presentationDisplaySplit === 'number') setPresentationDisplaySplit(layout.presentationDisplaySplit)
+    setEditorCollapsed(layout.editorCollapsed === true)
+    setConsoleCollapsed(layout.consoleCollapsed === true)
     setIsPanelMenuOpen(false)
   }
 
@@ -2339,6 +2386,9 @@ export default function App() {
       await saveCurrentToVFS()
       if (loadId !== challengeLoadIdRef.current) return
       if (!clearEditorForSwitch()) return
+      // Turning to an activity shows its code (or its Parsons puzzle), even if
+      // the editor was folded away while the last one ran.
+      setEditorCollapsed(false)
       setEditorTab('starter')
       solutionPathRef.current = challenge.sol?.file ?? null
       setActiveBookChallenge(challenge)
@@ -3273,12 +3323,15 @@ export default function App() {
     }
 
     const hasTurtleForMode = codeUsesTurtle(capturedCode)
-    // Checked across every mounted .py, not just the open file: a challenge can
-    // keep its drawing in an imported module the editor is not showing.
-    const spongeLibs = detectSpongeLibs(capturedCode, vfsFiles)
+    // Checked across every module the program can import, not just the open
+    // file: a challenge can keep its drawing in a module the editor is not
+    // showing. Not across every file, though — a sibling file that plots must
+    // not make Hello, World! load matplotlib.
+    const programFiles = programPythonFiles(capturedCode, capturedSourcePath, vfsFiles, capturedCwd)
+    const spongeLibs = detectSpongeLibs(capturedCode, programFiles)
     const usesStdctxForRun = spongeLibs.usesStdctx
     const usesSpongeLibsForRun = spongeLibs.usesStdctx || spongeLibs.usesStdaud
-    const plottingLibsForRun = detectPlottingLibs(capturedCode, vfsFiles)
+    const plottingLibsForRun = detectPlottingLibs(capturedCode, programFiles)
     const usesMatplotlibForRun = plottingLibsForRun.matplotlib
     const micropipPackagesForRun = micropipPackagesFor(plottingLibsForRun)
     const isSvgTurtleRun = (choice === 'run') && hasTurtleForMode && effectiveTurtleMode(capturedCode) === 'basthon-svg'
@@ -3547,6 +3600,7 @@ export default function App() {
         plotlyBootstrap: plottingLibsForRun.plotly ? PLOTLY_BOOTSTRAP : '',
         extraPackages: pyodidePackagesFor(plottingLibsForRun),
         micropipInstall: micropipPackagesForRun.length ? micropipInstallCode(micropipPackagesForRun) : '',
+        moduleSources: programFiles.map(file => new TextDecoder().decode(file.content)),
         stdctxKeyBuffer: stdctxKeyBufferRef.current?.buffer ?? null,
         watches: watchesRef.current,
         breakpoints: initialBreakpoints,
@@ -3579,8 +3633,10 @@ export default function App() {
     const turtleMode = shouldRunTurtle ? effectiveTurtleMode(codeText) : null
     const shouldRunTurtleCanvas = turtleMode === 'pyo-js-turtle'
     const shouldRunTurtleSvg = turtleMode === 'basthon-svg'
-    const spongeLibs = detectSpongeLibs(codeText, vfsFiles)
-    const plottingLibs = detectPlottingLibs(codeText, vfsFiles)
+    // Only what the program can import decides what it needs (see startTraceWorker).
+    const programFiles = programPythonFiles(codeText, openFilePath ?? codeFileName, vfsFiles, capturedCwd)
+    const spongeLibs = detectSpongeLibs(codeText, programFiles)
+    const plottingLibs = detectPlottingLibs(codeText, programFiles)
     const shouldRunMatplotlib = plottingLibs.matplotlib
     const micropipPackages = micropipPackagesFor(plottingLibs)
     const shouldRunSpongeLibs = !shouldRunPygame && !shouldRunTurtle
@@ -3648,6 +3704,10 @@ export default function App() {
         // and never against Pyodide's anonymous "<unknown>" import scan.
         await pyodide.runPythonAsync('import warnings; warnings.simplefilter("ignore", SyntaxWarning)')
         await pyodide.loadPackagesFromImports(codeText)
+        // A module the program imports may need packages the open file never names.
+        for (const file of programFiles) {
+          await pyodide.loadPackagesFromImports(new TextDecoder().decode(file.content))
+        }
         await pyodide.runPythonAsync('warnings.simplefilter("once", SyntaxWarning)')
       }
       if (runId !== mainThreadRunIdRef.current) return
@@ -4632,9 +4692,11 @@ exec(code_obj, globals())
 
         {/* Code Editor */}
         {visiblePanels.code && (
-          <div className="bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden flex-shrink-0"
+          <div className={`bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden ${isOutputHeaderOnly ? 'flex-1 min-h-0' : 'flex-shrink-0'}`}
             style={viewMode === 'minimal'
-              ? { height: visiblePanels.output ? `calc(${centerVerticalSplit}% - 3px)` : '100%', width: '100%' }
+              ? (isEditorCollapsed || isOutputHeaderOnly
+                ? { width: '100%' }
+                : { height: visiblePanels.output ? `calc(${centerVerticalSplit}% - 3px)` : '100%', width: '100%' })
               : { width: hasRightCol ? `calc(${leftWidth}% - 6px)` : '100%' }}>
             {/* Code editor area */}
             <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
@@ -4723,6 +4785,9 @@ exec(code_obj, globals())
                       </svg>
                     </IconButton>
                     )}
+                    {canCollapseEditor && (
+                      <FoldButton collapsed={isEditorCollapsed} towards="up" label="editor" onToggle={toggleEditorCollapsed} />
+                    )}
                   </div>
                 </div>
                 {/* Starter / Solution tabs (book edit mode) */}
@@ -4749,9 +4814,10 @@ exec(code_obj, globals())
                   </div>
                 )}
               </div>
-              <div className="flex-1 overflow-hidden relative">
+              <div className={`flex-1 overflow-hidden relative ${isEditorCollapsed ? 'hidden' : ''}`}>
                 {/* Monaco stays mounted even with no file open (placeholder overlays it)
-                    to avoid the editor-dispose "Canceled" churn on every navigation. */}
+                    to avoid the editor-dispose "Canceled" churn on every navigation.
+                    Folding the editor hides it for the same reason. */}
                 {!isEditorReady && openFilePath !== null && (
                   <div className="absolute inset-0 flex items-center justify-center text-slate-500 text-sm z-10">Loading Monaco editor...</div>
                 )}
@@ -4815,7 +4881,7 @@ exec(code_obj, globals())
             <div className="resize-bar" style={{ width: '3px', height: '48px' }} />
           </div>
         )}
-        {viewMode === 'minimal' && visiblePanels.code && visiblePanels.output && (
+        {viewMode === 'minimal' && visiblePanels.code && visiblePanels.output && !isEditorCollapsed && !isOutputHeaderOnly && (
           <div className="resize-handle-row"
             onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'row-center', startX: e.clientX, startY: e.clientY, startVal: centerVerticalSplit }; document.body.style.cursor = 'row-resize'; document.body.style.userSelect = 'none' }}>
             <div className="resize-bar" style={{ height: '3px', width: '48px' }} />
@@ -4826,18 +4892,22 @@ exec(code_obj, globals())
             In minimal mode, the right column is just the Console rendered directly inside the flex-col center. */}
         {(viewMode === 'developer' ? hasRightCol : visiblePanels.output) && (
           <div ref={rightColRef}
-            className={`${viewMode === 'minimal' && visiblePanels.code ? 'flex-shrink-0' : 'flex-1'} bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden min-w-0`}
-            style={viewMode === 'minimal' && visiblePanels.code ? { height: `calc(${100 - centerVerticalSplit}% - 3px)`, width: '100%' } : undefined}>
+            className={`${outputHasSplitHeight || isOutputHeaderOnly ? 'flex-shrink-0' : 'flex-1'} bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden min-w-0`}
+            style={outputHasSplitHeight
+              ? { height: `calc(${100 - centerVerticalSplit}% - 3px)`, width: '100%' }
+              : isOutputHeaderOnly ? { width: '100%' } : undefined}>
 
             {/* OUTPUT REGION — Console (top) + Display (bottom), one draggable split.
                 Every kind of visual output lands in the Display pane, so the console
                 and the drawing are always on screen together. */}
             {visiblePanels.output && (
               <div ref={outputPaneRef} className="flex flex-col overflow-hidden min-h-0 flex-shrink-0"
-                style={{ height: '100%' }}>
+                style={{ height: isOutputHeaderOnly ? undefined : '100%' }}>
 
+              {/* Folded, the console shrinks to its header: its tabs unmount and
+                  the terminal (which holds its buffer) is only hidden. */}
               <div className="flex flex-col overflow-hidden min-h-0 flex-shrink-0"
-                style={{ height: showDisplayPane ? `calc(${effectiveDisplaySplit}% - 3px)` : '100%' }}>
+                style={{ height: isConsoleCollapsed ? undefined : showDisplayPane ? `calc(${effectiveDisplaySplit}% - 3px)` : '100%' }}>
                 <div className="bg-slate-900 py-2 px-3 border-b border-slate-700 flex-shrink-0 flex items-center justify-between gap-2">
                   {hasConsoleTabs ? (
                     <div className="flex rounded overflow-hidden border border-slate-700 text-[11px]" role="tablist" aria-label="Console views" onKeyDown={handleConsoleTabKeyDown}>
@@ -4867,38 +4937,45 @@ exec(code_obj, globals())
                   ) : (
                     <div className="font-bold uppercase tracking-wider text-xs text-teal-400">Console Output</div>
                   )}
-                  {(consoleTab === 'console') && (
-                    <div className="flex items-center gap-1.5">
-                      <button type="button" onClick={() => void copyConsoleOutput()}
-                        title={consoleCopied ? 'Copied' : 'Copy the console output to the clipboard (or Ctrl+C with text selected)'}
-                        aria-label={consoleCopied ? 'Copied' : 'Copy console output'}
-                        className={`rounded border border-slate-600 p-1 transition-colors hover:border-teal-500 hover:text-teal-300 ${consoleCopied ? 'text-teal-300' : 'text-slate-400'}`}>
-                        {consoleCopied ? (
-                          <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5 13l4 4L19 7" />
-                          </svg>
-                        ) : (
-                          <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                          </svg>
-                        )}
-                      </button>
-                      <label className="text-[10px] text-slate-500 uppercase tracking-wider">Size</label>
-                      <select
-                        value={consoleFontSize}
-                        onChange={e => setConsoleFontSize(Number(e.target.value))}
-                        title="Console font size"
-                        className="bg-slate-800 border border-slate-600 rounded text-[11px] text-slate-300 px-1 py-0.5 cursor-pointer focus:outline-none focus:ring-1 focus:ring-teal-500"
-                      >
-                        {[9, 10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24].map(s => (
-                          <option key={s} value={s}>{s}px</option>
-                        ))}
-                      </select>
-                    </div>
-                  )}
+                  <div className="flex items-center gap-1.5">
+                    {(consoleTab === 'console') && (
+                      <>
+                        <button type="button" onClick={() => void copyConsoleOutput()}
+                          title={consoleCopied ? 'Copied' : 'Copy the console output to the clipboard (or Ctrl+C with text selected)'}
+                          aria-label={consoleCopied ? 'Copied' : 'Copy console output'}
+                          className={`rounded border border-slate-600 p-1 transition-colors hover:border-teal-500 hover:text-teal-300 ${consoleCopied ? 'text-teal-300' : 'text-slate-400'}`}>
+                          {consoleCopied ? (
+                            <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5 13l4 4L19 7" />
+                            </svg>
+                          ) : (
+                            <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                            </svg>
+                          )}
+                        </button>
+                        <label className="text-[10px] text-slate-500 uppercase tracking-wider">Size</label>
+                        <select
+                          value={consoleFontSize}
+                          onChange={e => setConsoleFontSize(Number(e.target.value))}
+                          title="Console font size"
+                          className="bg-slate-800 border border-slate-600 rounded text-[11px] text-slate-300 px-1 py-0.5 cursor-pointer focus:outline-none focus:ring-1 focus:ring-teal-500"
+                        >
+                          {[9, 10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24].map(s => (
+                            <option key={s} value={s}>{s}px</option>
+                          ))}
+                        </select>
+                      </>
+                    )}
+                    {canCollapseConsole && (
+                      // With a Display pane below, the console folds up to its
+                      // header; without one the panel folds down to the bottom.
+                      <FoldButton collapsed={isConsoleCollapsed} towards={showDisplayPane ? 'up' : 'down'} label="console" onToggle={toggleConsoleCollapsed} />
+                    )}
+                  </div>
                 </div>
                 {/* Inputs tab (fixed inputs) */}
-                {appSettings.useFixedInputs && consoleTab === 'inputs' && (
+                {appSettings.useFixedInputs && consoleTab === 'inputs' && !isConsoleCollapsed && (
                   <div id="console-panel-inputs" role="tabpanel" aria-labelledby="console-tab-inputs" className="flex flex-col flex-1 min-h-0 overflow-hidden bg-slate-900/40 p-3 gap-2">
                     <p className="text-xs text-slate-400 leading-relaxed flex-shrink-0">
                       One input value per line. Fed automatically to <code className="rounded bg-slate-700 px-1 text-emerald-300">input()</code> calls in order.
@@ -4916,7 +4993,7 @@ exec(code_obj, globals())
                   </div>
                 )}
                 {/* Tests tab (book edit mode) */}
-                {isBookEditMode && activeBookChallenge && consoleTab === 'tests' && (
+                {isBookEditMode && activeBookChallenge && consoleTab === 'tests' && !isConsoleCollapsed && (
                   <div id="console-panel-tests" role="tabpanel" aria-labelledby="console-tab-tests" className="flex flex-col flex-1 min-h-0 overflow-hidden bg-slate-900/30">
                     {(activeBookChallenge.isExample === true || activeBookChallenge.isExample === 'True') ? (
                       <div className="flex-1 flex flex-col items-center justify-center gap-3 p-6 text-center">
@@ -4939,13 +5016,13 @@ exec(code_obj, globals())
                     )}
                   </div>
                 )}
-                {traceSession && consoleTab === 'trace-table' && (
+                {traceSession && consoleTab === 'trace-table' && !isConsoleCollapsed && (
                   <div id="console-panel-trace-table" role="tabpanel" aria-labelledby="console-tab-trace-table" className="flex-1 min-h-0 overflow-hidden bg-slate-900/30 p-2">
                     <TraceTable session={traceSession} />
                   </div>
                 )}
                 {/* Console content — kept mounted (preserves terminal buffer); hidden when Inputs/Tests tab is active */}
-                <div id="console-panel-console" role={hasConsoleTabs ? 'tabpanel' : undefined} aria-labelledby={hasConsoleTabs ? 'console-tab-console' : undefined} className={consoleTab !== 'console' ? 'hidden' : 'flex flex-col flex-1 min-h-0 overflow-hidden'}>
+                <div id="console-panel-console" role={hasConsoleTabs ? 'tabpanel' : undefined} aria-labelledby={hasConsoleTabs ? 'console-tab-console' : undefined} className={consoleTab !== 'console' || isConsoleCollapsed ? 'hidden' : 'flex flex-col flex-1 min-h-0 overflow-hidden'}>
                   {appSettings.inputMode === 'inline-console' ? (
                     <div className="flex-1 min-h-0 overflow-hidden">
                       <ConsoleTerminal
@@ -4990,7 +5067,7 @@ exec(code_obj, globals())
               </div>
 
               {/* Resize handle: console ↔ display */}
-              {showDisplayPane && (
+              {showDisplayPane && !isConsoleCollapsed && (
                 <div className="resize-handle-row flex-shrink-0"
                   onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'row-display', startX: e.clientX, startY: e.clientY, startVal: effectiveDisplaySplit }; document.body.style.cursor = 'row-resize'; document.body.style.userSelect = 'none' }}>
                   <div className="resize-bar" style={{ height: '3px', width: '48px' }} />
@@ -5005,6 +5082,8 @@ exec(code_obj, globals())
                   activeSurface={activeDisplaySurface}
                   plotFigures={plotFigures}
                   onSelectSurface={setDisplaySurface}
+                  zoom={displayZoom}
+                  onZoomChange={setDisplayZoom}
                   mainThreadCanvasRef={mainThreadCanvasRef}
                   canvasPaneRef={canvasPaneRef}
                   onStdctxKeyDown={key => setStdctxKeyState(key, true)}

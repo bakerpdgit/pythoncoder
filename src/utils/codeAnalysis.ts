@@ -50,8 +50,9 @@ export const codeUsesSpongeLibs = (source: string): boolean => {
  *
  * Checking only the open editor file is not enough: a book challenge routinely
  * keeps its drawing in a separate module (`import UI`), so the file on screen
- * never mentions stdctx even though the run needs it. Every Python file that
- * will be mounted is checked too.
+ * never mentions stdctx even though the run needs it. Every module the program
+ * can import is checked too — callers pass `programPythonFiles`, not the whole
+ * filesystem, so a file that merely sits beside the program does not count.
  */
 export const detectSpongeLibs = (
   editorSource: string,
@@ -99,7 +100,7 @@ export interface PlottingLibs {
 /**
  * Whether a *whole program* plots, and with what — same reasoning as
  * `detectSpongeLibs`: the chart is often drawn by an imported module, so every
- * Python file that will be mounted is checked, not just the open one.
+ * module the program can import is checked, not just the open one.
  *
  * seaborn sets `matplotlib` too. It is a styling and statistics layer over
  * pyplot, and a program that only ever names seaborn still needs the Agg

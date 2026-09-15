@@ -8,6 +8,8 @@ export type DiagramView = 'hierarchy' | 'outline' | 'uml' | 'notes' | 'inputs'
  * 'plot' holds the PNGs matplotlib renders with Agg.
  */
 export type DisplaySurface = 'canvas' | 'turtle' | 'stdctx' | 'plot'
+/** How big the Display pane shows its surfaces: shrunk to fit, or a percentage of actual size. */
+export type DisplayZoom = 'fit' | number
 
 /**
  * One chart on the Display pane's Plot surface.
@@ -46,6 +48,10 @@ export interface LayoutPrefs {
   displaySplit: number
   /** The same split during a full-run presentation, where the region fills the screen. */
   presentationDisplaySplit: number
+  /** The code editor folded to its header strip; honoured only where a neighbour can take its height. */
+  editorCollapsed: boolean
+  /** The console folded to its header strip; likewise. */
+  consoleCollapsed: boolean
 }
 
 export interface NamedLayout {
@@ -65,6 +71,8 @@ export interface NamedLayout {
   teacherSectionHeight?: number
   displaySplit?: number
   presentationDisplaySplit?: number
+  editorCollapsed?: boolean
+  consoleCollapsed?: boolean
 }
 
 export interface PanelVisibility {

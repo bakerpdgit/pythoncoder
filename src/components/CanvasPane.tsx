@@ -22,18 +22,20 @@ type CanvasPaneProps = {
   onKeyUp?: (key: string) => void
   /** Resolves a drawImage() URI, which may name a virtual-filesystem file. */
   resolveImageUri?: (uri: string) => string | Promise<string>
+  /** Display zoom as a factor. Null (the default) shrinks the canvas to fit the pane. */
+  zoom?: number | null
 }
 
 /**
- * The Canvas tab of the console panel: an HTML canvas driven by `sys.stdctx`
- * draw commands, matching Python Sponge's graphics pane. It starts at Sponge's
- * fixed 500x400 and follows `stdctx.resize()` from there.
+ * The Display pane's Draw surface: an HTML canvas driven by `sys.stdctx` draw
+ * commands, matching Python Sponge's graphics pane. It starts at Sponge's fixed
+ * 500x400 and follows `stdctx.resize()` from there.
  *
  * The canvas dimensions are deliberately NOT React props: a `resize` command
  * writes them straight to the element, and React must not overwrite that on a
- * later render.
+ * later render. Zoom only ever touches its on-screen size.
  */
-export const CanvasPane = forwardRef<CanvasPaneHandle, CanvasPaneProps>(({ onKeyDown, onKeyUp, resolveImageUri }, ref) => {
+export const CanvasPane = forwardRef<CanvasPaneHandle, CanvasPaneProps>(({ onKeyDown, onKeyUp, resolveImageUri, zoom = null }, ref) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
 
   const attachCanvas = useCallback((canvas: HTMLCanvasElement | null) => {
@@ -68,14 +70,17 @@ export const CanvasPane = forwardRef<CanvasPaneHandle, CanvasPaneProps>(({ onKey
   }), [resolveImageUri])
 
   return (
-    <div className="flex flex-1 min-h-0 items-start justify-center overflow-auto bg-slate-900/40 p-3">
+    // A block, not a flex row: max-width/max-height keep a block canvas's aspect
+    // ratio when fitting it, which a flex item's would not.
+    <div className="flex-1 min-h-0 overflow-auto bg-slate-900/40 p-3">
       <canvas
         ref={attachCanvas}
         tabIndex={0}
         aria-label="stdctx canvas"
         onKeyDown={e => { if (onKeyDown) { onKeyDown(e.key); e.preventDefault() } }}
         onKeyUp={e => { if (onKeyUp) { onKeyUp(e.key); e.preventDefault() } }}
-        className="flex-shrink-0 rounded border border-slate-600 bg-white outline-none focus:border-teal-400"
+        className={`mx-auto block rounded border border-slate-600 bg-white outline-none focus:border-teal-400 ${zoom === null ? 'max-h-full max-w-full' : ''}`}
+        style={zoom === null ? undefined : { zoom }}
       />
     </div>
   )
