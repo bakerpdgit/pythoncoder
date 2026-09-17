@@ -1,5 +1,6 @@
 import { useEffect, useState, type RefObject } from 'react'
 import { fetchTutorialCatalog, type LearningTutorial } from '../../utils/tutorialCatalog'
+import { useMenuMaxHeight } from './useMenuMaxHeight'
 
 export type { LearningTutorial }
 
@@ -13,6 +14,7 @@ interface Props {
 export function LearningMenu({ menuRef, isOpen, onToggleOpen, onOpenTutorial }: Props) {
   const [tutorials, setTutorials] = useState<LearningTutorial[]>([])
   const [loadError, setLoadError] = useState('')
+  const { panelRef, panelStyle, panelClass } = useMenuMaxHeight(isOpen)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -46,7 +48,8 @@ export function LearningMenu({ menuRef, isOpen, onToggleOpen, onOpenTutorial }: 
       </button>
 
       {isOpen && (
-        <div className="absolute right-0 z-30 mt-2 w-80 rounded-lg border border-slate-600 bg-slate-800 p-2 shadow-2xl">
+        <div ref={panelRef} style={panelStyle}
+          className={`absolute right-0 z-30 mt-2 w-80 rounded-lg border border-slate-600 bg-slate-800 p-2 shadow-2xl ${panelClass}`}>
           <div className="px-2 pb-2 text-[11px] uppercase tracking-wider text-slate-500">Learning tutorials</div>
           {loadError ? (
             <div className="rounded-md border border-red-500/30 bg-red-950/20 px-3 py-2 text-xs text-red-200">

@@ -52,7 +52,11 @@ function buildBasicRegex(out: string): RegExp {
       pat += '\\n'
       i += 2
     } else {
-      pat += out[i].replace(/[$()+?{}\[\]|^\\]/g, '\\$&')
+      // Not one of the two special tokens above, so this character is a literal:
+      // every regex metacharacter must be escaped — including `.` and `*`, which
+      // otherwise turn expected output such as `7 * 4 = 28` into a quantifier that
+      // can never match the literal text.
+      pat += out[i].replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
       i++
     }
   }

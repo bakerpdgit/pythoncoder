@@ -1,5 +1,6 @@
 import type { RefObject } from 'react'
 import type { PanelVisibility, NamedLayout, ViewMode } from '../../types'
+import { useMenuMaxHeight } from './useMenuMaxHeight'
 
 interface PanelOption {
   key: string
@@ -33,6 +34,7 @@ export const PanelVisibilityMenu = ({
 }: Props) => {
   const visibleCount = panelOptions.filter(({ key }) => visiblePanels[key as keyof PanelVisibility]).length
   const hasLayoutActions = Boolean(onRestoreDefaults || onSaveLayout)
+  const { panelRef, panelStyle, panelClass } = useMenuMaxHeight(isOpen)
 
   return (
     <div className="relative" ref={menuRef}>
@@ -52,7 +54,8 @@ export const PanelVisibilityMenu = ({
       </button>
 
       {isOpen && (
-        <div className="absolute right-0 z-30 mt-2 w-64 rounded-lg border border-slate-600 bg-slate-800 p-2 shadow-2xl">
+        <div ref={panelRef} style={panelStyle}
+          className={`absolute right-0 z-30 mt-2 w-64 rounded-lg border border-slate-600 bg-slate-800 p-2 shadow-2xl ${panelClass}`}>
           {/* Layout actions */}
           {hasLayoutActions && (
             <div className="flex gap-1.5 px-2 py-1">
