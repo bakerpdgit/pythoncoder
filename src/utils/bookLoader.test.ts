@@ -14,7 +14,7 @@ vi.mock('./virtualFS', () => ({
 }))
 
 import {
-  bookFileBaseUrls, collectBookChallengeIds, deleteChallengeFilesystems,
+  bookFileBaseUrls, collectBookChallengeIds, collectBookProgressIds, deleteChallengeFilesystems,
   findBookTargetById, findFirstBookChallenge, isChallengeFsName,
 } from './bookLoader'
 
@@ -288,5 +288,109 @@ describe('deleteChallengeFilesystems', () => {
   it('does nothing for an empty book', async () => {
     await expect(deleteChallengeFilesystems([])).resolves.toBe(0)
     expect(listFilesystems).not.toHaveBeenCalled()
+  })
+})
+
+describe('collectBookProgressIds', () => {
+  const manifests: Record<string, BookManifest> = {
+    'https://example.test/root/book.json': {
+      children: [
+        { id: 'warmup', name: 'Warm up', py: 'warmup.py' },
+        { id: 'io', name: 'Outputs and inputs', bookLink: 'io/book.json' },
+        { id: 'loops', name: 'Loops', bookLink: 'loops/book.json' },
+      ],
+    },
+    'https://example.test/root/io/book.json': {
+      children: [
+        { id: 'io-1', name: 'Ex. 1', py: 'a.py' },
+        { id: 'io-2', name: 'Ex. 2', py: 'b.py' },
+      ],
+    },
+    'https://example.test/root/loops/book.json': {
+      children: [
+        { id: 'loops-1', name: 'Ex. 1', py: 'c.py' },
+        { id: 'deeper', name: 'While loops', bookLink: 'while/book.json' },
+      ],
+    },
+    'https://example.test/root/loops/while/book.json': {
+      children: [{ id: 'while-1', name: 'Ex. 1', py: 'd.py' }],
+    },
+  }
+
+  it('splits a tree by section and totals the whole book', async () => {
+    const progress = await collectBookProgressIds(
+      'https://example.test/root/book.json',
+      async url => manifests[url],
+    )
+
+    expect(progress.byChild).toEqual({
+      '1-io': ['io-1', 'io-2'],
+      '2-loops': ['loops-1', 'while-1'],
+    })
+    // Book order, with each section's activities where the section sits.
+    expect(progress.ids).toEqual(['warmup', 'io-1', 'io-2', 'loops-1', 'while-1'])
+  })
+
+  it('keys sections by position so a repeated id stays its own row', async () => {
+    const repeated: Record<string, BookManifest> = {
+      'https://example.test/r/book.json': {
+        children: [
+          { id: 'part', name: 'Part one', bookLink: 'one/book.json' },
+          { id: 'part', name: 'Part two', bookLink: 'two/book.json' },
+        ],
+      },
+      'https://example.test/r/one/book.json': { children: [{ id: 'a', name: 'A', py: 'a.py' }] },
+      'https://example.test/r/two/book.json': { children: [{ id: 'b', name: 'B', py: 'b.py' }] },
+    }
+
+    const progress = await collectBookProgressIds(
+      'https://example.test/r/book.json',
+      async url => repeated[url],
+    )
+
+    expect(progress.byChild).toEqual({ '0-part': ['a'], '1-part': ['b'] })
+  })
+
+  it('counts a section that fails to load as empty rather than losing the book', async () => {
+    const progress = await collectBookProgressIds(
+      'https://example.test/root/book.json',
+      async url => {
+        if (url === 'https://example.test/root/io/book.json') throw new Error('404')
+        return manifests[url]
+      },
+    )
+
+    expect(progress.byChild['1-io']).toEqual([])
+    expect(progress.ids).toEqual(['warmup', 'loops-1', 'while-1'])
+  })
+
+  it('refuses a section that points back at a book above it', async () => {
+    const cyclic: Record<string, BookManifest> = {
+      'https://example.test/c/book.json': {
+        children: [{ id: 'sec', name: 'Section', bookLink: 'sec/book.json' }],
+      },
+      'https://example.test/c/sec/book.json': {
+        children: [
+          { id: 'only', name: 'Only', py: 'only.py' },
+          { id: 'back', name: 'Back to the top', bookLink: '../book.json' },
+        ],
+      },
+    }
+
+    const progress = await collectBookProgressIds(
+      'https://example.test/c/book.json',
+      async url => cyclic[url],
+    )
+
+    expect(progress.ids).toEqual(['only'])
+  })
+
+  it('reports nothing for a book that cannot be loaded at all', async () => {
+    const progress = await collectBookProgressIds(
+      'https://example.test/missing/book.json',
+      async () => { throw new Error('404') },
+    )
+
+    expect(progress).toEqual({ ids: [], byChild: {} })
   })
 })

@@ -3,8 +3,9 @@ import type { BookChallenge, BookManifest, BookNavState, BookTestOutputReq, Brea
 import { GuideEditor } from './editors/GuideEditor'
 import {
   isBookRef, fetchBookManifest, fetchGuideContent, resolveBookUrl,
-  findChallenge, getAdjacentChallenge, getChallengeFsName,
+  findChallenge, getAdjacentChallenge, getChallengeFsName, collectBookProgressIds,
 } from '../utils/bookLoader'
+import type { BookTreeProgress } from '../utils/bookLoader'
 import { isSimpleBookUrl, SIMPLE_BOOK_NO_INSTRUCTIONS } from '../utils/simpleBook'
 import { listFilesystems, getEntryByPath, getAllFiles } from '../utils/virtualFS'
 import { TestResultsBar } from './TestResultsBar'
@@ -255,10 +256,76 @@ async function findChallengeOutsideCurrentBook(
   return null
 }
 
+/** Where a sibling section sits: the sub-book itself plus the crumb trail to it. */
+export interface SectionNavTarget {
+  name: string
+  bookUrl: string
+  breadcrumb: BreadcrumbEntry[]
+}
+
+/**
+ * The sub-book before or after the one being browsed, among the *parent's*
+ * children. Activities between the sections are stepped past — this navigates
+ * section to section — and the walk stops at the parent rather than climbing
+ * further, so the arrows only ever move within one level of contents.
+ */
+export async function findSiblingSection(
+  navState: BookNavState,
+  delta: -1 | 1,
+  loadManifest: (url: string) => Promise<BookManifest> = fetchBookManifest,
+): Promise<SectionNavTarget | null> {
+  if (navState.breadcrumb.length === 0) return null
+
+  const parentUrl = navState.breadcrumb[navState.breadcrumb.length - 1].bookUrl
+  const parentBreadcrumb = navState.breadcrumb.slice(0, -1)
+  const parentManifest = await loadManifest(parentUrl)
+  const currentIndex = parentManifest.children.findIndex(child =>
+    isBookRef(child) && resolveBookUrl(parentUrl, child.bookLink) === navState.currentBookUrl,
+  )
+  if (currentIndex === -1) return null
+
+  for (
+    let i = currentIndex + delta;
+    i >= 0 && i < parentManifest.children.length;
+    i += delta
+  ) {
+    const sibling = parentManifest.children[i]
+    if (!isBookRef(sibling)) continue
+    return {
+      name: sibling.name,
+      bookUrl: resolveBookUrl(parentUrl, sibling.bookLink),
+      // The crumb records the section's own name against its *parent's* url,
+      // which is exactly what `navigateInto` pushes when entering one.
+      breadcrumb: [...parentBreadcrumb, { name: sibling.name, bookUrl: parentUrl }],
+    }
+  }
+
+  return null
+}
+
 function CompletedTick() {
   return (
     <svg className="w-3 h-3 text-emerald-400 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
       <polyline points="20 6 9 17 4 12" />
+    </svg>
+  )
+}
+
+/**
+ * A section that is under way but not finished. The arc is the completed
+ * fraction; `emerald` matches the tick an activity gets, so a part-filled ring
+ * reads as "some of these are ticked" without a second colour to learn.
+ */
+function ProgressRing({ done, total }: { done: number; total: number }) {
+  const r = 9
+  const circumference = 2 * Math.PI * r
+  const fraction = total > 0 ? Math.min(1, Math.max(0, done / total)) : 0
+  return (
+    <svg className="w-3.5 h-3.5 flex-shrink-0" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <circle cx="12" cy="12" r={r} className="stroke-slate-500/50" strokeWidth="3" />
+      <circle cx="12" cy="12" r={r} className="stroke-emerald-400" strokeWidth="3" strokeLinecap="round"
+        strokeDasharray={`${circumference * fraction} ${circumference}`}
+        transform="rotate(-90 12 12)" />
     </svg>
   )
 }
@@ -283,7 +350,19 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
     next: ChallengeNavTarget | null
   } | null>(null)
   const [linkMenu, setLinkMenu] = useState<{ x: number; y: number; id: string | null } | null>(null)
+  const [sectionSiblings, setSectionSiblings] = useState<{
+    key: string
+    previous: SectionNavTarget | null
+    next: SectionNavTarget | null
+  } | null>(null)
+  const [progress, setProgress] = useState<{ key: string; tree: BookTreeProgress } | null>(null)
   const previewWorkerRef = useRef<Worker | null>(null)
+
+  // Section arrows and the contents' progress figures both belong to the book
+  // currently being browsed, so both are keyed on it and shown only once the
+  // answer that arrives is for the book on screen.
+  const sectionKey = navState.currentBookUrl
+  const atContents = !navState.activeChallengeId
 
   // Right-click anywhere in the navigator to build a student link to that spot.
   // Clamped to the viewport because this panel sits against the right edge.
@@ -529,6 +608,18 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
     if (target) enterChallengeTarget(target)
   }, [manifest, navState, boundaryTargets, enterChallenge, enterChallengeTarget])
 
+  const handleSectionNav = useCallback((delta: -1 | 1) => {
+    if (sectionSiblings?.key !== sectionKey) return
+    const target = delta === -1 ? sectionSiblings.previous : sectionSiblings.next
+    if (!target) return
+    onNavStateChange({
+      ...navState,
+      currentBookUrl: target.bookUrl,
+      breadcrumb: target.breadcrumb,
+      activeChallengeId: null,
+    })
+  }, [sectionSiblings, sectionKey, navState, onNavStateChange])
+
   const handleReset = useCallback(async () => {
     setShowDotMenu(false)
     if (!navState.activeChallengeId || !manifest) return
@@ -617,6 +708,64 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
     return () => { cancelled = true }
   }, [manifest, navState, editMode])
 
+  // ── Sibling sections (the contents-level counterpart of prev/next exercise) ──
+  useEffect(() => {
+    if (editMode || !atContents || navState.breadcrumb.length === 0) {
+      setSectionSiblings(null)
+      return
+    }
+    const key = navState.currentBookUrl
+    let cancelled = false
+
+    Promise.all([findSiblingSection(navState, -1), findSiblingSection(navState, 1)])
+      .then(([previous, next]) => { if (!cancelled) setSectionSiblings({ key, previous, next }) })
+      .catch(() => { if (!cancelled) setSectionSiblings({ key, previous: null, next: null }) })
+
+    return () => { cancelled = true }
+  }, [navState, atContents, editMode])
+
+  // ── How far through each section, and through the book as a whole ──
+  // Keyed on the book being browsed and recomputed only when that changes:
+  // ticking an activity changes `completedChallenges`, not which ids exist, and
+  // the counts below are derived at render time from both.
+  useEffect(() => {
+    if (editMode || !atContents) {
+      setProgress(null)
+      return
+    }
+    const key = navState.currentBookUrl
+    let cancelled = false
+
+    collectBookProgressIds(key)
+      .then(tree => { if (!cancelled) setProgress({ key, tree }) })
+      .catch(() => { if (!cancelled) setProgress({ key, tree: { ids: [], byChild: {} } }) })
+
+    return () => { cancelled = true }
+  }, [navState.currentBookUrl, atContents, editMode])
+
+  const previousSection = sectionSiblings?.key === sectionKey ? sectionSiblings.previous : null
+  const nextSection = sectionSiblings?.key === sectionKey ? sectionSiblings.next : null
+
+  const bookProgress = progress?.key === sectionKey ? progress.tree : null
+
+  /** Completed / total for a sub-book row, or null until its ids have arrived. */
+  const sectionProgress = useCallback((childKey: string) => {
+    const ids = bookProgress?.byChild[childKey]
+    if (!ids) return null
+    return { done: ids.filter(isCompleted).length, total: ids.length }
+  }, [bookProgress, isCompleted])
+
+  // The percentage is the whole book's, so it is only honest at the root — a
+  // section's own contents would report a figure for that section alone.
+  const overallProgress = navState.breadcrumb.length === 0 && bookProgress && bookProgress.ids.length > 0
+    ? {
+        done: bookProgress.ids.filter(isCompleted).length,
+        total: bookProgress.ids.length,
+      }
+    : null
+  const overallPercent = overallProgress
+    ? Math.round((overallProgress.done / overallProgress.total) * 100) : 0
+
   return (
     <div className="flex flex-col h-full overflow-hidden text-xs select-none">
       {/* Header */}
@@ -668,6 +817,28 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
             <button type="button" onClick={() => handlePrevNext(1)} disabled={!nextTarget}
               aria-label="Next exercise"
               title={nextTarget ? `Next exercise: ${nextTarget.challenge.name}` : 'No next exercise'}
+              className="text-slate-400 hover:text-slate-200 disabled:opacity-30 disabled:cursor-not-allowed p-0.5 flex-shrink-0">
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14 5l7 7-7 7m7-7H3" />
+              </svg>
+            </button>
+          </>
+        )}
+
+        {/* Prev / next section (contents of a sub-book) */}
+        {atContents && (previousSection || nextSection) && (
+          <>
+            <button type="button" onClick={() => handleSectionNav(-1)} disabled={!previousSection}
+              aria-label="Previous section"
+              title={previousSection ? `Previous section: ${previousSection.name}` : 'No previous section'}
+              className="text-slate-400 hover:text-slate-200 disabled:opacity-30 disabled:cursor-not-allowed p-0.5 flex-shrink-0">
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7 7-7m-7 7h18" />
+              </svg>
+            </button>
+            <button type="button" onClick={() => handleSectionNav(1)} disabled={!nextSection}
+              aria-label="Next section"
+              title={nextSection ? `Next section: ${nextSection.name}` : 'No next section'}
               className="text-slate-400 hover:text-slate-200 disabled:opacity-30 disabled:cursor-not-allowed p-0.5 flex-shrink-0">
               <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14 5l7 7-7 7m7-7H3" />
@@ -785,20 +956,52 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
             </div>
           )}
 
+          {/* Whole-book progress — the root of the book only */}
+          {!loading && !error && !navState.activeChallengeId && manifest && overallProgress && (
+            <div className="px-3 py-2 border-b border-slate-700/60 flex items-center gap-2"
+              title={`${overallProgress.done} of ${overallProgress.total} activities completed`}>
+              <div className="flex-1 h-1.5 rounded-full bg-slate-500/25 overflow-hidden">
+                <div className="h-full rounded-full bg-emerald-500 transition-[width] duration-300"
+                  style={{ width: `${overallPercent}%` }} />
+              </div>
+              <span className="text-[10px] text-slate-400 tabular-nums flex-shrink-0">
+                {overallPercent}% complete
+              </span>
+            </div>
+          )}
+
           {/* Book/challenge list */}
           {!loading && !error && !navState.activeChallengeId && manifest && (
             <div className="py-1">
               {manifest.children.map((child, i) => {
                 if (isBookRef(child)) {
+                  // A section's own state: every activity beneath it ticked, some
+                  // of them, or none. An empty section has nothing to report.
+                  const sectionDone = sectionProgress(`${i}-${child.id}`)
+                  const sectionLabel = sectionDone && sectionDone.total > 0
+                    ? `${child.name} — ${sectionDone.done} of ${sectionDone.total} completed` : child.name
                   return (
                     <button type="button" key={`${i}-${child.id}`}
                       onClick={() => void navigateInto(child.bookLink, child.name)}
                       onContextMenu={e => openLinkMenu(e, child.id)}
+                      title={sectionLabel}
                       className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-slate-700 transition-colors text-slate-300 hover:text-slate-100">
                       <svg className="w-4 h-4 text-sky-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
                       </svg>
                       <span className="flex-1 truncate text-xs">{child.name}</span>
+                      {sectionDone && sectionDone.total > 0 && sectionDone.done > 0 && (
+                        sectionDone.done === sectionDone.total
+                          ? <CompletedTick />
+                          : (
+                            <span className="flex items-center gap-1 flex-shrink-0">
+                              <ProgressRing done={sectionDone.done} total={sectionDone.total} />
+                              <span className="text-[9px] text-slate-400 tabular-nums">
+                                {sectionDone.done}/{sectionDone.total}
+                              </span>
+                            </span>
+                          )
+                      )}
                       <svg className="w-3 h-3 text-slate-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
                       </svg>

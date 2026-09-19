@@ -311,6 +311,59 @@ export async function collectBookChallengeIds(
 }
 
 /**
+ * How much of a book tree an activity count covers. `ids` is every activity in
+ * the subtree, in book order; `byChild` splits them by the sub-book they sit
+ * under, keyed `${index}-${child.id}` because ids are not unique across a tree
+ * and a contents row is keyed the same way.
+ */
+export interface BookTreeProgress {
+  ids: string[]
+  byChild: Record<string, string[]>
+}
+
+/**
+ * Every activity id under `bookUrl`, and the same split per sub-book child, so
+ * the contents list can show how far through each section a student is and the
+ * root can show a percentage for the whole book.
+ *
+ * A sub-book that no longer loads contributes nothing rather than aborting the
+ * walk, exactly as `collectBookChallengeIds` does: a broken section must not
+ * cost the rest of the book its progress. `seen` is the chain of books above
+ * the one being visited, not a global visited set — two sections are allowed to
+ * point at the same sub-book, and only a cycle back into an ancestor is refused.
+ */
+export async function collectBookProgressIds(
+  bookUrl: string,
+  loadManifest: (url: string) => Promise<BookManifest> = fetchBookManifest,
+): Promise<BookTreeProgress> {
+  const subtreeIds = async (url: string, seen: readonly string[]): Promise<string[]> => {
+    if (seen.includes(url)) return []
+    let manifest: BookManifest
+    try { manifest = await loadManifest(url) } catch { return [] }
+    const chain = [...seen, url]
+    const ids: string[] = []
+    for (const child of manifest.children) {
+      if (!isBookRef(child)) { ids.push(child.id); continue }
+      ids.push(...await subtreeIds(resolveBookUrl(url, child.bookLink), chain))
+    }
+    return ids
+  }
+
+  let manifest: BookManifest
+  try { manifest = await loadManifest(bookUrl) } catch { return { ids: [], byChild: {} } }
+
+  const ids: string[] = []
+  const byChild: Record<string, string[]> = {}
+  for (const [i, child] of manifest.children.entries()) {
+    if (!isBookRef(child)) { ids.push(child.id); continue }
+    const childIds = await subtreeIds(resolveBookUrl(bookUrl, child.bookLink), [bookUrl])
+    byChild[`${i}-${child.id}`] = childIds
+    ids.push(...childIds)
+  }
+  return { ids, byChild }
+}
+
+/**
  * Throw away the saved work for the given activities. Returns how many
  * filesystems were deleted. The next visit to each activity re-creates it from
  * the book's own files.

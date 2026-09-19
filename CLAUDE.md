@@ -459,6 +459,55 @@ These are set in:
   are different wishes. Clearing them is `clearCompletionsForBook`, which only
   touches keys prefixed with this book's root URL.
 
+### How far through the book the student is
+
+- A tick on an activity was the only progress a student could see, and it was
+  only visible from inside the section holding it: the contents one level up
+  showed a row of identical sub-books whether they were untouched or finished.
+- `collectBookProgressIds` (`utils/bookLoader.ts`) walks the tree once and
+  returns both halves of the answer — every activity id beneath the book being
+  browsed, and the same ids split per sub-book child. The split is keyed
+  `${index}-${child.id}`, matching the contents row's React key, because ids are
+  **not unique across a tree** (one shipped template reuses one) and two
+  identically-named sections must not share a count.
+- A sub-book that fails to load contributes an empty list rather than aborting
+  the walk, exactly as `collectBookChallengeIds` does — one broken section must
+  not cost the rest of the book its figures. Cycles are refused against the
+  *chain of ancestors*, not a global visited set, so two sections are still
+  allowed to point at the same sub-book.
+- The ids are fetched once per book being browsed and held in state; the counts
+  themselves are derived at render time against `completedChallenges`. Ticking
+  an activity changes which ids are complete, never which ids exist, so nothing
+  re-walks the tree on a tick.
+- A section row shows a **tick** when every activity beneath it is complete, a
+  part-filled **`ProgressRing`** and `done/total` when some are, and nothing at
+  all when none are — an empty ring on every untouched section is noise. Both
+  use the same emerald as an activity's tick, so there is no second colour to
+  learn.
+- The **percentage bar is the root's only**. Inside a section it would report
+  that section alone while looking like the book's, which is why it is gated on
+  `breadcrumb.length === 0` rather than on whichever contents are on screen.
+- All of it is skipped in **book edit mode**: the live manifest there is owned
+  by `bookEditStore`, and a teacher arranging exercises is not a student with
+  progress.
+
+### Prev / next works at the contents level too
+
+- The header's arrows move between *activities* while one is open, and between
+  *sections* while a sub-book's contents are. `findSiblingSection`
+  (`BookPanel.tsx`, exported for its test) asks the **parent** manifest for the
+  sub-book before or after this one, stepping past any loose activities between
+  them.
+- It stops at the parent rather than climbing further, which is the difference
+  between it and `findChallengeOutsideCurrentBook`: the activity arrows run the
+  whole book end to end, the section arrows move within one level of contents.
+- A sibling replaces the **last breadcrumb entry** rather than pushing a new
+  one. A crumb records a section's own name against its *parent's* url (that is
+  what `navigateInto` pushes), so appending instead would read "Selection ›
+  Loops" for two sections that are siblings.
+- The arrows render only when a sibling exists in either direction, so the root
+  of a book — which has no siblings — is unchanged.
+
 ### Virtual filesystem & local folders
 
 - `utils/virtualFS.ts` is an IndexedDB-backed store of multiple named filesystems
