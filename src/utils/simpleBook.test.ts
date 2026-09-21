@@ -56,6 +56,39 @@ describe('parseSimpleBookGuide', () => {
   })
 })
 
+describe('the #! markdown directive', () => {
+  it('asks for markdown without being taken for a file to mount', () => {
+    const guide = parseSimpleBookGuide('#! data.txt\n#! markdown\n\n# Quiz\n\n## Level 1')
+    expect(guide.markdown).toBe(true)
+    expect(guide.additional).toEqual(['data.txt'])
+    expect(guide.text).toBe('# Quiz\n\n## Level 1')
+  })
+
+  it('is not case sensitive', () => {
+    expect(parseSimpleBookGuide('#!Markdown\nHi').markdown).toBe(true)
+  })
+
+  it('leaves a guide without it as plain text, headings and all', () => {
+    const guide = parseSimpleBookGuide('# Quiz\n\n## Level 1')
+    expect(guide.markdown).toBe(false)
+    expect(guide.text).toBe('# Quiz\n\n## Level 1')
+  })
+
+  it('only counts at the top, like every other directive', () => {
+    expect(parseSimpleBookGuide('Intro\n#! markdown').markdown).toBe(false)
+  })
+
+  it('marks the exercise’s guide as markdown in the manifest', () => {
+    const manifest = buildSimpleBookManifest(
+      [exercise('01', { hasGuide: true, markdown: true }), exercise('02', { hasGuide: true })],
+      { source: REPO, name: 'x' })
+    const [first, second] = manifest.children as BookChallenge[]
+    expect(first.guide).toBe('01.txt')
+    expect(first.guideFormat).toBe('markdown')
+    expect(second.guideFormat).toBeUndefined()
+  })
+})
+
 describe('buildSimpleBookManifest', () => {
   const manifest = buildSimpleBookManifest(
     [exercise('01', { hasGuide: true, additional: ['data.txt'] }), exercise('02')],

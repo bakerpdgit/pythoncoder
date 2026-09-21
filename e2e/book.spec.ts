@@ -38,6 +38,14 @@ Keep the *stars* and my_var_names exactly as written.
 `,
   '02.py': `print("the second exercise")
 `,
+  '02.txt': `#! markdown
+
+# Quiz
+
+## Level 1
+
+Use **bold** here.
+`,
   '04.py': `print("past the gap, must never appear")
 `,
 }
@@ -100,6 +108,23 @@ test('shows an exercise’s instructions with the #! lines taken out', async ({ 
   await expect(page.getByText('Keep the *stars* and my_var_names exactly as written.')).toBeVisible()
   // The directive is a directive, never prose.
   await expect(page.locator('body')).not.toContainText('#! data.txt')
+  expect(problems).toEqual([])
+})
+
+test('renders a guide that opens with #! markdown as markdown', async ({ page }) => {
+  const problems = watchForErrors(page, { ignoreRequestsTo: EXPECTED_MISSES })
+  await serveBook(page)
+  await openBook(page)
+
+  await exercise(page, '02').click()
+
+  await expect(page.getByText('02 Instructions')).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Quiz', exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Level 1' })).toBeVisible()
+  await expect(page.locator('strong', { hasText: 'bold' })).toBeVisible()
+  // Neither the directive nor the raw markdown reaches the student.
+  await expect(page.locator('body')).not.toContainText('#! markdown')
+  await expect(page.locator('body')).not.toContainText('## Level 1')
   expect(problems).toEqual([])
 })
 

@@ -75,6 +75,14 @@ function SimpleBookInfoDialog({ onClose }: { onClose: () => void }) {
             import. Those lines are never shown to the student.
           </li>
           <li>
+            <span className="text-slate-200">Formatting.</span> Instructions are plain text, so{' '}
+            <code className="book-inline-code rounded px-1 font-mono">*args</code> and{' '}
+            <code className="book-inline-code rounded px-1 font-mono">__init__</code> show exactly as typed.
+            For headings, lists and bold, add a{' '}
+            <code className="book-inline-code rounded px-1 font-mono">#! markdown</code> line at the top
+            and the rest of the file is read as markdown.
+          </li>
+          <li>
             <span className="text-slate-200">Flat.</span> Only the folder itself is read; sub-folders are
             ignored. Point the link at a sub-folder to use that one instead.
           </li>

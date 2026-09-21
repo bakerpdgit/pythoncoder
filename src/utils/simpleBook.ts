@@ -8,7 +8,8 @@
 //
 //   01.py   → the first activity, titled "01"
 //   01.txt  → its instructions (optional), with `#! data.txt` lines at the top
-//             naming any files the exercise needs beside it
+//             naming any files the exercise needs beside it, and optionally
+//             `#! markdown` to have the rest read as markdown, not plain text
 //   02.py   → the second activity
 //
 // ── The folder is never listed ──────────────────────────────────────────────
@@ -99,9 +100,20 @@ export interface SimpleBookGuide {
   additional: string[]
   /** What the student reads — the `#!` lines removed. Blank when there is none. */
   text: string
+  /** Whether a `#! markdown` line asked for the text to be rendered as markdown. */
+  markdown: boolean
 }
 
 const GUIDE_DIRECTIVE = /^\s*#!\s*(.*)$/
+
+/**
+ * The one `#!` word that is not a file name. It has to be opted into because
+ * a .txt is plain text by default: a teacher writing about Python in Notepad
+ * uses `*args`, `__init__` and `# comments` freely, and a markdown renderer
+ * would eat them. A teacher who *wants* headings and bold says so, once, at
+ * the top. (No exercise needs a data file called literally `markdown`.)
+ */
+const MARKDOWN_DIRECTIVE = /^markdown$/i
 
 /**
  * Read an exercise's `.txt`.
@@ -111,23 +123,26 @@ const GUIDE_DIRECTIVE = /^\s*#!\s*(.*)$/
  * file name files to put beside the exercise. They are directives, not prose,
  * so they never appear in the panel — and a `.txt` holding nothing else leaves
  * the exercise with no instructions at all, exactly as if the file were absent.
+ * Among them, `#! markdown` renders the instructions as markdown.
  */
 export function parseSimpleBookGuide(raw: string): SimpleBookGuide {
   const lines = raw.replace(/^\uFEFF/, '').split(/\r\n|\r|\n/)
   const additional: string[] = []
+  let markdown = false
   let body = 0
   for (; body < lines.length; body++) {
     const directive = GUIDE_DIRECTIVE.exec(lines[body])
     if (directive) {
       const name = directive[1].trim().replace(/^\.?\//, '')
-      if (name && !additional.includes(name)) additional.push(name)
+      if (MARKDOWN_DIRECTIVE.test(name)) markdown = true
+      else if (name && !additional.includes(name)) additional.push(name)
       continue
     }
     // Blank lines between (or before) the directives are still the top of the
     // file; the first line with prose on it starts the instructions.
     if (lines[body].trim() !== '') break
   }
-  return { additional, text: lines.slice(body).join('\n').trim() }
+  return { additional, text: lines.slice(body).join('\n').trim(), markdown }
 }
 
 // ── Where the files are read from ───────────────────────────────────────────
@@ -252,6 +267,8 @@ export interface SimpleBookExercise {
   hasGuide: boolean
   /** Files the guide's `#!` lines asked for, mounted beside the exercise. */
   additional: string[]
+  /** Whether the guide opened with `#! markdown`. */
+  markdown?: boolean
 }
 
 /**
@@ -289,10 +306,12 @@ async function probeExercises(source: SimpleBookSource): Promise<SimpleBookExerc
       }
       if (!(await found(`${number}.py`))) return null
       const guide = await found(`${number}.txt`)
+      const parsed = guide ? parseSimpleBookGuide(new TextDecoder().decode(guide)) : null
       return {
         number,
         hasGuide: !!guide,
-        additional: guide ? parseSimpleBookGuide(new TextDecoder().decode(guide)).additional : [],
+        additional: parsed?.additional ?? [],
+        markdown: parsed?.markdown ?? false,
       }
     }))
     for (const exercise of batch) {
@@ -331,6 +350,8 @@ export function buildSimpleBookManifest(
     name: exercise.number,
     py: `${exercise.number}.py`,
     guide: exercise.hasGuide ? `${exercise.number}.txt` : undefined,
+    // The guide is still a .txt; this says to render it as markdown anyway.
+    guideFormat: exercise.hasGuide && exercise.markdown ? 'markdown' : undefined,
     // Nothing here can declare a test, so everything is an example: reaching
     // the end of a run is what ticks it off.
     isExample: true,

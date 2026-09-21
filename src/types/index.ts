@@ -301,6 +301,12 @@ export interface BookChallenge {
   id: string
   name: string
   guide?: string
+  /**
+   * How to render the guide when its extension does not say. Only set by a
+   * simple learning book whose `.txt` opens with `#! markdown`; otherwise a
+   * `.txt` guide is plain text and anything else is markdown.
+   */
+  guideFormat?: 'markdown' | 'text'
   py?: string
   isExample?: string | boolean
   tests?: BookTestCase[]

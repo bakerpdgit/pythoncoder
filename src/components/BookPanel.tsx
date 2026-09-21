@@ -420,9 +420,11 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
   // Only the guide *path* (not the whole manifest) should trigger a re-fetch —
   // otherwise unrelated edits (e.g. toggling a file's visibility) reload the
   // guide and flicker the WYSIWYG editor.
-  const activeGuidePath = manifest && navState.activeChallengeId
-    ? findChallenge(manifest, navState.activeChallengeId)?.guide : undefined
-  const isPlainTextGuide = !!activeGuidePath && /\.txt$/i.test(activeGuidePath)
+  const activeGuideChallenge = manifest && navState.activeChallengeId
+    ? findChallenge(manifest, navState.activeChallengeId) : undefined
+  const activeGuidePath = activeGuideChallenge?.guide
+  const guideFormat = activeGuideChallenge?.guideFormat
+    ?? (activeGuidePath && /\.txt$/i.test(activeGuidePath) ? 'text' : 'markdown')
   // A simple learning book has no manifest to title an exercise from, so the
   // panel heads the instructions with the exercise's number and says plainly
   // when there are none — a `.txt` that held only `#!` file directives leaves
@@ -933,19 +935,24 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
                   initialMarkdown={guideMarkdown}
                   onSave={md => onSaveGuide?.(activeChallenge.guide!, md)}
                 />
-              ) : isPlainTextGuide || isSimpleBook ? (
+              ) : guideFormat === 'text' || isSimpleBook ? (
                 // A .txt guide is exactly what it says — a simple learning book's
                 // instructions are typed in Notepad, and running them through the
                 // markdown renderer would eat the asterisks and underscores that
-                // a teacher writing about Python is very likely to use.
+                // a teacher writing about Python is very likely to use. Unless the
+                // file opened with `#! markdown`, which asks for exactly that.
                 <div className={`text-slate-300 leading-relaxed book-font-${bookFontSize}`}>
                   {isSimpleBook && activeChallenge && (
                     <div className="mb-2 font-semibold text-slate-200">{activeChallenge.name} Instructions</div>
                   )}
-                  <div className="whitespace-pre-wrap">
-                    {guideMarkdown.trim() ||
-                      (isSimpleBook ? SIMPLE_BOOK_NO_INSTRUCTIONS : guideMarkdown)}
-                  </div>
+                  {guideFormat === 'markdown' && guideMarkdown.trim() ? (
+                    <div dangerouslySetInnerHTML={{ __html: renderMarkdown(guideMarkdown, previewSvg, previewLoading) }} />
+                  ) : (
+                    <div className="whitespace-pre-wrap">
+                      {guideMarkdown.trim() ||
+                        (isSimpleBook ? SIMPLE_BOOK_NO_INSTRUCTIONS : guideMarkdown)}
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div
