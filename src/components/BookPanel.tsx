@@ -169,6 +169,10 @@ function getStoredBookFontSize(): number {
   return DEFAULT_BOOK_FONT_SIZE
 }
 
+// How long a turtle preview waits for its activity's filesystem to be ready.
+const PREVIEW_FS_ATTEMPTS = 40
+const PREVIEW_FS_RETRY_MS = 250
+
 // Strip the SVG's fixed width/height attributes and add a matching viewBox so
 // CSS can scale it responsively to the available panel width.
 function makeResponsiveSvg(svg: string): string {
@@ -487,12 +491,20 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
     void (async () => {
       try {
         const fsName = getChallengeFsName(navState.activeChallengeId!)
-        const fsList = await listFilesystems()
-        const fs = fsList.find(f => f.name === fsName || f.name.startsWith(fsName + ':'))
-        if (!fs) { if (!cancelled) setPreviewLoading(false); return }
-
-        const entry = await getEntryByPath(fs.id, '/' + solutionFilename!.replace(/^\//, ''))
-        if (!entry?.content) { if (!cancelled) setPreviewLoading(false); return }
+        const solutionPath = '/' + solutionFilename!.replace(/^\//, '')
+        // The guide usually arrives before the activity's filesystem has been
+        // created and filled (both are fetched when the activity is entered), so
+        // wait for the solution file rather than giving up on first entry.
+        let fs: Awaited<ReturnType<typeof listFilesystems>>[number] | undefined
+        let entry: Awaited<ReturnType<typeof getEntryByPath>> | undefined
+        for (let attempt = 0; attempt < PREVIEW_FS_ATTEMPTS && !cancelled; attempt++) {
+          if (attempt > 0) await new Promise(resolve => setTimeout(resolve, PREVIEW_FS_RETRY_MS))
+          fs = (await listFilesystems()).find(f => f.name === fsName || f.name.startsWith(fsName + ':'))
+          entry = fs ? await getEntryByPath(fs.id, solutionPath) : undefined
+          if (entry?.content) break
+        }
+        if (cancelled) return
+        if (!fs || !entry?.content) { setPreviewLoading(false); return }
         const solutionCode = new TextDecoder().decode(entry.content)
 
         const allFiles = await getAllFiles(fs.id)

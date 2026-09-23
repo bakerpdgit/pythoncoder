@@ -1,0 +1,13 @@
+# CONSTANTS
+ORDERS_FILE = "orders.csv"
+VALID_FILE = "valid_orders.csv"
+NUM_FIELDS = 4
+
+# GLOBAL VARIABLES
+
+
+# SUBPROGRAMS
+
+
+# MAIN
+

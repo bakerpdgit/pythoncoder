@@ -1,0 +1,21 @@
+# LIBRARIES
+import turtle
+
+# CONSTANTS
+MAX_BARS = 6
+MAX_SCORE = 100
+BAR_WIDTH = 50
+GAP = 20
+START_X = -250
+BASE_Y = -150
+SCALE = 3
+LABEL_FONT = ("Arial", 12, "normal")
+
+# GLOBAL VARIABLES
+
+
+# SUBPROGRAMS
+
+
+# MAIN
+

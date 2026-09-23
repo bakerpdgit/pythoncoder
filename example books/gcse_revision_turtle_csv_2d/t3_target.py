@@ -1,0 +1,13 @@
+# LIBRARIES
+import turtle
+
+# CONSTANTS
+RING_WIDTH = 30
+MIN_RINGS = 1
+MAX_RINGS = 5
+
+# GLOBAL VARIABLES
+
+
+# MAIN
+

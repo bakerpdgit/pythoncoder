@@ -1,0 +1,301 @@
+{
+  "name": "GCSE Revision: Turtle, CSV files and 2D arrays",
+  "id": "rev-tcd-root",
+  "children": [
+    {
+      "id": "rev-tcd-t1",
+      "name": "Turtle 1 (trivial): Fix the hexagon",
+      "guide": "t1_hexagon.md",
+      "py": "t1_hexagon.py",
+      "isExample": true,
+      "tests": [
+        {
+          "in": [],
+          "out": [
+            {
+              "typ": "t",
+              "filename": "t1_hexagon_solution.py"
+            }
+          ]
+        }
+      ],
+      "additionalFiles": [
+        {
+          "filename": "t1_hexagon_solution.py",
+          "visible": false
+        }
+      ]
+    },
+    {
+      "id": "rev-tcd-t1-solution",
+      "name": "Turtle 1 model solution: Fix the hexagon",
+      "guide": "t1_hexagon_solution.md",
+      "py": "t1_hexagon_solution.py",
+      "isExample": true
+    },
+    {
+      "id": "rev-tcd-t2",
+      "name": "Turtle 2 (simple): A row of squares",
+      "guide": "t2_squares.md",
+      "py": "t2_squares.py",
+      "isExample": true,
+      "tests": [
+        {
+          "in": [
+            5
+          ],
+          "out": [
+            {
+              "typ": "t",
+              "filename": "t2_squares_solution.py"
+            }
+          ]
+        }
+      ],
+      "additionalFiles": [
+        {
+          "filename": "t2_squares_solution.py",
+          "visible": false
+        }
+      ]
+    },
+    {
+      "id": "rev-tcd-t2-solution",
+      "name": "Turtle 2 model solution: A row of squares",
+      "guide": "t2_squares_solution.md",
+      "py": "t2_squares_solution.py",
+      "isExample": true
+    },
+    {
+      "id": "rev-tcd-t3",
+      "name": "Turtle 3 (medium): Archery target",
+      "guide": "t3_target.md",
+      "py": "t3_target.py",
+      "isExample": true,
+      "tests": [
+        {
+          "in": [
+            5
+          ],
+          "out": [
+            {
+              "typ": "t",
+              "filename": "t3_target_solution.py"
+            }
+          ]
+        }
+      ],
+      "additionalFiles": [
+        {
+          "filename": "t3_target_solution.py",
+          "visible": false
+        }
+      ]
+    },
+    {
+      "id": "rev-tcd-t3-solution",
+      "name": "Turtle 3 model solution: Archery target",
+      "guide": "t3_target_solution.md",
+      "py": "t3_target_solution.py",
+      "isExample": true
+    },
+    {
+      "id": "rev-tcd-t4",
+      "name": "Turtle 4 (hard): Bar chart of scores",
+      "guide": "t4_bar_chart.md",
+      "py": "t4_bar_chart.py",
+      "isExample": true,
+      "tests": [
+        {
+          "in": [
+            5,
+            80,
+            50,
+            20,
+            95,
+            65
+          ],
+          "out": [
+            {
+              "typ": "t",
+              "filename": "t4_bar_chart_solution.py"
+            }
+          ]
+        }
+      ],
+      "additionalFiles": [
+        {
+          "filename": "t4_bar_chart_solution.py",
+          "visible": false
+        }
+      ]
+    },
+    {
+      "id": "rev-tcd-t4-solution",
+      "name": "Turtle 4 model solution: Bar chart of scores",
+      "guide": "t4_bar_chart_solution.md",
+      "py": "t4_bar_chart_solution.py",
+      "isExample": true
+    },
+    {
+      "id": "rev-tcd-c1",
+      "name": "CSV 1 (trivial): Big cities",
+      "guide": "c1_cities.md",
+      "py": "c1_cities.py",
+      "isExample": true,
+      "additionalFiles": [
+        {
+          "filename": "cities.csv",
+          "visible": true
+        }
+      ]
+    },
+    {
+      "id": "rev-tcd-c1-solution",
+      "name": "CSV 1 model solution: Big cities",
+      "guide": "c1_cities_solution.md",
+      "py": "c1_cities_solution.py",
+      "isExample": true,
+      "additionalFiles": [
+        {
+          "filename": "cities.csv",
+          "visible": true
+        }
+      ]
+    },
+    {
+      "id": "rev-tcd-c2",
+      "name": "CSV 2 (simple): Club members by year",
+      "guide": "c2_members.md",
+      "py": "c2_members.py",
+      "isExample": true,
+      "additionalFiles": [
+        {
+          "filename": "members.csv",
+          "visible": true
+        }
+      ]
+    },
+    {
+      "id": "rev-tcd-c2-solution",
+      "name": "CSV 2 model solution: Club members by year",
+      "guide": "c2_members_solution.md",
+      "py": "c2_members_solution.py",
+      "isExample": true,
+      "additionalFiles": [
+        {
+          "filename": "members.csv",
+          "visible": true
+        }
+      ]
+    },
+    {
+      "id": "rev-tcd-c3",
+      "name": "CSV 3 (medium): Exam results report",
+      "guide": "c3_report.md",
+      "py": "c3_report.py",
+      "isExample": true,
+      "additionalFiles": [
+        {
+          "filename": "results.csv",
+          "visible": true
+        }
+      ]
+    },
+    {
+      "id": "rev-tcd-c3-solution",
+      "name": "CSV 3 model solution: Exam results report",
+      "guide": "c3_report_solution.md",
+      "py": "c3_report_solution.py",
+      "isExample": true,
+      "additionalFiles": [
+        {
+          "filename": "results.csv",
+          "visible": true
+        }
+      ]
+    },
+    {
+      "id": "rev-tcd-c4",
+      "name": "CSV 4 (hard): Validating orders",
+      "guide": "c4_orders.md",
+      "py": "c4_orders.py",
+      "isExample": true,
+      "additionalFiles": [
+        {
+          "filename": "orders.csv",
+          "visible": true
+        }
+      ]
+    },
+    {
+      "id": "rev-tcd-c4-solution",
+      "name": "CSV 4 model solution: Validating orders",
+      "guide": "c4_orders_solution.md",
+      "py": "c4_orders_solution.py",
+      "isExample": true,
+      "additionalFiles": [
+        {
+          "filename": "orders.csv",
+          "visible": true
+        }
+      ]
+    },
+    {
+      "id": "rev-tcd-a1",
+      "name": "2D arrays 1 (trivial): Unscramble the totals",
+      "guide": "a1_test_totals.md",
+      "py": "a1_test_totals.py",
+      "isExample": true
+    },
+    {
+      "id": "rev-tcd-a1-solution",
+      "name": "2D arrays 1 model solution: Unscramble the totals",
+      "guide": "a1_test_totals_solution.md",
+      "py": "a1_test_totals_solution.py",
+      "isExample": true
+    },
+    {
+      "id": "rev-tcd-a2",
+      "name": "2D arrays 2 (simple): Cinema seat booking",
+      "guide": "a2_cinema.md",
+      "py": "a2_cinema.py",
+      "isExample": true
+    },
+    {
+      "id": "rev-tcd-a2-solution",
+      "name": "2D arrays 2 model solution: Cinema seat booking",
+      "guide": "a2_cinema_solution.md",
+      "py": "a2_cinema_solution.py",
+      "isExample": true
+    },
+    {
+      "id": "rev-tcd-a3",
+      "name": "2D arrays 3 (medium): Sales table",
+      "guide": "a3_sales_table.md",
+      "py": "a3_sales_table.py",
+      "isExample": true
+    },
+    {
+      "id": "rev-tcd-a3-solution",
+      "name": "2D arrays 3 model solution: Sales table",
+      "guide": "a3_sales_table_solution.md",
+      "py": "a3_sales_table_solution.py",
+      "isExample": true
+    },
+    {
+      "id": "rev-tcd-a4",
+      "name": "2D arrays 4 (hard): Minesweeper",
+      "guide": "a4_minesweeper.md",
+      "py": "a4_minesweeper.py",
+      "isExample": true
+    },
+    {
+      "id": "rev-tcd-a4-solution",
+      "name": "2D arrays 4 model solution: Minesweeper",
+      "guide": "a4_minesweeper_solution.md",
+      "py": "a4_minesweeper_solution.py",
+      "isExample": true
+    }
+  ]
+}
