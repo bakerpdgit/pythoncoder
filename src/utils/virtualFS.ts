@@ -170,26 +170,58 @@ export async function createEntry(
   return entry
 }
 
-export function writeFile(fsId: string, path: string, content: ArrayBuffer, mimeType?: string): Promise<void> {
+/**
+ * Every folder above `path`, outermost first: `/a/b/c.txt` → `['/a', '/a/b']`.
+ * A file at the root has none.
+ */
+export function ancestorFolderPaths(path: string): string[] {
+  const parts = path.split('/').filter(Boolean).slice(0, -1)
+  return parts.map((_, i) => '/' + parts.slice(0, i + 1).join('/'))
+}
+
+/**
+ * Make sure every folder above `path` exists as a folder entry.
+ *
+ * The file browser lists a folder's children by `parentPath`, starting from
+ * `/`, so a file whose parent folder has no entry of its own is unreachable:
+ * it is stored, mounted and readable by the program, but never shown. A book's
+ * `additionalFiles` (`data/stations.csv`) and a program that writes into a
+ * subfolder both arrive here with nothing but a path.
+ */
+async function ensureAncestorFolders(fsId: string, path: string): Promise<void> {
+  for (const folder of ancestorFolderPaths(path)) {
+    if (await getEntryByPath(fsId, folder)) continue
+    const name = folder.substring(folder.lastIndexOf('/') + 1)
+    try {
+      await createEntry(fsId, getParentPath(folder), name, 'folder')
+    } catch (error) {
+      // Another write for a sibling file created it first: `byFsAndPath` is a
+      // unique index, so the loser of that race is refused, which is fine.
+      if ((error as DOMException | null)?.name !== 'ConstraintError') throw error
+    }
+  }
+}
+
+export async function writeFile(fsId: string, path: string, content: ArrayBuffer, mimeType?: string): Promise<void> {
+  await ensureAncestorFolders(fsId, path)
   const parentPath = getParentPath(path)
   const name = path.substring(path.lastIndexOf('/') + 1)
+  const db = await openVFSDb()
   return new Promise((resolve, reject) => {
-    openVFSDb().then(db => {
-      const store = db.transaction('entries', 'readwrite').objectStore('entries')
-      const getReq = store.index('byFsAndPath').get([fsId, path])
-      getReq.onsuccess = () => {
-        const existing = getReq.result as VFSEntry | undefined
-        let req: IDBRequest
-        if (existing) {
-          req = store.put({ ...existing, content, mimeType: mimeType ?? existing.mimeType, size: content.byteLength, modifiedAt: Date.now() })
-        } else {
-          req = store.add({ id: crypto.randomUUID(), fsId, parentPath, path, name, type: 'file', content, mimeType: mimeType ?? guessMimeType(name), size: content.byteLength, modifiedAt: Date.now() })
-        }
-        req.onsuccess = () => resolve()
-        req.onerror = () => reject(req.error)
+    const store = db.transaction('entries', 'readwrite').objectStore('entries')
+    const getReq = store.index('byFsAndPath').get([fsId, path])
+    getReq.onsuccess = () => {
+      const existing = getReq.result as VFSEntry | undefined
+      let req: IDBRequest
+      if (existing) {
+        req = store.put({ ...existing, content, mimeType: mimeType ?? existing.mimeType, size: content.byteLength, modifiedAt: Date.now() })
+      } else {
+        req = store.add({ id: crypto.randomUUID(), fsId, parentPath, path, name, type: 'file', content, mimeType: mimeType ?? guessMimeType(name), size: content.byteLength, modifiedAt: Date.now() })
       }
-      getReq.onerror = () => reject(getReq.error)
-    }).catch(reject)
+      req.onsuccess = () => resolve()
+      req.onerror = () => reject(req.error)
+    }
+    getReq.onerror = () => reject(getReq.error)
   })
 }
 
@@ -394,16 +426,7 @@ export async function loadFilesystemFromUrl(url: string): Promise<string> {
     const parentPath = getParentPath(cleanPath)
     const name = cleanPath.substring(cleanPath.lastIndexOf('/') + 1)
     if (!name) continue
-    if (parentPath !== '/') {
-      const parts = parentPath.split('/').filter(Boolean)
-      let accPath = ''
-      for (const part of parts) {
-        accPath += '/' + part
-        if (!(await getEntryByPath(newFs.id, accPath))) {
-          await createEntry(newFs.id, getParentPath(accPath), part, 'folder')
-        }
-      }
-    }
+    await ensureAncestorFolders(newFs.id, cleanPath)
     const content = await zipFile.async('arraybuffer')
     await createEntry(newFs.id, parentPath, name, 'file', content, guessMimeType(name))
   }
@@ -427,16 +450,7 @@ export async function importFileMapToFs(
     const parentPath = getParentPath(cleanPath)
     const name = cleanPath.substring(cleanPath.lastIndexOf('/') + 1)
     if (!name) continue
-    if (parentPath !== '/') {
-      const parts = parentPath.split('/').filter(Boolean)
-      let accPath = ''
-      for (const part of parts) {
-        accPath += '/' + part
-        if (!(await getEntryByPath(fsId, accPath))) {
-          await createEntry(fsId, getParentPath(accPath), part, 'folder')
-        }
-      }
-    }
+    await ensureAncestorFolders(fsId, cleanPath)
     const mime = guessMimeType(name)
     if (overwrite) {
       await writeFile(fsId, cleanPath, content, mime)

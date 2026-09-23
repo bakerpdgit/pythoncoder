@@ -1,0 +1,71 @@
+{
+  "name": "Example B: Metro journey planner",
+  "id": "cwork-example-b-book",
+  "children": [
+    {
+      "id": "cwork-example-b-run",
+      "name": "Run the program",
+      "guide": "guide.md",
+      "py": "Main.py",
+      "isExample": true,
+      "additionalFiles": [
+        {
+          "filename": "terminal.py",
+          "visible": true
+        },
+        {
+          "filename": "graphTraversal.py",
+          "visible": true
+        },
+        {
+          "filename": "Graph.py",
+          "visible": true
+        },
+        {
+          "filename": "Station.py",
+          "visible": true
+        },
+        {
+          "filename": "StationList.py",
+          "visible": true
+        },
+        {
+          "filename": "Route.py",
+          "visible": true
+        },
+        {
+          "filename": "Location.py",
+          "visible": true
+        },
+        {
+          "filename": "heuristics.py",
+          "visible": true
+        },
+        {
+          "filename": "custom_implementations/binary_heap.py",
+          "visible": true
+        },
+        {
+          "filename": "custom_implementations/custom_queue.py",
+          "visible": true
+        },
+        {
+          "filename": "custom_implementations/custom_stack.py",
+          "visible": true
+        },
+        {
+          "filename": "custom_implementations/linked_list.py",
+          "visible": true
+        },
+        {
+          "filename": "data/stations.csv",
+          "visible": true
+        },
+        {
+          "filename": "instance/database.db",
+          "visible": false
+        }
+      ]
+    }
+  ]
+}

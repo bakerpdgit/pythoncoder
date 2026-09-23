@@ -3,6 +3,7 @@
 import { TRACE_TABLE_EVENT_LIMIT } from '../types/traceTable'
 import { pyodideSkipDirs } from '../utils/pyodideFs'
 import { PYODIDE_RUNTIME_RESET_CODE } from '../utils/pyodideReset'
+import { runProgramPython } from '../utils/programExit'
 
 const PYODIDE_BASE_URL = 'https://cdn.jsdelivr.net/pyodide/v0.29.3/full'
 const PYODIDE_URL = `${PYODIDE_BASE_URL}/pyodide.js`
@@ -1695,10 +1696,10 @@ self.onmessage = async function (e: MessageEvent) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     pyodide.globals.set('watch_expressions', (pyodide as any).toPy((e.data.watches ?? []) as string[]))
     traceStdoutCapture = traceTableEnabled ? text => pendingTraceOutput.push(text) : null
-    await pyodide.runPythonAsync(`
-code_obj = compile(user_code_str, "simulation.py", "exec")
-exec(code_obj, user_namespace, user_namespace)
-    `)
+    await pyodide.runPythonAsync(
+      'code_obj = compile(user_code_str, "simulation.py", "exec")\n' +
+      runProgramPython('exec(code_obj, user_namespace, user_namespace)'),
+    )
     await pyodide.runPythonAsync('trace_table_flush()')
     traceStdoutCapture = null
     // Figures the student built but never showed still belong on screen.

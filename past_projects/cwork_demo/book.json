@@ -1,0 +1,38 @@
+{
+  "name": "A Level Coursework Showcase",
+  "id": "cwork-demo",
+  "children": [
+    {
+      "id": "cwork-welcome",
+      "name": "Welcome",
+      "guide": "welcome.md",
+      "py": "welcome.py",
+      "isExample": true
+    },
+    {
+      "id": "cwork-example-a",
+      "name": "Example A: Blokus-style strategy game",
+      "bookLink": "./example_a/book.json"
+    },
+    {
+      "id": "cwork-example-b",
+      "name": "Example B: Metro journey planner",
+      "bookLink": "./example_b/book.json"
+    },
+    {
+      "id": "cwork-example-c",
+      "name": "Example C: Boolean algebra simplifier",
+      "bookLink": "./example_c/book.json"
+    },
+    {
+      "id": "cwork-example-d",
+      "name": "Example D: Othello",
+      "bookLink": "./example_d/book.json"
+    },
+    {
+      "id": "cwork-example-e",
+      "name": "Example E: Train Tracks puzzle",
+      "bookLink": "./example_e/book.json"
+    }
+  ]
+}

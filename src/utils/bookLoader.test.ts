@@ -15,7 +15,7 @@ vi.mock('./virtualFS', () => ({
 
 import {
   bookFileBaseUrls, collectBookChallengeIds, collectBookProgressIds, deleteChallengeFilesystems,
-  findBookTargetById, findFirstBookChallenge, isChallengeFsName,
+  findBookTargetById, findFirstBookChallenge, foldersHoldingOnlyHidden, isChallengeFsName,
 } from './bookLoader'
 
 describe('findFirstBookChallenge', () => {
@@ -392,5 +392,39 @@ describe('collectBookProgressIds', () => {
     )
 
     expect(progress).toEqual({ ids: [], byChild: {} })
+  })
+})
+
+describe('foldersHoldingOnlyHidden', () => {
+  it('hides a folder whose only file is hidden', () => {
+    expect(foldersHoldingOnlyHidden(
+      ['/main.py', '/instance/database.db', '/data/stations.csv'],
+      ['/instance/database.db'],
+    )).toEqual(['/instance'])
+  })
+
+  it('keeps a folder that still has a visible file in it', () => {
+    expect(foldersHoldingOnlyHidden(
+      ['/main.py', '/data/answers.txt', '/data/stations.csv'],
+      ['/data/answers.txt'],
+    )).toEqual([])
+  })
+
+  it('works through nested folders, keeping a parent with visible files further down', () => {
+    expect(foldersHoldingOnlyHidden(
+      ['/main.py', '/assets/images/secret.png', '/assets/sounds/beep.wav'],
+      ['/assets/images/secret.png'],
+    )).toEqual(['/assets/images'])
+  })
+
+  it('hides nothing for hidden files at the top level', () => {
+    expect(foldersHoldingOnlyHidden(['/main.py', '/answer.py'], ['/answer.py'])).toEqual([])
+  })
+
+  it('does not treat a folder name that is only a prefix as a parent', () => {
+    expect(foldersHoldingOnlyHidden(
+      ['/data/x.csv', '/data2/y.csv'],
+      ['/data/x.csv'],
+    )).toEqual(['/data'])
   })
 })

@@ -402,6 +402,25 @@ function parsonsHiddenPaths(challenge: BookChallenge): string[] {
     : []
 }
 
+/**
+ * Folders that hold only hidden files, and so should be hidden with them.
+ *
+ * An additional file in a subfolder (`instance/database.db`) now brings a real
+ * folder entry into the file browser. Hiding the file alone would leave an
+ * empty folder on show, which invites the student to open it and wonder what
+ * went missing. A folder with anything visible beneath it stays.
+ */
+export function foldersHoldingOnlyHidden(filePaths: string[], hiddenPaths: string[]): string[] {
+  const hidden = new Set(hiddenPaths)
+  const folders = new Set<string>()
+  for (const path of hiddenPaths) {
+    const parts = path.split('/').filter(Boolean).slice(0, -1)
+    parts.forEach((_, i) => folders.add('/' + parts.slice(0, i + 1).join('/')))
+  }
+  return [...folders].filter(folder =>
+    filePaths.every(path => !path.startsWith(folder + '/') || hidden.has(path)))
+}
+
 export async function getOrCreateChallengeFs(
   bookUrl: string,
   rootBookUrl: string,
@@ -449,6 +468,11 @@ export async function getOrCreateChallengeFs(
       if (!ok) throw new Error(`Could not load the exercise file "${rel}"`)
       if (!af.visible) hiddenPaths.push(`/${rel}`)
     }
+    const writtenPaths = [
+      ...(challenge.py ? [`/${challengeFilePath(challenge.py)}`] : []),
+      ...(challenge.additionalFiles ?? []).map(af => `/${challengeFilePath(af.filename)}`),
+    ]
+    hiddenPaths.push(...foldersHoldingOnlyHidden(writtenPaths, hiddenPaths))
 
     const map = getStoredHidden()
     map[fsId] = hiddenPaths

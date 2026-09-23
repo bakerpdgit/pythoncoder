@@ -1,0 +1,14 @@
+{
+  "name": "Example C: Boolean algebra simplifier",
+  "id": "cwork-example-c-book",
+  "children": [
+    {
+      "id": "cwork-example-c-run",
+      "name": "Run the program",
+      "guide": "guide.md",
+      "py": "boolean_algebra.py",
+      "isExample": true,
+      "additionalFiles": []
+    }
+  ]
+}

@@ -44,7 +44,9 @@ Three layers, all of which should pass before a change is called done:
   a figure. `book.spec.ts`: the student's path — open a numbered book, read the
   instructions, run an exercise, see it tick — with the book served by the test
   itself through `page.route`, so it needs no fixture in `public/` (which would be
-  deployed) and no repository staying where it is. Shared helpers live in
+  deployed) and no repository staying where it is. `bookfiles.spec.ts` does the
+  same for a `book.json` activity whose files sit in subfolders and whose program
+  ends with `quit()`. Shared helpers live in
   `e2e/helpers.ts`; `watchForErrors` takes `ignoreRequestsTo` because a numbered
   book finds its end by asking for a file that is not there, and the browser logs
   that 404 as a console error. Needs network (Pyodide comes from a CDN), ~50s.
@@ -362,6 +364,25 @@ These are set in:
 - Whatever directory a file is found in, it is written to the challenge
   filesystem at its declared name (`/fp_utils.py`), because the exercise does a
   plain `import fp_utils`.
+
+### Files in subfolders get real folders
+
+- The file browser lists a folder's children by `parentPath`, starting from
+  `/`. A file stored at `/data/stations.csv` with no `/data` folder entry was
+  therefore unreachable: mounted into Pyodide and readable by the program, but
+  never shown. Book `additionalFiles` in subfolders (a multi-file project with a
+  `data/` or package folder) and programs that write into a subfolder both
+  produced exactly that.
+- `writeFile` (`utils/virtualFS.ts`) now creates any missing ancestor folders
+  first (`ensureAncestorFolders`, pure half `ancestorFolderPaths`), so every
+  caller gets them — book loading, the post-run sync and book editing. The ZIP
+  and file-map importers, which had their own copies of the loop, now share
+  it. A folder created by a racing sibling write is refused by the unique
+  `byFsAndPath` index, and that refusal is ignored.
+- A folder whose files are **all** hidden is hidden with them
+  (`foldersHoldingOnlyHidden` in `utils/bookLoader.ts`), otherwise a hidden
+  `instance/database.db` leaves an empty `instance` folder on show. A folder
+  with anything visible beneath it stays.
 
 ### Parsons problems (drag-and-drop activities)
 
@@ -838,6 +859,22 @@ These are set in:
   `ast.parse`, and `compile` — so both runtimes silence `SyntaxWarning` during
   the import scan (it reports against an anonymous `<unknown>` file) and then
   set it to `once`, leaving a single warning naming `simulation.py`.
+
+### quit() is not a failed run
+
+- `quit()`, `exit()` and `sys.exit()` end a program by raising `SystemExit`.
+  CPython treats that as a normal ending; Pyodide does not, so a menu-driven
+  program that finished with `quit()` ended on a red traceback.
+- `runProgramPython` (`utils/programExit.ts`) wraps the statement that executes
+  the student's code in the trace worker and the plain main-thread run: an
+  integer or empty exit ends quietly, `sys.exit("message")` prints the message
+  to stderr as CPython does, and every other exception still propagates. The
+  pygame, turtle and stdctx main-thread paths and the tester worker already
+  caught `SystemExit` themselves.
+- It catches `SystemExit` only. The trace worker's own stop signals subclass
+  `BaseException` directly, so a Stop or a trace-limit halt is never mistaken
+  for the program choosing to end. `programExit.test.ts` runs the generated
+  Python under native `python` to pin all of this down.
 
 ### Fixed inputs
 

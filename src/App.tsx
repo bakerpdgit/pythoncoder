@@ -15,6 +15,7 @@ import {
   analyzePythonOutline, cleanCodeText, codeUsesPygame, codeUsesStdctx, codeUsesTurtle, codeUsesTurtleKeyboard, detectPlottingLibs, detectSpongeLibs, getExpandableOutlineIds, micropipPackagesFor, pyodidePackagesFor,
 } from './utils/codeAnalysis'
 import { programPythonFiles } from './utils/importGraph'
+import { runProgramPython } from './utils/programExit'
 import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides, getStoredSettings, persistSettings, getStoredBookNavState, persistBookNavState, getStoredFixedInputs, persistFixedInputs, getStoredEditorFontSize, persistEditorFontSize, getStoredConsoleFontSize, persistConsoleFontSize, getStoredDisplayZoom, persistDisplayZoom, getStoredWatches, persistWatches, getStoredNamedLayouts, persistNamedLayouts, getStoredCompletions, persistCompletion, clearCompletionsForBook, getStoredParsonsState, persistParsonsState, clearParsonsState, clearParsonsStateForBook, getStoredLayoutPrefs, persistLayoutPrefs, defaultPanelsForView, MINIMAL_VISIBLE_PANELS, DEFAULT_DISPLAY_SPLIT, DEFAULT_PRESENTATION_DISPLAY_SPLIT, DISPLAY_SPLIT_MIN, DISPLAY_SPLIT_MAX } from './utils/storage'
 import { triggerDownload, getBaseFileStem } from './utils/download'
 import { buildCommentExport, buildDocstringExport, replaceExistingDocstring, getDefinitionNote, getDefaultDefinitionNote, sanitizeNoteText } from './utils/export'
@@ -3823,7 +3824,7 @@ import builtins
 def __coder_prompt_input(prompt=""): return js_input_prompt(prompt)
 builtins.input = __coder_prompt_input
 code_obj = compile(__coder_user_code__, "simulation.py", "exec")
-exec(code_obj, globals())
+${runProgramPython('exec(code_obj, globals())')}
           `, { globals: execGlobals })
         }
       } finally {

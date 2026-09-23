@@ -1,0 +1,25 @@
+{
+  "name": "Example A: Blokus-style strategy game",
+  "id": "cwork-example-a-book",
+  "children": [
+    {
+      "id": "cwork-example-a-play",
+      "name": "Play the game",
+      "guide": "guide.md",
+      "py": "pygame_maingame.py",
+      "isExample": true,
+      "additionalFiles": [
+        { "filename": "pygame_pieces.py", "visible": true },
+        { "filename": "pygame_button.py", "visible": true },
+        { "filename": "Find Cartoon.ttf", "visible": false },
+        { "filename": "logo.png", "visible": false },
+        { "filename": "menu_background.png", "visible": false },
+        { "filename": "board_background.png", "visible": false },
+        { "filename": "button.png", "visible": false },
+        { "filename": "purple_button.png", "visible": false },
+        { "filename": "dark_purple_button.png", "visible": false },
+        { "filename": "home_button.png", "visible": false }
+      ]
+    }
+  ]
+}

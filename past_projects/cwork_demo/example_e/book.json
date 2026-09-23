@@ -1,0 +1,19 @@
+{
+  "name": "Example E: Train Tracks puzzle",
+  "id": "cwork-example-e-book",
+  "children": [
+    {
+      "id": "cwork-example-e-run",
+      "name": "Run the program",
+      "guide": "guide.md",
+      "py": "main.py",
+      "isExample": true,
+      "additionalFiles": [
+        {
+          "filename": "account.csv",
+          "visible": true
+        }
+      ]
+    }
+  ]
+}

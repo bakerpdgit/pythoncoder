@@ -1,0 +1,51 @@
+{
+  "name": "Example D: Othello",
+  "id": "cwork-example-d-book",
+  "children": [
+    {
+      "id": "cwork-example-d-run",
+      "name": "Run the program",
+      "guide": "guide.md",
+      "py": "main.py",
+      "isExample": true,
+      "additionalFiles": [
+        {
+          "filename": "othelloTerm.py",
+          "visible": true
+        },
+        {
+          "filename": "othello.py",
+          "visible": true
+        },
+        {
+          "filename": "ui.py",
+          "visible": true
+        },
+        {
+          "filename": "player.py",
+          "visible": true
+        },
+        {
+          "filename": "computer.py",
+          "visible": true
+        },
+        {
+          "filename": "stack.py",
+          "visible": true
+        },
+        {
+          "filename": "game1.txt",
+          "visible": true
+        },
+        {
+          "filename": "game2.txt",
+          "visible": true
+        },
+        {
+          "filename": "game3.txt",
+          "visible": true
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,167 @@
+Station_Code,Station_Name,Line_Color,Line_Name,lat,lng,adjacent_stations
+NS1,Jurong East,Red,North South Line,1.333207,103.742308,NS2#EW24
+EW24,Jurong East,Green,East West Line,1.333207,103.742308,EW23#EW25#NS1
+NS2,Bukit Batok,Red,North South Line,1.349069,103.749596,NS3#NS1
+NS3,Bukit Gombak,Red,North South Line,1.359043,103.751863,NS4#NS2
+NS4,Choa Chu Kang,Red,North South Line,1.385417,103.744316,NS5#NS3
+NS5,Yew Tee,Red,North South Line,1.397383,103.747523,NS4#NS7
+NS7,Kranji,Red,North South Line,1.425302,103.762049,NS8#NS5
+NS8,Marsiling,Red,North South Line,1.432579,103.77415,NS7#NS9
+NS9,Woodlands,Red,North South Line,1.436984,103.786406,NS8#NS10#TE2
+TE2,Woodlands,Brown,Thomson East Coast Line,1.436984,103.786406,TE1#TE3#NS9
+NS10,Admiralty,Red,North South Line,1.436984,103.786406,NS11#NS9
+NS11,Sembawang,Red,North South Line,1.449133,103.82006,NS12#NS10
+NS12,Canberra,Red,North South Line,1.4433,103.8296,NS13#NS11
+NS13,Yishun,Red,North South Line,1.429666,103.835044,NS12#NS14
+NS14,Khatib,Red,North South Line,1.417423,103.832995,NS13#NS15
+NS15,Yio Chu Kang,Red,North South Line,1.381765,103.844923,NS14#NS16
+NS16,Ang Mo Kio,Red,North South Line,1.370025,103.849588,NS17#NS15
+NS17,Bishan,Red,North South Line,1.35092,103.848206,CC15#NS16#NS18
+CC15,Bishan,Yellow,Circle Line,1.35092,103.848206,NS17#CC14#CC16
+NS18,Braddell,Red,North South Line,1.34055,103.847098,NS17#NS19
+NS19,Toa Payoh,Red,North South Line,1.332405,103.847436,NS20#NS18
+NS20,Novena,Red,North South Line,1.320089,103.843405,NS19#NS21
+NS21,Newton,Red,North South Line,1.31383,103.838021,DT11#NS20#NS22
+DT11,Newton,Blue,Downtown Line,1.31383,103.838021,DT12#DT10#NS21
+NS22,Orchard,Red,North South Line,1.304041,103.831792,TE14#NS23#NS21
+TE14,Orchard,Brown,Thomson East Coast Line,1.304041,103.831792,NS22
+NS23,Somerset,Red,North South Line,1.300508,103.838428,NS24#NS22
+NS24,Dhoby Ghaut,Red,North South Line,1.299169,103.845799,CC1#NS23#NE6#NS25
+NE6,Dhoby Ghaut,Purple,North East Line,1.299169,103.845799,NE5#NS24#CC1#NE7
+CC1,Dhoby Ghaut,Yellow,Circle Line,1.299169,103.845799,NS24#CC2#NE6
+NS25,City Hall,Red,North South Line,1.293119,103.852089,NS24#NS26#EW13
+EW13,City Hall,Green,East West Line,1.293119,103.852089,EW14#EW12#NS25
+NS26,Raffles Place,Red,North South Line,1.284001,103.85155,EW14#NS27#NS25
+EW14,Raffles Place,Green,East West Line,1.284001,103.85155,EW13#NS26#EW15
+NS27,Marina Bay,Red,North South Line,1.276481,103.854598,CE2#NS26#TE20#NS28
+CE2,Marina Bay,Yellow,Circle Line,1.276481,103.854598,NS27#CE1#TE20
+TE20,Marina Bay,Brown,Thomson East Coast Line,1.276481,103.854598,CE2#NS27
+NS28,Marina South Pier,Red,North South Line,1.271422,103.863581,NS27
+EW1,Pasir Ris,Green,East West Line,1.373234,103.949343,EW2
+EW2,Tampines,Green,East West Line,1.354467,103.943325,DT32#EW3#EW1
+DT32,Tampines,Blue,Downtown Line,1.354467,103.943325,EW2#DT31#DT33
+EW3,Simei,Green,East West Line,1.343237,103.953343,EW2#EW4
+EW4,Tanah Merah,Green,East West Line,1.327309,103.946479,EW3#CG#EW5
+CG,Tanah Merah,Green,Changi Airport Branch Line,1.327309,103.946479,CG1#EW4
+EW5,Bedok,Green,East West Line,1.324043,103.930205,EW6#EW4
+EW6,Kembangan,Green,East West Line,1.320998,103.913433,EW5#EW7
+EW7,Eunos,Green,East West Line,1.319809,103.902888,EW6#EW8
+EW8,Paya Lebar,Green,East West Line,1.318214,103.893133,CC9#EW9#EW7
+CC9,Paya Lebar,Yellow,Circle Line,1.318214,103.893133,EW8#CC10#CC8
+EW9,Aljunied,Green,East West Line,1.316474,103.882762,EW10#EW8
+EW10,Kallang,Green,East West Line,1.311532,103.871372,EW11#EW9
+EW11,Lavender,Green,East West Line,1.307577,103.863155,EW10#EW12
+EW12,Bugis,Green,East West Line,1.300747,103.855873,EW11#DT14#EW13
+DT14,Bugis,Blue,Downtown Line,1.300747,103.855873,DT15#EW12#DT13
+EW15,Tanjong Pagar,Green,East West Line,1.276385,103.846771,EW14#EW16
+EW16,Outram Park,Green,East West Line,1.280319,103.839459,TE17#EW17#NE3#EW15
+NE3,Outram Park,Purple,North East Line,1.280319,103.839459,NE1#TE17#NE4#EW16
+TE17,Outram Park,Brown,Thomson East Coast Line,1.280319,103.839459,EW16#NE3
+EW17,Tiong Bahru,Green,East West Line,1.286555,103.826956,EW18#EW16
+EW18,Redhill,Green,East West Line,1.289674,103.816787,EW17#EW19
+EW19,Queenstown,Green,East West Line,1.294867,103.805902,EW20#EW18
+EW20,Commonwealth,Green,East West Line,1.302439,103.798326,EW21#EW19
+EW21,Buona Vista,Green,East West Line,1.307337,103.790046,EW20#EW22#CC22
+CC22,Buona Vista,Yellow,Circle Line,1.307337,103.790046,EW21#CC21#CC23
+EW22,Dover,Green,East West Line,1.311414,103.778596,EW23#EW21
+EW23,Clementi,Green,East West Line,1.314925,103.765341,EW22#EW24
+EW25,Chinese Garden,Green,East West Line,1.342436,103.732582,EW26#EW24
+EW26,Lakeside,Green,East West Line,1.344264,103.720797,EW25#EW27
+EW27,Boon Lay,Green,East West Line,1.33862,103.705817,EW26#EW28
+EW28,Pioneer,Green,East West Line,1.337645,103.69742,EW27#EW29
+EW29,Joo Koon,Green,East West Line,1.327826,103.678318,EW28#EW30
+EW30,Gul Circle,Green,East West Line,1.319809,103.66083,EW29#EW31
+EW31,Tuas Crescent,Green,East West Line,1.321091,103.649075,EW32#EW30
+EW32,Tuas West Road,Green,East West Line,1.330075,103.639636,EW33#EW31
+EW33,Tuas Link,Green,East West Line,1.340371,103.636866,EW32
+CG1,Expo,Green,Changi Airport Branch Line,1.334479,103.961459,CG2#DT35
+DT35,Expo,Blue,Downtown Line,1.334479,103.961459,DT34#CG1
+CG2,Changi Airport,Green,Changi Airport Branch Line,1.357622,103.988487,CG1
+NE1,HarbourFront,Purple,North East Line,1.265453,103.820514,CC29#NE3
+CC29,HarbourFront,Yellow,Circle Line,1.265453,103.820514,NE1#CC28
+NE4,Chinatown,Purple,North East Line,1.284566,103.843626,NE5#DT19#NE3
+DT19,Chinatown,Blue,Downtown Line,1.284566,103.843626,DT20#NE4#DT18
+NE5,Clarke Quay,Purple,North East Line,1.288949,103.847521,NE4#NE6
+NE7,Little India,Purple,North East Line,1.306691,103.849396,DT12#NE8#NE6
+DT12,Little India,Blue,Downtown Line,1.306691,103.849396,NE7#DT11#DT13
+NE8,Farrer Park,Purple,North East Line,1.312679,103.854872,NE9#NE7
+NE9,Boon Keng,Purple,North East Line,1.320091,103.861655,NE10#NE8
+NE10,Potong Pasir,Purple,North East Line,1.331316,103.868779,NE11#NE9
+NE11,Woodleigh,Purple,North East Line,1.339202,103.870727,NE10#NE12
+NE12,Serangoon,Purple,North East Line,1.349862,103.873635,CC13#NE11#NE13
+CC13,Serangoon,Yellow,Circle Line,1.349862,103.873635,CC14#NE12#CC12
+NE13,Kovan,Purple,North East Line,1.360207,103.885163,NE12#NE14
+NE14,Hougang,Purple,North East Line,1.371406,103.892533,NE15#NE13
+NE15,Buangkok,Purple,North East Line,1.382991,103.893347,NE14#NE16
+NE16,Sengkang,Purple,North East Line,1.391682,103.895475,NE15#NE17
+NE17,Punggol,Purple,North East Line,1.405191,103.902367,NE16
+CC2,Bras Basah,Yellow,Circle Line,1.296978,103.850715,CC3#CC1
+CC3,Esplanade,Yellow,Circle Line,1.293995,103.855396,CC2#CC4
+CC4,Promenade,Yellow,Circle Line,1.294063,103.860156,CC3#DT15#CC5
+DT15,Promenade,Blue,Downtown Line,1.294063,103.860156,DT16#CC4#DT14
+CC5,Nicoll Highway,Yellow,Circle Line,1.300292,103.863449,CC4#CC6
+CC6,Stadium,Yellow,Circle Line,1.302847,103.875417,CC5#CC7
+CC7,Mountbatten,Yellow,Circle Line,1.306106,103.883175,CC8#CC6
+CC8,Dakota,Yellow,Circle Line,1.308474,103.888825,CC9#CC7
+CC10,MacPherson,Yellow,Circle Line,1.326769,103.889901,DT26#CC9#CC11
+DT26,MacPherson,Blue,Downtown Line,1.326769,103.889901,DT25#CC10#DT27
+CC11,Tai Seng,Yellow,Circle Line,1.33594,103.887706,CC12#CC10
+CC12,Bartley,Yellow,Circle Line,1.342923,103.87966,CC13#CC11
+CC14,Lorong Chuan,Yellow,Circle Line,1.35153,103.864957,CC13#CC15
+CC16,Marymount,Yellow,Circle Line,1.349089,103.839116,CC17#CC15
+CC17,Caldecott,Yellow,Circle Line,1.337649,103.839627,TE9#CC19#CC16
+TE9,Caldecott,Brown,Thomson East Coast Line,1.337649,103.839627,CC17#TE8
+CC19,Botanic Gardens,Yellow,Circle Line,1.322387,103.814905,CC17#DT9#CC20
+DT9,Botanic Gardens,Blue,Downtown Line,1.322387,103.814905,DT10#DT8#CC19
+CC20,Farrer Road,Yellow,Circle Line,1.317606,103.807711,CC21#CC19
+CC21,Holland Village,Yellow,Circle Line,1.311189,103.796119,CC20#CC22
+CC23,one-north,Yellow,Circle Line,1.299854,103.787584,CC22#CC24
+CC24,Kent Ridge,Yellow,Circle Line,1.293629,103.784441,CC25#CC23
+CC25,Haw Par Villa,Yellow,Circle Line,1.283149,103.781991,CC24#CC26
+CC26,Pasir Panjang,Yellow,Circle Line,1.276111,103.791893,CC25#CC27
+CC27,Labrador Park,Yellow,Circle Line,1.27218,103.802557,CC28#CC26
+CC28,Telok Blangah,Yellow,Circle Line,1.270769,103.809878,CC27#CC29
+CE1,Bayfront,Yellow,Circle Line,1.281371,103.858998,CE2#DT16
+DT16,Bayfront,Blue,Downtown Line,1.281371,103.858998,DT15#DT17#CE1
+DT1,Bukit Panjang,Blue,Downtown Line,1.37834,103.762452,DT2
+DT2,Cashew,Blue,Downtown Line,1.369997,103.764569,DT1#DT3
+DT3,Hillview,Blue,Downtown Line,1.363185,103.767371,DT5#DT2
+DT5,Beauty World,Blue,Downtown Line,1.341607,103.775682,DT3#DT6
+DT6,King Albert Park,Blue,Downtown Line,1.335721,103.783203,DT7#DT5
+DT7,Sixth Avenue,Blue,Downtown Line,1.331221,103.79718,DT8#DT6
+DT8,Tan Kah Kee,Blue,Downtown Line,1.325826,103.807959,DT7#DT9
+DT10,Stevens,Blue,Downtown Line,1.320012,103.825964,TE11#DT9#DT11
+TE11,Stevens,Brown,Thomson East Coast Line,1.320012,103.825964,DT10#TE12#TE9
+DT13,Rochor,Blue,Downtown Line,1.303601,103.852581,DT12#DT14
+DT17,Downtown,Blue,Downtown Line,1.27949,103.852802,DT16#DT18
+DT18,Telok Ayer,Blue,Downtown Line,1.282285,103.848584,DT19#DT17
+DT20,Fort Canning,Blue,Downtown Line,1.291631,103.844621,DT19#DT21
+DT21,Bencoolen,Blue,Downtown Line,1.298477,103.849984,DT22#DT20
+DT22,Jalan Besar,Blue,Downtown Line,1.305551,103.855443,DT23#DT21
+DT23,Bendemeer,Blue,Downtown Line,1.313674,103.863098,DT22#DT24
+DT24,Geylang Bahru,Blue,Downtown Line,1.321479,103.871457,DT25#DT23
+DT25,Mattar,Blue,Downtown Line,1.326878,103.883304,DT26#DT24
+DT27,Ubi,Blue,Downtown Line,1.330008,103.898911,DT26#DT28
+DT28,Kaki Bukit,Blue,Downtown Line,1.335076,103.909057,DT27#DT29
+DT29,Bedok North,Blue,Downtown Line,1.335268,103.918054,DT30#DT28
+DT30,Bedok Reservoir,Blue,Downtown Line,1.336595,103.93307,DT31#DT29
+DT31,Tampines West,Blue,Downtown Line,1.345583,103.938244,DT32#DT30
+DT33,Tampines East,Blue,Downtown Line,1.35631,103.955471,DT32#DT34
+DT34,Upper Changi,Blue,Downtown Line,1.342218,103.961505,DT35#DT33
+TE1,Woodlands North,Brown,Thomson East Coast Line,1.4479,103.7854,TE2
+TE3,Woodlands South,Brown,Thomson East Coast Line,1.4274,103.7931,TE4#TE2
+TE4,SpringLeaf,Brown,Thomson East Coast Line,1.3974,103.8185,TE3#TE5
+TE5,Lentor,Brown,Thomson East Coast Line,1.3844,103.8368,TE6#TE4
+TE6,Mayflower,Brown,Thomson East Coast Line,1.3726,103.837,TE7#TE5
+TE7,Bright Hill,Brown,Thomson East Coast Line,1.3632,103.8332,TE8#TE6
+TE8,Upper Thomson,Brown,Thomson East Coast Line,1.3542,103.8332,TE9#TE7
+TE12,Napier,Brown,Thomson East Coast Line,1.3060,103.8196,TE11#TE13
+TE13,Orchard Boulevard,Brown,Thomson East Coast Line,1.3025,103.8238,TE12#TE14
+TE14,Orchard,Brown,Thomson East Coast Line,1.3037,103.8318,TE13#TE15#NS22
+TE15,Great World,Brown,Thomson East Coast Line,1.2949,103.8334,TE14#TE16
+TE16,Havelock,Brown,Thomson East Coast Line,1.2902,103.8332,TE15#TE17
+TE17,Outram Park,Brown,Thomson East Coast Line,1.2802,103.8394,TE16#TE18#EW16#NE3
+TE18,Maxwell,Brown,Thomson East Coast Line,1.2807,103.8441,TE17#TE19
+TE19,Shenton Way,Brown,Thomson East Coast Line,1.2777, 103.8507,TE18#TE20
+TE20,Marina Bay,Brown,Thomson East Coast Line,1.2761, 103.8550,TE19#TE22#NS27#CE2
+TE22,Gardens by the Bay,Brown,Thomson East Coast Line,1.2797,103.8680,TE20
