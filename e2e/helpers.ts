@@ -54,11 +54,19 @@ export async function setProgram(page: Page, source: string): Promise<void> {
   const editor = page.locator('.monaco-editor').first()
   await expect(editor).toBeVisible()
   await editor.click()
-  await page.keyboard.press('ControlOrMeta+a')
+  // Select all with the key *Monaco* expects, which it decides from the user
+  // agent — not the key the test machine's OS uses. Playwright's WebKit device
+  // claims to be a Mac, so on Linux CI `ControlOrMeta` sends Ctrl, which a
+  // Mac-mode Monaco does not treat as select-all: the program was inserted
+  // beside the default one instead of replacing it.
+  const monacoIsMac = await page.evaluate(() => navigator.userAgent.includes('Macintosh'))
+  await page.keyboard.press(monacoIsMac ? 'Meta+a' : 'Control+a')
   await page.keyboard.insertText(source)
   // Guard the guard: if Monaco ever mangles this, fail here with the reason
-  // rather than later with a confusing assertion about program output.
+  // rather than later with a confusing assertion about program output. The
+  // line count catches text left over from before, not just a mangled start.
   await expect(editor).toContainText(source.split('\n')[0])
+  await expect(editor.locator('.line-numbers')).toHaveCount(source.split('\n').length)
 }
 
 export async function run(page: Page): Promise<void> {

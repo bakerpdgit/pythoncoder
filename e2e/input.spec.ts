@@ -37,12 +37,19 @@ async function useMainThread(page: Page): Promise<void> {
  * Everything in the console, not just the rows on screen. xterm renders only
  * its visible rows, and a turtle or pygame run gives the console a thin strip
  * above the drawing, so earlier lines scroll out of the DOM. The console's own
- * Copy button copies the whole buffer.
+ * Copy button copies the whole buffer; the test catches what it hands to the
+ * clipboard rather than reading the clipboard back, which needs permissions
+ * WebKit's Playwright build does not offer.
  */
 async function consoleTranscript(page: Page): Promise<string> {
-  await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
+  await page.evaluate(() => {
+    const w = window as unknown as { __copiedConsole?: string }
+    delete w.__copiedConsole
+    navigator.clipboard.writeText = async (text: string) => { w.__copiedConsole = text }
+  })
   await page.getByRole('button', { name: 'Copy console output' }).click()
-  return page.evaluate(() => navigator.clipboard.readText())
+  const copied = await page.waitForFunction(() => (window as unknown as { __copiedConsole?: string }).__copiedConsole)
+  return String(await copied.jsonValue())
 }
 
 /** The app's own check that this browser can suspend Python (JSPI). */
