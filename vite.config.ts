@@ -5,13 +5,25 @@ import { createReadStream, existsSync, statSync, readdirSync, mkdirSync, copyFil
 import { resolve, extname, join, relative } from 'path'
 // @ts-ignore - plain .mjs helper shared with server.mjs; no type declarations
 import { handleCorsProxy } from './scripts/corsProxy.mjs'
+// Plain .mjs (typed by isolationPolicy.d.mts) shared with server.mjs and the
+// Cloudflare Pages middleware.
+import { applyIsolationHeaders } from './scripts/isolationPolicy.mjs'
 
 const devPort = Number(process.env.PORT) || 3000
 
-const isolationHeaders = {
-  'Cross-Origin-Opener-Policy': 'same-origin',
-  'Cross-Origin-Embedder-Policy': 'credentialless',
-  'Origin-Agent-Cluster': '?1',
+// The isolation headers depend on the browser (WebKit cannot honour COEP
+// `credentialless`; see scripts/isolationPolicy.mjs), so they cannot go in the
+// static `server.headers`. This middleware sets them on every response.
+function isolationHeadersPlugin(): Plugin {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const mw = (server: { middlewares: { use: (fn: (req: any, res: any, next: () => void) => void) => void } }) => {
+    server.middlewares.use((req, res, next) => { applyIsolationHeaders(req, res); next() })
+  }
+  return {
+    name: 'isolation-headers',
+    configureServer: mw,
+    configurePreviewServer: mw,
+  }
 }
 
 const noCacheHtmlHeaders = {
@@ -77,7 +89,7 @@ function tutorialPlugin(): Plugin {
         if (!safePath.startsWith(TUTORIAL_SRC)) { res.writeHead(403); res.end('Forbidden'); return }
         if (!existsSync(safePath) || statSync(safePath).isDirectory()) { next(); return }
         const mime = MIME[extname(safePath).toLowerCase()] ?? 'application/octet-stream'
-        res.writeHead(200, { 'Content-Type': mime, ...isolationHeaders })
+        res.writeHead(200, { 'Content-Type': mime })
         createReadStream(safePath).pipe(res)
       })
     },
@@ -103,17 +115,28 @@ function corsProxyPlugin(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [react(), corsProxyPlugin(), tutorialPlugin(), versionPlugin()],
+  plugins: [isolationHeadersPlugin(), react(), corsProxyPlugin(), tutorialPlugin(), versionPlugin()],
   worker: {
     format: 'iife',
+    // Workers get a directory of their own so the Cloudflare Pages middleware
+    // can be routed to them (public/_routes.json): WebKit refuses to start a
+    // worker whose script lacks the page's COEP, and a static asset never
+    // passes through a Function to be given the per-browser one.
+    rollupOptions: {
+      output: {
+        entryFileNames: 'assets/workers/[name]-[hash].js',
+        chunkFileNames: 'assets/workers/[name]-[hash].js',
+        assetFileNames: 'assets/workers/[name]-[hash][extname]',
+      },
+    },
   },
   server: {
     port: devPort,
-    headers: { ...isolationHeaders, ...noCacheHtmlHeaders },
+    headers: noCacheHtmlHeaders,
   },
   preview: {
     port: devPort,
-    headers: { ...isolationHeaders, ...noCacheHtmlHeaders },
+    headers: noCacheHtmlHeaders,
   },
   build: {
     outDir: 'dist',

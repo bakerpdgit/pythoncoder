@@ -42,7 +42,7 @@ export const RUNTIME_OPTIONS = [
   {
     key: 'main-thread',
     label: 'Main Thread',
-    description: 'Uses browser prompt pop-ups. Step tracing and live inspection are limited.',
+    description: 'Runs in the page itself. Step tracing and live inspection are limited.',
   },
 ] as const
 

@@ -20,6 +20,8 @@ import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides, getStored
 import { triggerDownload, getBaseFileStem } from './utils/download'
 import { buildCommentExport, buildDocstringExport, replaceExistingDocstring, getDefinitionNote, getDefaultDefinitionNote, sanitizeNoteText } from './utils/export'
 import { loadMainThreadPyodide, resetMainThreadPyodide, PYGAME_MAIN_THREAD_BOOTSTRAP, TURTLE_CANVAS_BOOTSTRAP, TURTLE_SVG_BOOTSTRAP, SVG_TURTLE_WORKER_SETUP, STDCTX_MAIN_THREAD_BOOTSTRAP } from './utils/mainThread'
+import { currentIsolationEnvironment, diagnoseIsolationProblem, isolationProblemMessage } from './utils/isolationStatus'
+import { MAIN_THREAD_INPUT_BOOTSTRAP, browserSupportsJspi, mainThreadInputSummary, promptWithRecentOutput, rememberRecentOutput } from './utils/mainThreadInput'
 import { fetchBookManifest, findFirstBookChallenge, findBookTargetById, getOrCreateChallengeFs, getHiddenPathsForFs, collectBookChallengeIds, deleteChallengeFilesystems, isBookUrl, isBookRef, BOOK_FS_PREFIX, BOOK_SRC_PREFIX } from './utils/bookLoader'
 import {
   ensureDefaultFilesystem, getAllFiles, syncFilesFromPyodide, writeFile,
@@ -409,6 +411,12 @@ export default function App() {
   const mainThreadCanvasSnapshotRef = useRef<HTMLCanvasElement | null>(null)
   const mainThreadCanvasWatcherRef = useRef(0)
   const mainThreadStopRequestedRef = useRef<boolean>(false)
+  // A main-thread input() suspended on JSPI waits here for the console's answer
+  // (see utils/mainThreadInput.ts). handleInputSubmit and a Stop resolve it.
+  const mainThreadInputResolveRef = useRef<((answer: string) => void) | null>(null)
+  // The tail of what the current main-thread run printed, for the window.prompt
+  // fallback: the pop-up covers the console, so it repeats the latest lines.
+  const mainThreadRecentOutputRef = useRef('')
   // The panel set a run took over, kept until the student returns to the editor.
   // Every run mode presents the same way now that visual output lives in the
   // output panel, so one snapshot covers all of them.
@@ -3234,6 +3242,11 @@ export default function App() {
       mainThreadRunIdRef.current++
       setIsRunning(false)
       setActiveRuntime('')
+      // A program suspended in input() is abandoned with the Pyodide that holds
+      // it; it is never resumed, so it must not keep the input prompt open.
+      mainThreadInputResolveRef.current = null
+      setInputRequest(null)
+      setInputValue('')
     }
     resetMainThreadPyodide()
     if (workerRef.current) {
@@ -3645,6 +3658,15 @@ export default function App() {
     const shouldRunStdctx = shouldRunSpongeLibs && spongeLibs.usesStdctx
 
     mainThreadStopRequestedRef.current = false
+    mainThreadInputResolveRef.current = null
+    mainThreadRecentOutputRef.current = ''
+    // Fixed inputs are consumed from the top on every run, as in the worker.
+    fixedInputsQueueRef.current = appSettings.useFixedInputs
+      ? fixedInputsText.split('\n').filter(l => l.length > 0)
+      : []
+    const runUsesFixedInputs = appSettings.useFixedInputs
+    // Show the console, not the Inputs tab, exactly as a worker run does.
+    setConsoleTab('console')
     enterRunPresentationMode(
       shouldRunPygame ? 'pygame'
       : shouldRunTurtleCanvas ? 'turtle-canvas'
@@ -3674,8 +3696,12 @@ export default function App() {
       pyodide = await loadMainThreadPyodide()
       if (runId !== mainThreadRunIdRef.current) return
 
-      if (typeof pyodide.setStdout === 'function') pyodide.setStdout({ batched: (text: string) => appendOutput(text) })
-      if (typeof pyodide.setStderr === 'function') pyodide.setStderr({ batched: (text: string) => appendOutput('[stderr] ' + text) })
+      const printFromRun = (text: string) => {
+        mainThreadRecentOutputRef.current = rememberRecentOutput(mainThreadRecentOutputRef.current, text + '\n')
+        appendOutput(text)
+      }
+      if (typeof pyodide.setStdout === 'function') pyodide.setStdout({ batched: (text: string) => printFromRun(text) })
+      if (typeof pyodide.setStderr === 'function') pyodide.setStderr({ batched: (text: string) => printFromRun('[stderr] ' + text) })
       if (pyodide._api) pyodide._api._skip_unwind_fatal_error = true
 
       cleanFilesFromPyodide(pyodide, mainThreadMountedPathsRef.current)
@@ -3720,13 +3746,48 @@ export default function App() {
         'Executing code on the main thread...'
       )
 
+      // A fixed input answers without asking, and is echoed as though typed.
+      const takeFixedInput = (promptText: string): string | null => {
+        if (!runUsesFixedInputs || fixedInputsQueueRef.current.length === 0) return null
+        const next = fixedInputsQueueRef.current.shift()!
+        printFromRun(promptText + next)
+        return next
+      }
       const execGlobalsObj: Record<string, unknown> = {
         __name__: '__main__',
         __coder_user_code__: codeText,
-        // Must stay synchronous: Python's input() blocks on the returned string, which a
-        // React modal (resolved via a Promise on a later tick) cannot provide on the main thread.
-        js_input_prompt: (promptText: string) => window.prompt(promptText ?? '') ?? '',
-        js_should_stop_main_thread: () => Boolean(mainThreadStopRequestedRef.current),
+        // input() when JSPI can suspend Python (utils/mainThreadInput.ts): the
+        // same console prompt the trace worker uses, answered by handleInputSubmit.
+        js_input_async: (promptText: string): Promise<string> => {
+          const prompt = String(promptText ?? '')
+          if (mainThreadStopRequestedRef.current || runId !== mainThreadRunIdRef.current) return Promise.resolve('')
+          const fixed = takeFixedInput(prompt)
+          if (fixed !== null) return Promise.resolve(fixed)
+          return new Promise<string>(resolve => {
+            mainThreadInputResolveRef.current = (answer: string) => {
+              mainThreadRecentOutputRef.current = rememberRecentOutput(mainThreadRecentOutputRef.current, prompt + answer + '\n')
+              resolve(answer)
+            }
+            setInputValue('')
+            setInputRequest({ id: Date.now(), prompt })
+          })
+        },
+        // input() without JSPI. Must stay synchronous — Python is blocked on the
+        // returned string and the page cannot run until it has one — so this is
+        // the one deliberate window.prompt in the app. The pop-up hides the
+        // console, so it repeats the latest output above the question, and the
+        // exchange is echoed into the console so the transcript reads as typed.
+        js_input_prompt: (promptText: string): string => {
+          const prompt = String(promptText ?? '')
+          const fixed = takeFixedInput(prompt)
+          if (fixed !== null) return fixed
+          const answer = window.prompt(promptWithRecentOutput(mainThreadRecentOutputRef.current, prompt)) ?? ''
+          printFromRun(prompt + answer)
+          return answer
+        },
+        // A run that has been abandoned (a newer run, a Reset) counts as stopped
+        // too, so it ends at its next input() or frame instead of running on.
+        js_should_stop_main_thread: () => Boolean(mainThreadStopRequestedRef.current) || runId !== mainThreadRunIdRef.current,
         js_set_main_thread_status: (message: string) => setMainThreadStatus(String(message ?? '')),
         js_append_main_thread_log: (message: string) => appendOutput(String(message ?? '')),
       }
@@ -3809,6 +3870,9 @@ export default function App() {
         if (plottingLibs.plotly) {
           await pyodide.runPythonAsync(PLOTLY_BOOTSTRAP, { globals: execGlobals })
         }
+        // input() for every mode below; each bootstrap's own input helpers call
+        // the __coder_read_line this defines.
+        await pyodide.runPythonAsync(MAIN_THREAD_INPUT_BOOTSTRAP, { globals: execGlobals })
         if (shouldRunPygame) {
           await pyodide.loadPackage('pygame-ce')
           await pyodide.runPythonAsync(PYGAME_MAIN_THREAD_BOOTSTRAP, { globals: execGlobals })
@@ -3820,14 +3884,16 @@ export default function App() {
           await pyodide.runPythonAsync(STDCTX_MAIN_THREAD_BOOTSTRAP, { globals: execGlobals })
         } else {
           await pyodide.runPythonAsync(`
-import builtins
-def __coder_prompt_input(prompt=""): return js_input_prompt(prompt)
-builtins.input = __coder_prompt_input
 code_obj = compile(__coder_user_code__, "simulation.py", "exec")
 ${runProgramPython('exec(code_obj, globals())')}
           `, { globals: execGlobals })
         }
       } finally {
+        // Nothing can answer an input() once the program is over.
+        if (runId === mainThreadRunIdRef.current && mainThreadInputResolveRef.current) {
+          mainThreadInputResolveRef.current = null
+          setInputRequest(null); setInputValue('')
+        }
         // Figures built but never shown still belong on screen — and a failed
         // run may well have drawn one before it failed.
         if (shouldRunMatplotlib) {
@@ -3918,6 +3984,14 @@ ${runProgramPython('exec(code_obj, globals())')}
   }
 
   const handleInputSubmit = (submittedValue = inputValue) => {
+    const resolveMainThreadInput = mainThreadInputResolveRef.current
+    if (resolveMainThreadInput) {
+      mainThreadInputResolveRef.current = null
+      if (captureRunRef.current) captureInputsRef.current.push(submittedValue)
+      setInputRequest(null); setInputValue('')
+      resolveMainThreadInput(submittedValue)
+      return
+    }
     if (!sabRef.current) return
     if (captureRunRef.current) captureInputsRef.current.push(submittedValue)
     const { int32, uint8 } = sabRef.current
@@ -3969,6 +4043,18 @@ ${runProgramPython('exec(code_obj, globals())')}
       workerStartModeRef.current = 'debug'
       window.setTimeout(prepareTraceWorker, 0)
     } else if (activeRuntime === 'main-thread') {
+      const resolvePendingInput = mainThreadInputResolveRef.current
+      if (resolvePendingInput) {
+        // The program is suspended in input(), not running, so it can be ended
+        // properly: wake it with the stop flag up and __coder_read_line raises
+        // SystemExit, and the run finishes through its own normal ending.
+        mainThreadStopRequestedRef.current = true
+        mainThreadInputResolveRef.current = null
+        setInputRequest(null); setInputValue('')
+        setMainThreadStatus('Stopping main-thread run...')
+        resolvePendingInput('')
+        return
+      }
       if (isPygameRunActive || isTurtleCanvasRunActive) {
         mainThreadStopRequestedRef.current = true
         appendOutput('\n[INFO] Stop requested for main-thread run.')
@@ -4384,16 +4470,22 @@ ${runProgramPython('exec(code_obj, globals())')}
         </div>
       )}
 
-      {/* SAB warning */}
+      {/* SAB warning — this tab cannot run the trace worker */}
       {!hasSab && selectedRuntime === 'trace-worker' && (
-        <div className="m-4 rounded border border-red-500 bg-red-900/50 p-4 text-red-200">
+        <div role="alert" className="m-4 rounded border border-red-500 bg-red-900/50 p-4 text-red-200">
           <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div className="min-w-0">
-              <strong>Trace-worker Warning:</strong> Step tracing requires Cross-Origin Isolation plus <code>SharedArrayBuffer</code>.{' '}
-              <code>window.crossOriginIsolated</code> is <code>{String(isCrossOriginIsolated)}</code>.{' '}
-              Run with <code>npm run dev</code> or <code>npm start</code> on the built output.
+              <strong>The step-by-step runner isn't available in this tab.</strong>{' '}
+              {isolationProblemMessage(
+                diagnoseIsolationProblem(currentIsolationEnvironment()),
+                ['localhost', '127.0.0.1'].includes(window.location.hostname),
+              )}
               <div className="mt-2 text-sm text-red-100">
-                You can switch to main-thread execution instead. That uses browser prompt pop-ups for input, and step debugging plus live inspection are currently disabled there.
+                Programs can still run on the main thread: {mainThreadInputSummary(browserSupportsJspi())}{' '}
+                Step debugging and live inspection are turned off there.
+              </div>
+              <div className="mt-1 text-[11px] text-red-200/70">
+                (<code>window.crossOriginIsolated</code> is <code>{String(isCrossOriginIsolated)}</code>.)
               </div>
             </div>
             <button type="button" onClick={() => setRuntimePreference('main-thread')}

@@ -47,7 +47,7 @@ import time
 
 
 def __coder_prompt_input(prompt=""):
-    return js_input_prompt(prompt)
+    return __coder_read_line(prompt)
 
 
 builtins.input = __coder_prompt_input
@@ -478,7 +478,7 @@ export const TURTLE_CANVAS_BOOTSTRAP = String.raw`
 import ast, asyncio, builtins, math, sys, types as _types_mod
 
 def __coder_prompt_input(prompt=""):
-    return js_input_prompt(prompt)
+    return __coder_read_line(prompt)
 builtins.input = __coder_prompt_input
 
 import js
@@ -573,9 +573,9 @@ class _Screen:
     def bye(self): pass
     def exitonclick(self): pass
     def numinput(self, title, prompt, default=None, minval=None, maxval=None):
-        try: return float(js_input_prompt(prompt))
+        try: return float(__coder_read_line(prompt))
         except: return default
-    def textinput(self, title, prompt): return js_input_prompt(prompt)
+    def textinput(self, title, prompt): return __coder_read_line(prompt)
     def window_width(self): return _canvas.width
     def window_height(self): return _canvas.height
     def cv(self): return None
@@ -846,7 +846,7 @@ export const TURTLE_SVG_BOOTSTRAP = String.raw`
 import builtins, math, sys, types as _types_mod
 
 def __coder_prompt_input(prompt=""):
-    return js_input_prompt(prompt)
+    return __coder_read_line(prompt)
 builtins.input = __coder_prompt_input
 
 _turtle_sw = 600; _turtle_sh = 600; _turtle_bg = 'white'
@@ -938,9 +938,9 @@ class _SvgScreen:
     def bye(self): pass
     def exitonclick(self): pass
     def numinput(self,t,p,d=None,mn=None,mx=None):
-        try: return float(js_input_prompt(p))
+        try: return float(__coder_read_line(p))
         except: return d
-    def textinput(self,t,p): return js_input_prompt(p)
+    def textinput(self,t,p): return __coder_read_line(p)
     def window_width(self): return _turtle_sw
     def window_height(self): return _turtle_sh
 
@@ -1403,7 +1403,7 @@ import ast, asyncio, builtins, sys as _stdctx_sys
 
 
 def __coder_prompt_input(prompt=""):
-    return js_input_prompt(prompt)
+    return __coder_read_line(prompt)
 builtins.input = __coder_prompt_input
 
 

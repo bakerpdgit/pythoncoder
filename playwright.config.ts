@@ -27,7 +27,27 @@ export default defineConfig({
     trace: 'retain-on-failure',
     actionTimeout: 15_000,
   },
-  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+  projects: [
+    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+    // The Safari engine. Every browser on an iPad is WebKit, and WebKit needs
+    // its own cross-origin isolation header (scripts/isolationPolicy.mjs), so
+    // the input and isolation specs run here too: `npm run test:e2e:webkit`
+    // after `npx playwright install webkit`.
+    {
+      name: 'webkit',
+      testMatch: ['isolation.spec.ts', 'input.spec.ts'],
+      use: {
+        ...devices['Desktop Safari'],
+        launchOptions: {
+          // Playwright's WebKit ships SharedArrayBuffer switched off, even on
+          // an isolated page (microsoft/playwright#28513); Safari turns it on.
+          // This JavaScriptCore option does the same, as it does for WebKitGTK.
+          // Where it has no effect the SharedArrayBuffer tests skip themselves.
+          env: { ...process.env, JSC_useSharedArrayBuffer: 'true' },
+        },
+      },
+    },
+  ],
   webServer: {
     command: 'npm run dev',
     url: 'http://localhost:3000',

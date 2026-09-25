@@ -1,4 +1,5 @@
 import type { AppSettings, TurtleMode, InputMode } from '../../types'
+import { browserSupportsJspi } from '../../utils/mainThreadInput'
 
 interface Props {
   isOpen: boolean
@@ -68,7 +69,9 @@ export const SettingsDialog = ({ isOpen, settings, onClose, onSettingsChange }: 
               Input Mode
             </div>
             <p className="mb-3 text-xs text-slate-400 leading-relaxed">
-              How the program asks the user for input when <code className="rounded bg-slate-700 px-1 text-emerald-300">input()</code> is called. Applies to trace-worker mode only — main-thread mode always uses a pop-up.
+              How the program asks the user for input when <code className="rounded bg-slate-700 px-1 text-emerald-300">input()</code> is called. {browserSupportsJspi()
+                ? 'Applies to both the trace worker and the main thread.'
+                : 'Applies to the trace worker. In this browser the main thread uses a pop-up instead.'}
             </p>
             <div className="flex flex-col gap-2">
               {INPUT_MODE_OPTIONS.map(opt => {
