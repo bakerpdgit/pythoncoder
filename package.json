@@ -10,8 +10,9 @@
     "start": "node server.mjs",
     "test": "vitest run --pool=forks",
     "test:watch": "vitest --pool=forks",
-    "test:e2e": "playwright test",
-    "test:all": "tsc -b && vitest run --pool=forks && playwright test"
+    "test:e2e": "playwright test --project=chromium",
+    "test:e2e:webkit": "playwright test --project=webkit",
+    "test:all": "tsc -b && vitest run --pool=forks && playwright test --project=chromium"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.6.0",

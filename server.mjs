@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import { createReadStream, existsSync, statSync } from "node:fs";
 import { extname, join, normalize, resolve } from "node:path";
 import { handleCorsProxy } from "./scripts/corsProxy.mjs";
+import { applyIsolationHeaders, isolationHeadersFor } from "./scripts/isolationPolicy.mjs";
 
 const root = resolve("dist");
 const port = Number(process.env.PORT || 3000);
@@ -22,10 +23,9 @@ const mimeTypes = {
   ".webp": "image/webp",
 };
 
-function setIsolationHeaders(res) {
-  res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
-  res.setHeader("Cross-Origin-Embedder-Policy", "credentialless");
-  res.setHeader("Origin-Agent-Cluster", "?1");
+// COEP differs by browser engine — see scripts/isolationPolicy.mjs.
+function setIsolationHeaders(req, res) {
+  applyIsolationHeaders(req, res);
 }
 
 // Vite content-hashes filenames in /assets, so they are immutable forever.
@@ -94,7 +94,7 @@ function getSafePath(urlPath) {
 }
 
 const server = createServer((req, res) => {
-  setIsolationHeaders(res);
+  setIsolationHeaders(req, res);
 
   if ((req.url || "").split("?")[0] === "/api/proxy") {
     handleCorsProxy(req, res).catch((e) => {
@@ -107,10 +107,11 @@ const server = createServer((req, res) => {
   }
 
   if (req.url === "/__isolation__") {
+    const headers = isolationHeadersFor(req.headers["user-agent"]);
     return sendJson(res, 200, {
-      coop: "same-origin",
-      coep: "credentialless",
-      originAgentCluster: "?1",
+      coop: headers["Cross-Origin-Opener-Policy"],
+      coep: headers["Cross-Origin-Embedder-Policy"],
+      originAgentCluster: headers["Origin-Agent-Cluster"],
       root,
     });
   }

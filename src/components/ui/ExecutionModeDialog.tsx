@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { RUNTIME_OPTIONS } from '../../constants'
 import type { RuntimeKey } from '../../types'
+import { browserSupportsJspi, mainThreadInputSummary } from '../../utils/mainThreadInput'
 
 interface Props {
   isOpen: boolean
@@ -53,8 +54,10 @@ export const ExecutionModeDialog = ({
               isDisabled
                 ? 'Disabled while this code imports pygame.'
                 : key === 'trace-worker' && !hasSab
-                  ? 'Requires SharedArrayBuffer on this page.'
-                  : description
+                  ? 'Not available in this tab: the page is not cross-origin isolated.'
+                  : key === 'main-thread'
+                    ? `${mainThreadInputSummary(browserSupportsJspi())} Step tracing and live inspection are limited.`
+                    : description
             return (
               <button
                 key={key}
@@ -86,7 +89,7 @@ export const ExecutionModeDialog = ({
           <p className="text-[11px] text-slate-500 leading-relaxed">
             {isPygameLocked
               ? 'Pygame import detected. Main-thread execution is required until that import is removed.'
-              : 'Use trace worker by default for debugging. Switch to main thread when browser isolation is unavailable or popup input is acceptable.'}
+              : 'Use the trace worker by default for debugging. Switch to the main thread when this tab cannot run it.'}
           </p>
         </div>
       </div>

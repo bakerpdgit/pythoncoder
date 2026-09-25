@@ -38,7 +38,7 @@ Three layers, all of which should pass before a change is called done:
   harness needs Python **3.11+** and skips itself (with a stated reason) below
   that — `co_qualname` and instruction `positions` arrived in 3.11, and without
   them closures cannot be tied to their defining activation.
-- **`npm run test:e2e`** — Playwright (`e2e/`), a real browser driving the real
+- **`npm run test:e2e`** — Playwright (`e2e/`, Chromium), a real browser driving the real
   dev server and the real Pyodide. `smoke.spec.ts`: the app loads, a program runs
   and prints, a syntax error is reported against `simulation.py`, matplotlib draws
   a figure. `book.spec.ts`: the student's path — open a numbered book, read the
@@ -46,13 +46,23 @@ Three layers, all of which should pass before a change is called done:
   itself through `page.route`, so it needs no fixture in `public/` (which would be
   deployed) and no repository staying where it is. `bookfiles.spec.ts` does the
   same for a `book.json` activity whose files sit in subfolders and whose program
-  ends with `quit()`. Shared helpers live in
+  ends with `quit()`. `input.spec.ts` covers `input()` in every runtime (worker,
+  main thread with JSPI, the `window.prompt` fallback, turtle, pygame, stdctx,
+  fixed inputs, every input mode, Stop while waiting); `isolation.spec.ts` checks
+  each engine is sent the COEP it can honour. Shared helpers live in
   `e2e/helpers.ts`; `watchForErrors` takes `ignoreRequestsTo` because a numbered
   book finds its end by asking for a file that is not there, and the browser logs
   that 404 as a console error. Needs network (Pyodide comes from a CDN), ~50s.
-- **`npm run test:all`** — typecheck, then both of the above.
+- **`npm run test:e2e:webkit`** — the Safari engine (after `npx playwright install
+  webkit`): `isolation.spec.ts` and `input.spec.ts` only. Playwright's WebKit build
+  ships SharedArrayBuffer switched off (microsoft/playwright#28513), so the config
+  passes `JSC_useSharedArrayBuffer=true`, and every test that needs SAB or JSPI
+  skips itself with the reason when the build lacks it. The header test does not
+  depend on either and is the real guard. CI runs this as its own job.
+- **`npm run test:all`** — typecheck, then vitest and the Chromium e2e run.
 
-`.github/workflows/ci.yml` runs the first two on every push and PR.
+`.github/workflows/ci.yml` runs the typecheck, vitest, the build, the Chromium
+e2e run and the WebKit e2e run on every push and PR.
 
 - When driving the app with Playwright to verify a change, **also capture the browser
   console** (`page.on('console', …)` for `error`/`warning` and `page.on('pageerror', …)`)
@@ -113,6 +123,8 @@ src/
     download.ts               # File download helpers
     export.ts                 # Note/docstring export formatting
     mainThread.ts             # Main-thread Pyodide loader + Pygame bootstrap
+    mainThreadInput.ts        # input() on the main thread: JSPI, pop-up fallback
+    isolationStatus.ts        # Why a tab is not cross-origin isolated, in words
     storage.ts                # localStorage helpers (theme, notes, fixed inputs, layout)
     versionCheck.ts           # Background poll for new deployed versions
   components/
@@ -152,16 +164,61 @@ src/
 
 ### Cross-Origin Isolation requirement
 
-`SharedArrayBuffer` (used to synchronise the Pyodide worker) requires Cross-Origin Isolation headers on every response:
+`SharedArrayBuffer` (used to synchronise the Pyodide worker) requires the page to
+be cross-origin isolated:
 
 - `Cross-Origin-Opener-Policy: same-origin`
-- `Cross-Origin-Embedder-Policy: credentialless`
+- `Cross-Origin-Embedder-Policy:` **`credentialless` for Chromium and Firefox,
+  `require-corp` for WebKit**
 - `Origin-Agent-Cluster: ?1`
 
-These are set in:
-- `vite.config.ts` — dev and preview servers
-- `server.mjs` — production Node server
-- `public/_headers` — Cloudflare Pages (copied to `dist/_headers` at build time)
+**Why two COEP values.** WebKit — Safari on Mac, and *every* browser on an iPad
+or iPhone (Chrome, Edge and Firefox on iOS are WebKit underneath) — has never
+implemented `credentialless`. It reads it as no policy at all, so under a single
+`credentialless` header those students were never isolated: the trace worker was
+disabled and they were pushed onto the main thread with pop-up input. WebKit does
+honour `require-corp`. `scripts/isolationPolicy.mjs` (`isWebKitUserAgent`,
+`isolationHeadersFor`, `applyIsolationHeaders`) picks the value from the
+User-Agent, adds `Vary: User-Agent`, and is the only place the choice is made.
+Misdetection is never worse than before: Chromium sent `require-corp` is still
+isolated, WebKit sent `credentialless` is where it always was.
+
+Where it is applied:
+- `vite.config.ts` — `isolationHeadersPlugin`, a middleware on every dev/preview
+  response (it cannot go in the static `server.headers`).
+- `server.mjs` — production Node server, every response.
+- **Cloudflare Pages** — `public/_headers` is static, so it keeps the
+  `credentialless` default for ordinary assets, and `functions/_middleware.ts`
+  sets the per-browser headers on the two kinds of response that decide
+  isolation. `public/_routes.json` routes only those through the Function, so
+  it runs once per page load and once per worker rather than per asset:
+  - `/` and `/index.html` — the page's COEP decides whether it is isolated;
+  - `/assets/workers/*` — **WebKit refuses to start a dedicated worker whose
+    script lacks the page's COEP** ("Worker failed to start", verified in
+    WebKitGTK). That is why `vite.config.ts` sends worker bundles to
+    `assets/workers/` (`worker.rollupOptions.output`).
+  Cloudflare does not apply `_headers` to a response that passed through a
+  Function, so the middleware repeats the cache headers for those routes.
+  `wrangler pages dev dist` runs it locally.
+
+What `require-corp` costs, WebKit only: a cross-origin resource loaded *without*
+CORS must send `Cross-Origin-Resource-Policy`. jsDelivr (Pyodide and its
+packages, Monaco) and raw.githubusercontent.com send
+`cross-origin-resource-policy: cross-origin` and `access-control-allow-origin: *`
+(checked September 2026). Checked in WebKitGTK:
+- **plotly figures are unaffected**: plotly's own `<script>` tag carries
+  `crossorigin="anonymous"` and an SRI hash, so it is a CORS load. Do not rewrite
+  its URL — the SRI hash is for cdn.plot.ly's exact bytes.
+- **The HTML preview keeps `credentialless` in every browser**
+  (`public/vfs-preview-sw.js`). WebKit treats it as no policy yet still frames it
+  inside the isolated page, so a student's page can use images from any server.
+  Giving the frame `require-corp` blocked every image whose server sends no CORP.
+- A guide or page `<img>` straight from a site that sends neither CORP nor CORS
+  is blocked in Safari (it loads in Chromium).
+
+The banner shown when the trace worker cannot run (`utils/isolationStatus.ts`)
+says *why* in plain words: framed by another page, not https, isolated but no
+SharedArrayBuffer, Safari missing its header, or headers missing generally.
 
 ### How the tracer works
 
@@ -219,9 +276,10 @@ These are set in:
   `window.prompt`. Use the promise-based styled dialogs from `DialogProvider`
   via the `useDialogs()` hook: `confirm`, `choose` (arbitrary buttons), `prompt`,
   `alert`. They are theme-aware and match the app's look. The one deliberate
-  exception is `js_input_prompt` in `App.tsx` (Pyodide `input()` on the main
-  thread), which must stay synchronous — a React modal can't return a value
-  synchronously. It is commented as such; leave it.
+  exception is `js_input_prompt` in `App.tsx` — the fallback for Pyodide
+  `input()` on the main thread in a browser without JSPI, which must stay
+  synchronous (see *input() on the main thread* below). It is commented as such;
+  leave it.
 - The app is **theme-aware** via `html[data-theme="light"]` overrides in
   `styles/index.css` (default is dark). Components use dark-oriented Tailwind
   `slate-*` classes; the light theme remaps them. If you introduce a color that
@@ -743,8 +801,9 @@ These are set in:
   a range and toggling a series off the legend all survive, which is most of why
   anyone reaches for plotly.
 - `include_plotlyjs='cdn'` keeps a figure a few KB. Inlining the bundle would add
-  ~4MB to every single one. The CDN script loads because the page's COEP is
-  `credentialless`, which permits cross-origin subresources without credentials.
+  ~4MB to every single one. The CDN script loads under both COEP values: plotly
+  emits it with `crossorigin="anonymous"` and an SRI hash, a CORS load, which
+  `require-corp` (WebKit) accepts as readily as `credentialless`.
 - `PLOTLY_BOOTSTRAP` patches `plotly.io.show`, not `Figure.show`: `BaseFigure.show()`
   defers to `pio.show`, so the one patch catches `fig.show()`, `pio.show(fig)` and
   anything built on them.
@@ -881,7 +940,40 @@ These are set in:
 - When "Use Fixed Inputs" is on, the Console panel becomes a two-tab panel
   (Console / Inputs); the Inputs tab hosts the fixed-input textarea. Every run
   rebuilds the input queue from the top of the textarea (`fixedInputsQueueRef` in
-  `startTraceWorker`), so runs always re-consume inputs from the start.
+  `startTraceWorker` and `startMainThreadRun`), so runs always re-consume inputs
+  from the start. Both runtimes echo a fixed input into the console as if typed.
+
+### input() on the main thread
+
+- pygame and the canvas turtle always run on the main thread, and any program
+  does when the trace worker is unavailable. `input()` there used to be a
+  blocking `window.prompt`: the page could not paint while Python waited, so the
+  student answered a pop-up without seeing anything the program had printed, and
+  the whole transcript arrived at the end.
+- **JSPI** (WebAssembly JavaScript Promise Integration — Chrome 137+, Firefox,
+  Safari 27+) lets Pyodide suspend the whole interpreter on a promise:
+  `pyodide.ffi.run_sync`. `MAIN_THREAD_INPUT_BOOTSTRAP`
+  (`utils/mainThreadInput.ts`) runs before every main-thread mode and defines
+  `__coder_read_line`, which every mode's `input()`/`textinput`/`numinput` calls:
+  if `can_run_sync()` it awaits `js_input_async`, which raises the same
+  `inputRequest` the worker uses, so every input mode (terminal, inline field,
+  pop-up dialog) and fixed inputs work unchanged; `handleInputSubmit` resolves it
+  through `mainThreadInputResolveRef`. The console paints and Stop works while
+  Python waits.
+- `can_run_sync()` needs every frame since the run began to be Python. The runs
+  start through `runPythonAsync`, so plain code, the pygame/stdctx/turtle async
+  rewrites and turtle key callbacks polled from Python all qualify. Python called
+  synchronously back from a JS event handler would not, and falls back.
+- **Stop while waiting** resolves the promise with the stop flag up;
+  `__coder_read_line` raises `SystemExit`, which every main-thread path already
+  treats as a normal ending, so the run finishes as `[MAIN-THREAD RUN STOPPED]`.
+  Reset Pyodide drops a suspended program with its runtime and never resumes it.
+- **Without JSPI** it falls back to `js_input_prompt` → `window.prompt`, which now
+  shows the last lines the program printed above the question
+  (`promptWithRecentOutput`, fed by `mainThreadRecentOutputRef`), and echoes
+  `prompt + answer` into the console so the transcript reads as typed.
+- JSPI does not un-freeze a tight loop that never calls `input()` or `sleep` —
+  nothing yields — which is why the worker stays the default.
 
 ### Diagram panels
 
