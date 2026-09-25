@@ -21,7 +21,10 @@ const QUIZ = [
 ].join('\n')
 
 async function answer(page: Page, text: string): Promise<void> {
-  // The console focuses itself when input() asks; type exactly as a student would.
+  // The console focuses itself when input() asks; type exactly as a student
+  // would. Check it really has focus first: a canvas that grabbed it back
+  // swallowed the answer and left the program waiting forever.
+  await expect(page.locator('#console-panel-console .xterm-helper-textarea')).toBeFocused()
   await page.keyboard.type(text)
   await page.keyboard.press('Enter')
 }

@@ -1863,10 +1863,23 @@ export default function App() {
     clearMainThreadCanvas()
   }
 
+  /**
+   * Whether the student is being asked for input right now. A canvas grabs
+   * focus a frame after its run starts, and a program that asks a question
+   * straight away can get there first: the console focuses itself, the canvas
+   * then takes focus back, and the answer the student types goes nowhere
+   * (seen in WebKit, where a turtle program sat waiting forever).
+   */
+  const inputOwnsFocus = () => mainThreadInputResolveRef.current !== null
+    || popupDialogRef.current?.open === true
+
   const focusMainThreadCanvas = () => {
     const canvas = mainThreadCanvasRef.current
     if (!canvas) return
-    requestAnimationFrame(() => { try { canvas.focus({ preventScroll: true }) } catch { canvas.focus() } })
+    requestAnimationFrame(() => {
+      if (inputOwnsFocus()) return
+      try { canvas.focus({ preventScroll: true }) } catch { canvas.focus() }
+    })
   }
 
   const stopMainThreadCanvasWatcher = ({ restoreSnapshot = false } = {}) => {
@@ -2076,7 +2089,8 @@ export default function App() {
     setDisplaySurface('stdctx')
     canvasPaneRef.current?.clear()
     // The canvas must own focus for stdctx.check_key() to see arrow keys.
-    window.setTimeout(() => canvasPaneRef.current?.focus(), 0)
+    // Not if the program has already asked for input (see inputOwnsFocus).
+    window.setTimeout(() => { if (!inputOwnsFocus()) canvasPaneRef.current?.focus() }, 0)
   }
 
   /**
