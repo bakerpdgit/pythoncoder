@@ -34,6 +34,12 @@
     "mode": "run"
   },
   {
+    "name": "Tkinter",
+    "github": "https://github.com/bakerpdgit/pythoncoder",
+    "book": "https://raw.githubusercontent.com/bakerpdgit/pythoncoder/HEAD/Tkinter/book.json",
+    "mode": "run"
+  },
+  {
     "name": "Data Science",
     "github": "https://github.com/bakerpdgit/pythoncoder",
     "book": "https://raw.githubusercontent.com/bakerpdgit/pythoncoder/HEAD/DataScience/book.json",

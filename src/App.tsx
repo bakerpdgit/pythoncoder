@@ -66,6 +66,8 @@ import { type CanvasPaneHandle } from './components/CanvasPane'
 import { STDCTX_KEY_BUFFER_SIZE, STDCTX_WORKER_BOOTSTRAP, keyToVirtualKeyCode, processAudioCommand, type StdaudCommand, type StdctxCommand } from './utils/stdctx'
 import { MATPLOTLIB_BOOTSTRAP, MATPLOTLIB_FLUSH_CODE } from './utils/matplotlib'
 import { PLOTLY_BOOTSTRAP, micropipInstallCode } from './utils/plotly'
+import { TKINTER_MAIN_THREAD_BOOTSTRAP, TKINTER_SHIM_FILES, codeUsesTkinter, detectTkinter } from './utils/tkinter'
+import { TkRenderer } from './utils/tkinterRenderer'
 import { createVfsMediaUrlCache, isDirectMediaUrl } from './utils/vfsMediaUrl'
 import { TraceTable } from './components/trace/TraceTable'
 import { clampDiagramFontSize } from './components/diagrams/diagramLayout'
@@ -207,6 +209,10 @@ export default function App() {
   const [isPygameRunActive, setIsPygameRunActive] = useState(false)
   const [isTurtleCanvasRunActive, setIsTurtleCanvasRunActive] = useState(false)
   const [isSvgTurtleRunActive, setIsSvgTurtleRunActive] = useState(false)
+  const [isTkinterRunActive, setIsTkinterRunActive] = useState(false)
+  // Latched once a tkinter program has opened a window, so it stays on screen
+  // (inert) after the program ends, as a pygame frame or turtle drawing does.
+  const [hasTkinterOutput, setHasTkinterOutput] = useState(false)
   // Latched once a pygame/turtle-canvas run has started, so the final frame stays
   // on screen after the run ends (mirrors hasCanvasOutput for stdctx).
   const [hasMainThreadCanvasOutput, setHasMainThreadCanvasOutput] = useState(false)
@@ -297,6 +303,8 @@ export default function App() {
   const [editorFontSize, setEditorFontSize] = useState(() => getStoredEditorFontSize())
   const [consoleFontSize, setConsoleFontSize] = useState(() => getStoredConsoleFontSize())
   const [displayZoom, setDisplayZoom] = useState<DisplayZoom>(() => getStoredDisplayZoom())
+  const displayZoomRef = useRef(displayZoom)
+  displayZoomRef.current = displayZoom
   const [editorCursorLine, setEditorCursorLine] = useState(1)
   const [leftWidth, setLeftWidth] = useState(55)         // % of center for code vs right col
   const [fsSidebarWidth, setFsSidebarWidth] = useState(224)  // px width of left sidebar
@@ -408,6 +416,14 @@ export default function App() {
   const quickSettingsRef = useRef<HTMLDivElement | null>(null)
   const fixedInputsQueueRef = useRef<string[]>([])
   const mainThreadCanvasRef = useRef<HTMLCanvasElement | null>(null)
+  // The tkinter surface: the renderer draws windows into this host, and moves
+  // its DOM into a new host if React ever remounts the Display pane.
+  const tkinterHostRef = useRef<HTMLDivElement | null>(null)
+  const tkRendererRef = useRef<TkRenderer | null>(null)
+  const setTkinterHost = useCallback((el: HTMLDivElement | null) => {
+    tkinterHostRef.current = el
+    if (el && tkRendererRef.current) tkRendererRef.current.attach(el)
+  }, [])
   const mainThreadCanvasSnapshotRef = useRef<HTMLCanvasElement | null>(null)
   const mainThreadCanvasWatcherRef = useRef(0)
   const mainThreadStopRequestedRef = useRef<boolean>(false)
@@ -512,6 +528,8 @@ export default function App() {
   // ── Derived state ────────────────────────────────────────────────────────
 
   const isPygameLocked = codeUsesPygame(codeText)
+  // A tkinter program draws its windows into this page, so it can only run here.
+  const isTkinterLocked = codeUsesTkinter(codeText)
   const usesStdctx = codeUsesStdctx(codeText)
   // Key handlers only work in the canvas renderer, so a program that registers
   // them runs there whatever the preference says — in the SVG renderer it would
@@ -519,7 +537,7 @@ export default function App() {
   const effectiveTurtleMode = (code: string): TurtleMode =>
     codeUsesTurtleKeyboard(code) ? 'pyo-js-turtle' : appSettings.turtleMode
   const isTurtleLocked = codeUsesTurtle(codeText) && effectiveTurtleMode(codeText) === 'pyo-js-turtle'
-  const selectedRuntime: RuntimeKey = (isPygameLocked || isTurtleLocked) ? 'main-thread' : runtimePreference
+  const selectedRuntime: RuntimeKey = (isPygameLocked || isTurtleLocked || isTkinterLocked) ? 'main-thread' : runtimePreference
   const resolvedRuntime = isRunning ? activeRuntime : selectedRuntime
   const isMainThreadRuntime = resolvedRuntime === 'main-thread'
   const isPygameCanvasRuntime = isPygameRunActive || (isMainThreadRuntime && isPygameLocked)
@@ -589,8 +607,10 @@ export default function App() {
   const hasTurtleSurface = !!turtleSvg || turtleSvgHistory.length > 0
   const hasStdctxSurface = usesStdctx || hasCanvasOutput
   const hasPlotSurface = plotFigures.length > 0
+  const hasTkinterSurface = isTkinterRunActive || hasTkinterOutput
   const availableDisplaySurfaces: DisplaySurface[] = [
     ...(hasCanvasSurface ? ['canvas' as const] : []),
+    ...(hasTkinterSurface ? ['tkinter' as const] : []),
     ...(hasTurtleSurface ? ['turtle' as const] : []),
     ...(hasStdctxSurface ? ['stdctx' as const] : []),
     ...(hasPlotSurface ? ['plot' as const] : []),
@@ -600,7 +620,7 @@ export default function App() {
     ? displaySurface
     : (availableDisplaySurfaces[0] ?? 'canvas')
   const showDisplayPane = visiblePanels.output && hasDisplay
-  const isRunPresentationMode = isPygameRunActive || isTurtleCanvasRunActive || isSvgTurtleRunActive || isConsolePresentationMode
+  const isRunPresentationMode = isPygameRunActive || isTurtleCanvasRunActive || isSvgTurtleRunActive || isTkinterRunActive || isConsolePresentationMode
   isRunPresentationModeRef.current = isRunPresentationMode
   const effectiveDisplaySplit = isRunPresentationMode ? presentationDisplaySplit : displaySplit
 
@@ -778,6 +798,9 @@ export default function App() {
   useEffect(() => { persistEditorFontSize(editorFontSize) }, [editorFontSize])
   useEffect(() => { persistConsoleFontSize(consoleFontSize) }, [consoleFontSize])
   useEffect(() => { persistDisplayZoom(displayZoom) }, [displayZoom])
+  // tkinter windows are DOM, not a bitmap: the renderer applies the zoom itself
+  // so that mouse coordinates can be mapped back through it.
+  useEffect(() => { tkRendererRef.current?.setZoom(displayZoom === 'fit' ? 'fit' : displayZoom / 100) }, [displayZoom])
   useEffect(() => { persistWatches(watches); watchesRef.current = watches }, [watches])
   useEffect(() => { persistNamedLayouts(savedLayouts) }, [savedLayouts])
   useEffect(() => { persistLayoutPrefs({ viewMode, visiblePanels, leftSidebarCollapsed, rightSidebarCollapsed, displaySplit, presentationDisplaySplit, editorCollapsed, consoleCollapsed }) }, [viewMode, visiblePanels, leftSidebarCollapsed, rightSidebarCollapsed, displaySplit, presentationDisplaySplit, editorCollapsed, consoleCollapsed])
@@ -1864,6 +1887,28 @@ export default function App() {
   }
 
   /**
+   * Start a tkinter run: a fresh renderer (the last run's windows go), and the
+   * Display pane showing its surface. The renderer is created once the host
+   * exists — the output panel may only just have been switched on.
+   */
+  const beginTkinterRun = async (): Promise<TkRenderer> => {
+    setHasTkinterOutput(true)
+    setVisiblePanels(p => (p.output ? p : { ...p, output: true }))
+    setDisplaySurface('tkinter')
+    tkRendererRef.current?.dispose()
+    tkRendererRef.current = null
+    for (let i = 0; i < 10 && !tkinterHostRef.current; i++) {
+      await new Promise<void>(r => requestAnimationFrame(() => r()))
+    }
+    const host = tkinterHostRef.current
+    if (!host) throw new Error('The tkinter display is not available.')
+    const renderer = new TkRenderer(host, { shouldYieldFocus: () => inputOwnsFocus() })
+    renderer.setZoom(displayZoomRef.current === 'fit' ? 'fit' : displayZoomRef.current / 100)
+    tkRendererRef.current = renderer
+    return renderer
+  }
+
+  /**
    * Whether the student is being asked for input right now. A canvas grabs
    * focus a frame after its run starts, and a program that asks a question
    * straight away can get there first: the console focuses itself, the canvas
@@ -1919,7 +1964,7 @@ export default function App() {
    * only decides which run flag to raise (the banner and the Panels menu read
    * those), and which split the console/display divider uses.
    */
-  const enterRunPresentationMode = (kind: 'pygame' | 'turtle-canvas' | 'turtle-svg' | 'console') => {
+  const enterRunPresentationMode = (kind: 'pygame' | 'turtle-canvas' | 'turtle-svg' | 'tkinter' | 'console') => {
     if (!runLayoutSnapshotRef.current) {
       runLayoutSnapshotRef.current = { visiblePanels: { ...visiblePanelsRef.current }, leftWidth: leftWidthRef.current }
     }
@@ -1928,6 +1973,7 @@ export default function App() {
     if (kind === 'pygame') setIsPygameRunActive(true)
     else if (kind === 'turtle-canvas') setIsTurtleCanvasRunActive(true)
     else if (kind === 'turtle-svg') setIsSvgTurtleRunActive(true)
+    else if (kind === 'tkinter') setIsTkinterRunActive(true)
     else setIsConsolePresentationMode(true)
   }
 
@@ -1948,6 +1994,7 @@ export default function App() {
     setIsPygameRunActive(false)
     setIsTurtleCanvasRunActive(false)
     setIsSvgTurtleRunActive(false)
+    setIsTkinterRunActive(false)
     setIsConsolePresentationMode(false)
     const snapshot = runLayoutSnapshotRef.current
     runLayoutSnapshotRef.current = null
@@ -3263,6 +3310,7 @@ export default function App() {
       setInputValue('')
     }
     resetMainThreadPyodide()
+    tkRendererRef.current?.end()
     if (workerRef.current) {
       workerRef.current.terminate()
       workerRef.current = null
@@ -3336,6 +3384,18 @@ export default function App() {
     // No await occurs between here and assigning workerRef, so releasing the
     // preparation claim cannot expose a source-switch window to another event.
     startGuard.finish(startClaim)
+    // Checked across every module the program can import, not just the open
+    // file: a challenge can keep its drawing in a module the editor is not
+    // showing. Not across every file, though — a sibling file that plots must
+    // not make Hello, World! load matplotlib.
+    const programFiles = programPythonFiles(capturedCode, capturedSourcePath, vfsFiles, capturedCwd)
+    // tkinter draws its windows into this page, so it cannot run in the worker
+    // at all. The open file may not import it itself (a GUI in gui.py), which
+    // is why the runtime was not already locked to the main thread.
+    if (detectTkinter(capturedCode, programFiles)) {
+      void startMainThreadRun('[INFO] This program uses tkinter, which runs on the main thread: it runs normally, without stepping or the variable inspector.')
+      return
+    }
     const traceTableSessionId = choice === 'trace'
       ? `trace-${Date.now()}-${Math.random().toString(36).slice(2)}`
       : ''
@@ -3351,11 +3411,6 @@ export default function App() {
     }
 
     const hasTurtleForMode = codeUsesTurtle(capturedCode)
-    // Checked across every module the program can import, not just the open
-    // file: a challenge can keep its drawing in a module the editor is not
-    // showing. Not across every file, though — a sibling file that plots must
-    // not make Hello, World! load matplotlib.
-    const programFiles = programPythonFiles(capturedCode, capturedSourcePath, vfsFiles, capturedCwd)
     const spongeLibs = detectSpongeLibs(capturedCode, programFiles)
     const usesStdctxForRun = spongeLibs.usesStdctx
     const usesSpongeLibsForRun = spongeLibs.usesStdctx || spongeLibs.usesStdaud
@@ -3647,7 +3702,8 @@ export default function App() {
     }
   }
 
-  const startMainThreadRun = async () => {
+  /** `note` is printed once the console has been cleared for the run. */
+  const startMainThreadRun = async (note?: string) => {
     if (!hasCode) return
     await saveCurrentToVFS()
     const vfsFiles = await getAllFiles(activeFilesystemId)
@@ -3667,7 +3723,9 @@ export default function App() {
     const plottingLibs = detectPlottingLibs(codeText, programFiles)
     const shouldRunMatplotlib = plottingLibs.matplotlib
     const micropipPackages = micropipPackagesFor(plottingLibs)
-    const shouldRunSpongeLibs = !shouldRunPygame && !shouldRunTurtle
+    // A GUI kept in an imported module (gui.py) still needs the tkinter shim.
+    const shouldRunTkinter = !shouldRunPygame && !shouldRunTurtle && detectTkinter(codeText, programFiles)
+    const shouldRunSpongeLibs = !shouldRunPygame && !shouldRunTurtle && !shouldRunTkinter
       && (spongeLibs.usesStdctx || spongeLibs.usesStdaud)
     const shouldRunStdctx = shouldRunSpongeLibs && spongeLibs.usesStdctx
 
@@ -3685,11 +3743,13 @@ export default function App() {
       shouldRunPygame ? 'pygame'
       : shouldRunTurtleCanvas ? 'turtle-canvas'
       : shouldRunTurtleSvg ? 'turtle-svg'
+      : shouldRunTkinter ? 'tkinter'
       : 'console',
     )
 
     resetExecutionState()
     resetTurtleHistory()
+    if (note) appendOutput(note)
     if (shouldRunPygame || shouldRunTurtleCanvas) beginMainThreadCanvasRun()
     if (shouldRunSpongeLibs) resetStdaud()
     if (shouldRunStdctx) beginStdctxRun()
@@ -3703,6 +3763,7 @@ export default function App() {
 
     const turtlePendingKeys: string[] = []
     let turtleKeyListener: ((e: KeyboardEvent) => void) | null = null
+    let tkRenderer: TkRenderer | null = null
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let pyodide: any = null
@@ -3737,6 +3798,9 @@ export default function App() {
         ensureMainThreadCanvas()
         focusMainThreadCanvas()
         startMainThreadCanvasWatcher()
+      } else if (shouldRunTkinter) {
+        tkRenderer = await beginTkinterRun()
+        if (runId !== mainThreadRunIdRef.current) return
       }
 
       setMainThreadStatus(shouldRunPygame ? 'Loading pygame dependencies from imports...' : 'Loading packages from imports...')
@@ -3757,6 +3821,7 @@ export default function App() {
         shouldRunPygame ? 'Preparing pygame for browser execution...' :
         shouldRunTurtleCanvas ? 'Running turtle canvas program...' :
         shouldRunTurtleSvg ? 'Running turtle SVG program...' :
+        shouldRunTkinter ? 'Running tkinter program...' :
         'Executing code on the main thread...'
       )
 
@@ -3859,6 +3924,18 @@ export default function App() {
         execGlobalsObj.js_stdctx_sleep = () => undefined
         execGlobalsObj.js_stdaud_send = (commandJson: string) => handleStdaudCommand(commandJson)
       }
+      if (shouldRunTkinter && tkRenderer) {
+        const renderer = tkRenderer
+        execGlobalsObj.__coder_tk_files__ = JSON.stringify(TKINTER_SHIM_FILES)
+        execGlobalsObj.js_tk_flush = (ops: string) => renderer.flush(String(ops ?? '[]'))
+        execGlobalsObj.js_tk_query = (q: string) => renderer.query(String(q ?? '{}'))
+        execGlobalsObj.js_tk_poll = () => renderer.poll()
+        execGlobalsObj.js_tk_sleep = (ms: number) => renderer.sleep(Number(ms) || 0)
+        execGlobalsObj.js_tk_dialog = (spec: string) => renderer.dialog(String(spec ?? '{}'))
+        // Without JSPI Python cannot wait on the page's own dialog, so this
+        // falls back to the browser's blocking alert/confirm/prompt.
+        execGlobalsObj.js_tk_dialog_sync = (spec: string) => renderer.dialogSync(String(spec ?? '{}'))
+      }
       if (shouldRunTurtleSvg) {
         execGlobalsObj.js_turtle_update_svg = (svg: string) => {
           const svgStr = String(svg ?? '')
@@ -3894,6 +3971,8 @@ export default function App() {
           await pyodide.runPythonAsync(TURTLE_CANVAS_BOOTSTRAP, { globals: execGlobals })
         } else if (shouldRunTurtleSvg) {
           await pyodide.runPythonAsync(TURTLE_SVG_BOOTSTRAP, { globals: execGlobals })
+        } else if (shouldRunTkinter) {
+          await pyodide.runPythonAsync(TKINTER_MAIN_THREAD_BOOTSTRAP, { globals: execGlobals })
         } else if (shouldRunSpongeLibs) {
           await pyodide.runPythonAsync(STDCTX_MAIN_THREAD_BOOTSTRAP, { globals: execGlobals })
         } else {
@@ -3955,6 +4034,8 @@ ${runProgramPython('exec(code_obj, globals())')}
       setIsRunning(false); setActiveRuntime('')
     } finally {
       mainThreadStopRequestedRef.current = false
+      // The windows stay on screen, but nothing is left to answer their buttons.
+      tkRenderer?.end()
       stopMainThreadCanvasWatcher({ restoreSnapshot: shouldRunPygame || shouldRunTurtleCanvas })
       // An abandoned run has already been superseded (a Reset, a forced stop,
       // or a newer run) — whoever abandoned it owns the layout.
@@ -4069,8 +4150,12 @@ ${runProgramPython('exec(code_obj, globals())')}
         resolvePendingInput('')
         return
       }
-      if (isPygameRunActive || isTurtleCanvasRunActive) {
+      if (isPygameRunActive || isTurtleCanvasRunActive || isTkinterRunActive) {
         mainThreadStopRequestedRef.current = true
+        // A tkinter program may be waiting on a message box or asleep between
+        // events; both give way at once so it can see the stop.
+        tkRendererRef.current?.cancelDialogs()
+        tkRendererRef.current?.wake()
         appendOutput('\n[INFO] Stop requested for main-thread run.')
         setMainThreadStatus('Stopping main-thread run...')
         return
@@ -4510,10 +4595,17 @@ ${runProgramPython('exec(code_obj, globals())')}
         </div>
       )}
 
-      {/* Pygame / turtle canvas banner */}
-      {(isPygameRunActive || isTurtleCanvasRunActive) && (
+      {/* Pygame / turtle canvas / tkinter banner */}
+      {(isPygameRunActive || isTurtleCanvasRunActive || isTkinterRunActive) && (
         <div className="flex-shrink-0 border-b border-sky-700 bg-sky-950/80 px-5 py-2 text-sm text-sky-100 shadow-md">
-          {isPygameRunActive ? 'pygame' : 'turtle'} is running in the main page thread. Debugging and live inspection are disabled while it runs. Click inside the canvas panel to focus keyboard controls.
+          {isTkinterRunActive ? (
+            <>
+              tkinter is running in the main page thread. Debugging and live inspection are disabled while it runs; close its window or click Stop to end it.
+              {!browserSupportsJspi() && <> This browser cannot pause Python, so code after mainloop() runs straight away and message boxes use pop-ups.</>}
+            </>
+          ) : (
+            <>{isPygameRunActive ? 'pygame' : 'turtle'} is running in the main page thread. Debugging and live inspection are disabled while it runs. Click inside the canvas panel to focus keyboard controls.</>
+          )}
           {/* Say so when key handlers overrode the turtle-mode preference, rather
               than quietly using a renderer the user did not pick. */}
           {isTurtleCanvasRunActive && appSettings.turtleMode === 'basthon-svg' && (
@@ -5192,6 +5284,7 @@ ${runProgramPython('exec(code_obj, globals())')}
                   zoom={displayZoom}
                   onZoomChange={setDisplayZoom}
                   mainThreadCanvasRef={mainThreadCanvasRef}
+                  tkinterHostRef={setTkinterHost}
                   canvasPaneRef={canvasPaneRef}
                   onStdctxKeyDown={key => setStdctxKeyState(key, true)}
                   onStdctxKeyUp={key => setStdctxKeyState(key, false)}
@@ -5368,7 +5461,8 @@ ${runProgramPython('exec(code_obj, globals())')}
       <ExecutionModeDialog isOpen={isExecutionDialogOpen} onClose={closeExecutionDialog}
         runtimePreference={runtimePreference} selectedRuntime={selectedRuntime}
         onSelectRuntime={key => { setRuntimePreference(key); closeExecutionDialog() }}
-        isPygameLocked={isPygameLocked || isTurtleLocked} hasSab={hasSab} />
+        isPygameLocked={isPygameLocked || isTurtleLocked || isTkinterLocked}
+        lockedLibrary={isPygameLocked ? 'pygame' : isTkinterLocked ? 'tkinter' : 'turtle'} hasSab={hasSab} />
 
       {showBookJsonEditor && editManifest && (
         <BookJsonEditor

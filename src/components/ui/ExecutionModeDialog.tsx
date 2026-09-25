@@ -10,12 +10,14 @@ interface Props {
   selectedRuntime: RuntimeKey
   onSelectRuntime: (key: RuntimeKey) => void
   isPygameLocked: boolean
+  /** Which import forces the main thread, for the explanation. */
+  lockedLibrary?: string
   hasSab: boolean
 }
 
 /** Reached from the settings menu's "Execution: …" row; holds the detail that row leaves out. */
 export const ExecutionModeDialog = ({
-  isOpen, onClose, runtimePreference, selectedRuntime, onSelectRuntime, isPygameLocked, hasSab,
+  isOpen, onClose, runtimePreference, selectedRuntime, onSelectRuntime, isPygameLocked, lockedLibrary = 'pygame', hasSab,
 }: Props) => {
   useEffect(() => {
     if (!isOpen) return
@@ -88,7 +90,7 @@ export const ExecutionModeDialog = ({
           })}
           <p className="text-[11px] text-slate-500 leading-relaxed">
             {isPygameLocked
-              ? 'Pygame import detected. Main-thread execution is required until that import is removed.'
+              ? `${lockedLibrary[0].toUpperCase()}${lockedLibrary.slice(1)} import detected. Main-thread execution is required until that import is removed.`
               : 'Use the trace worker by default for debugging. Switch to the main thread when this tab cannot run it.'}
           </p>
         </div>

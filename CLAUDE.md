@@ -49,7 +49,13 @@ Three layers, all of which should pass before a change is called done:
   ends with `quit()`. `input.spec.ts` covers `input()` in every runtime (worker,
   main thread with JSPI, the `window.prompt` fallback, turtle, pygame, stdctx,
   fixed inputs, every input mode, Stop while waiting); `isolation.spec.ts` checks
-  each engine is sent the COEP it can honour. Shared helpers live in
+  each engine is sent the COEP it can honour. `tkinter.spec.ts` drives tkinter
+  programs (a form and message box, canvas keys, ttk, a GUI in an imported
+  module, an `update()` game loop, `tkraise` pages, two `Tk()`s in a row, the
+  no-JSPI fallback) and runs every page of the shipped Tkinter book. It sets the
+  editor through Monaco's API rather than `insertText`, which re-indents every
+  line after a colon, and reads the console through its copy button, because a
+  finished run shrinks the console below what the program printed. Shared helpers live in
   `e2e/helpers.ts`; `watchForErrors` takes `ignoreRequestsTo` because a numbered
   book finds its end by asking for a file that is not there, and the browser logs
   that 404 as a console error. Needs network (Pyodide comes from a CDN), ~50s.
@@ -102,6 +108,8 @@ src/
   styles/index.css            # Global CSS + Tailwind directives + light-theme overrides
   data/
     explanations.ts           # Function explanation copy
+  python/
+    tkinter/                  # Coder's own tkinter package (real .py files, ?raw-imported)
   workers/
     tracer.worker.ts          # Pyodide trace worker (imported via ?worker)
     tester.worker.ts          # Pyodide worker for running challenge tests
@@ -116,6 +124,8 @@ src/
     stdctx.ts                 # sys.stdctx / sys.stdaud (Python bootstrap + renderers)
     matplotlib.ts             # Agg backend bootstrap; plt.show() → a PNG in the Display pane
     plotly.ts                 # plotly bootstrap (fig.show() → HTML) + micropip installs
+    tkinter.ts                # tkinter detection + main-thread bootstrap (writes the package)
+    tkinterRenderer.ts        # draws tkinter windows as DOM in the Display pane
     vfsMediaUrl.ts            # deduped blob URLs for VFS-backed media (stdaud, drawImage)
     pyodideFs.ts              # which Pyodide MEMFS dirs are off-limits when syncing back
     pyodideReset.ts           # Python-side reset that makes a reused Pyodide look fresh
@@ -133,7 +143,7 @@ src/
     BookPanel.tsx             # Learning book navigation + challenge runner
     ConsoleTerminal.tsx       # xterm-based interactive console (inline-console input mode)
     DisplayPane.tsx           # All visual output, directly below the Console
-                              #   surfaces: canvas | turtle | stdctx | plot
+                              #   surfaces: canvas | tkinter | turtle | stdctx | plot
     CanvasPane.tsx            # stdctx canvas (a surface of the Display pane)
     TurtleScrubber.tsx        # Turtle SVG history scrubber (Display pane header)
     HtmlPreviewDialog.tsx     # Sandboxed HTML preview
@@ -649,9 +659,10 @@ SharedArrayBuffer, Safari missing its header, or headers missing generally.
   is a program whose console input drives what it draws. The Structure panel is
   purely static analysis (Outline / Hierarchy / Class / Notes) and owns no
   program output.
-- Three surfaces share the pane, chosen by `DisplaySurface`
-  (`'canvas' | 'turtle' | 'stdctx'`): the shared main-thread `<canvas id="canvas">`
-  (pygame and the pyo-js turtle), the Basthon SVG turtle, and the stdctx canvas.
+- The surfaces share the pane, chosen by `DisplaySurface`
+  (`'canvas' | 'tkinter' | 'turtle' | 'stdctx' | 'plot'`): the shared main-thread
+  `<canvas id="canvas">` (pygame and the pyo-js turtle), tkinter windows, the
+  Basthon SVG turtle, the stdctx canvas and charts.
   A surface is offered once it has something to show; a tab strip appears in the
   Display header **only** when a program drives more than one.
 - All three surfaces stay mounted and are hidden with the `hidden` class, never
@@ -826,6 +837,61 @@ SharedArrayBuffer, Safari missing its header, or headers missing generally.
   `navigator.clipboard` is refused — a school network is exactly where that
   permission gets denied — and returns false rather than pretending, so the
   button never claims a copy that did not happen.
+
+### tkinter is Coder's own, drawn in the page
+
+- Pyodide has no Tcl/Tk. `src/python/tkinter` is a pure-Python `tkinter`
+  (plus `ttk`, `messagebox`, `simpledialog`, `filedialog`, `colorchooser`,
+  `font`, `scrolledtext`, and a `PIL.ImageTk` stand-in) that keeps every
+  widget's state in Python and has `utils/tkinterRenderer.ts` draw it. They talk
+  through `_coder_tk_host`: `flush(ops)` (batched, deduplicated per flush),
+  `query` (sizes, carets — things only the page knows), `poll` (queued clicks
+  and keys), `dialog`/`dialog_sync`, `sleep`.
+- **Fidelity is the point**: option names, defaults, `TclError` messages
+  (`unknown option "-bg"`, `cannot use geometry manager pack inside . which
+  already has slaves managed by grid`, `bad event type or keysym "enter"`),
+  auto-names (`.!frame.!button2`, from the Python class), Text's final newline,
+  menu tearoff indices, Treeview's int-looking values, ttk having no `bg`. A
+  program that errors in IDLE should error here the same way.
+- The package is real `.py` files, `?raw`-imported by `utils/tkinter.ts` and
+  written to `/lib/coder_tk` at run start. `/lib` keeps them out of the post-run
+  filesystem sweep, which also means the module eviction in
+  `PYODIDE_RUNTIME_RESET_CODE` skips them — so both the bootstrap and the reset
+  code pop `tkinter*` from `sys.modules` by name.
+- **Main thread only**, like pygame: `isTkinterLocked` (the open file imports
+  it) locks the runtime, and `startTraceWorker` reroutes to the main thread when
+  `detectTkinter` finds it in any module the program can import (a GUI in
+  `gui.py`).
+- **mainloop() is a real loop** when JSPI is available: pump events and
+  timers, then `run_sync` on a timer promise (`renderer.sleep`, which resolves
+  early when an event arrives). `time.sleep` is patched the same way for a
+  tkinter run (restored by the reset code via `_coder_real_sleep`), so
+  `while True: root.update(); time.sleep()` games keep painting. Without JSPI,
+  mainloop() returns at once and `_coder_keepalive` pumps from an async loop
+  after the program's last line; message boxes then fall back to the browser's
+  `alert`/`confirm`/`prompt` — the same deliberate native-dialog exception as
+  `js_input_prompt`.
+- With JSPI, callbacks run inside a Python stack entered by `runPythonAsync`,
+  so `input()` and `messagebox.askyesno()` work *inside* callbacks.
+- **Layout is CSS**: grid → CSS grid (weights as `fr`); pack → nested flex boxes
+  of "parcels" (so `expand` and `fill` stay separate) and "cavities" (what is
+  left after each run of same-side slaves); place → absolute. The look is Tk on
+  Windows whatever the app theme (`color-scheme: light`, 3-D reliefs drawn by
+  `drawRelief`), because tkinter programs pick colours assuming Tk's.
+- The renderer applies Display zoom itself (`setZoom`, including a real Fit that
+  shrinks big windows) so event coordinates can be divided back through it.
+  `attach()` moves its DOM if React remounts the Display pane.
+- Stop sets the flag, cancels any open dialog and wakes the loop; the run ends as
+  `[MAIN-THREAD RUN STOPPED]`. A finished run's windows stay on screen, inert.
+- **Known gap**: the tester worker has no tkinter, so a *tested* challenge whose
+  program imports it fails there. The package runs headless (no host → nothing
+  drawn, mainloop() returns), which is how the vitest suite runs it, and is what
+  the tester would need.
+- Tests: `tkinterShim.test.ts` runs the package under native Python against a
+  fake host (including a faked `pyodide.ffi` so mainloop's JSPI loop runs);
+  `tkinterRenderer.test.ts` checks the DOM the ops build; `tkinter.test.ts`
+  detection and that the generated bootstrap compiles.
+- The **Tkinter** book (`Tkinter/`, in the catalog) is twelve worked examples.
 
 ### stdctx canvas and stdaud audio
 

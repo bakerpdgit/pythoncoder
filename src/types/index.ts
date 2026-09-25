@@ -7,7 +7,7 @@ export type DiagramView = 'hierarchy' | 'outline' | 'uml' | 'notes' | 'inputs'
  * 'turtle' is the Basthon SVG turtle, 'stdctx' is the sys.stdctx canvas, and
  * 'plot' holds the PNGs matplotlib renders with Agg.
  */
-export type DisplaySurface = 'canvas' | 'turtle' | 'stdctx' | 'plot'
+export type DisplaySurface = 'canvas' | 'tkinter' | 'turtle' | 'stdctx' | 'plot'
 /** How big the Display pane shows its surfaces: shrunk to fit, or a percentage of actual size. */
 export type DisplayZoom = 'fit' | number
 

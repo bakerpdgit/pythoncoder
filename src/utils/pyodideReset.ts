@@ -42,6 +42,13 @@ for _reset_name, _reset_mod in list(_reset_sys.modules.items()):
 # The turtle shim and the sys.stdctx / sys.stdaud objects are injected rather
 # than imported, so they carry no __file__ and have to be named.
 _reset_sys.modules.pop('turtle', None)
+
+# The tkinter shim lives under /lib, so the sweep above keeps it; it holds the
+# last run's windows and timers, and must not answer the next run's import.
+for _reset_name in list(_reset_sys.modules):
+    if _reset_name in ('tkinter', 'Tkinter', '_coder_tk_host', 'PIL.ImageTk') or _reset_name.startswith('tkinter.'):
+        _reset_sys.modules.pop(_reset_name, None)
+_reset_sys.meta_path[:] = [f for f in _reset_sys.meta_path if type(f).__name__ != '_CoderImageTkFinder']
 for _reset_attr in ('stdctx', 'stdaud'):
     try:
         delattr(_reset_sys, _reset_attr)

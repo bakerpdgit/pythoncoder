@@ -1,0 +1,25 @@
+{
+  "name": "Tkinter",
+  "id": "tkinter",
+  "children": [
+    { "id": "tkinter-first-window", "name": "1. Your first window", "guide": "01_first_window.md", "py": "01_first_window.py", "isExample": true },
+    { "id": "tkinter-buttons", "name": "2. Buttons and callbacks", "guide": "02_buttons.md", "py": "02_buttons.py", "isExample": true },
+    { "id": "tkinter-entry", "name": "3. Typing: Entry and StringVar", "guide": "03_entry.md", "py": "03_entry.py", "isExample": true },
+    { "id": "tkinter-grid", "name": "4. Laying out a form with grid", "guide": "04_grid.md", "py": "04_grid.py", "isExample": true },
+    { "id": "tkinter-frames", "name": "5. Frames: building a whole window", "guide": "05_frames_pack.md", "py": "05_frames_pack.py", "isExample": true },
+    { "id": "tkinter-choices", "name": "6. Check boxes, radio buttons and lists", "guide": "06_choices.md", "py": "06_choices.py", "isExample": true },
+    { "id": "tkinter-messageboxes", "name": "7. Message boxes and checking input", "guide": "07_messageboxes.md", "py": "07_messageboxes.py", "isExample": true },
+    {
+      "id": "tkinter-separate-logic",
+      "name": "8. Keep the logic out of the window",
+      "guide": "08_separate_logic.md",
+      "py": "08_separate_logic.py",
+      "isExample": true,
+      "additionalFiles": [{ "filename": "calculator_logic.py" }]
+    },
+    { "id": "tkinter-canvas", "name": "9. Drawing on a Canvas", "guide": "09_canvas.md", "py": "09_canvas.py", "isExample": true },
+    { "id": "tkinter-animation", "name": "10. Animation with after()", "guide": "10_animation.md", "py": "10_animation.py", "isExample": true },
+    { "id": "tkinter-keys-mouse", "name": "11. Keys and the mouse", "guide": "11_keys_mouse.md", "py": "11_keys_mouse.py", "isExample": true },
+    { "id": "tkinter-todo-app", "name": "12. A whole app: a to-do list that remembers", "guide": "12_todo_app.md", "py": "12_todo_app.py", "isExample": true }
+  ]
+}

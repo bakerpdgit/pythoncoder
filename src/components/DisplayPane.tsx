@@ -6,6 +6,7 @@ import { TurtleScrubber } from './TurtleScrubber'
 
 const SURFACE_LABELS: Record<DisplaySurface, string> = {
   canvas: 'Canvas',
+  tkinter: 'Window',
   turtle: 'Turtle',
   stdctx: 'Draw',
   plot: 'Plot',
@@ -21,6 +22,8 @@ interface DisplayPaneProps {
   onZoomChange: (zoom: DisplayZoom) => void
   /** Shared main-thread canvas host (pygame and the pyo-js turtle). */
   mainThreadCanvasRef: MutableRefObject<HTMLCanvasElement | null>
+  /** Where tkinter windows are drawn. The renderer applies the zoom itself. */
+  tkinterHostRef: (el: HTMLDivElement | null) => void
   /** sys.stdctx canvas. */
   canvasPaneRef: MutableRefObject<CanvasPaneHandle | null>
   onStdctxKeyDown: (key: string) => void
@@ -65,6 +68,7 @@ export function DisplayPane({
   zoom,
   onZoomChange,
   mainThreadCanvasRef,
+  tkinterHostRef,
   canvasPaneRef,
   onStdctxKeyDown,
   onStdctxKeyUp,
@@ -152,6 +156,9 @@ export function DisplayPane({
             />
           </div>
         </div>
+
+        {/* tkinter windows — DOM drawn by utils/tkinterRenderer.ts */}
+        <div ref={tkinterHostRef} className={`min-h-full ${activeSurface !== 'tkinter' ? 'hidden' : ''}`} />
 
         {/* Basthon SVG turtle */}
         <div className={`${scale === null ? 'mx-auto h-full' : zoomedWrapper} flex items-start justify-center p-3 ${activeSurface !== 'turtle' ? 'hidden' : ''}`}>
