@@ -1,3 +1,5 @@
+import type { TabGroupPrefs } from '../utils/tabGroup'
+
 export type Theme = 'dark' | 'light'
 export type RuntimeKey = 'trace-worker' | 'main-thread'
 export type DiagramView = 'hierarchy' | 'outline' | 'uml' | 'notes' | 'inputs'
@@ -37,6 +39,8 @@ export interface AppSettings {
   inputMode: InputMode
   useFixedInputs: boolean
   inlineTraceValues: boolean
+  /** Keep the run view on screen when a Run ends, with a bar to go back, instead of restoring the layout at once. */
+  stayOnRunView: boolean
 }
 
 export interface LayoutPrefs {
@@ -52,6 +56,8 @@ export interface LayoutPrefs {
   editorCollapsed: boolean
   /** The console folded to its header strip; likewise. */
   consoleCollapsed: boolean
+  /** Which of the central column's panels share one tabbed panel (utils/tabGroup.ts). */
+  tabGroup: TabGroupPrefs
 }
 
 export interface NamedLayout {
@@ -73,6 +79,7 @@ export interface NamedLayout {
   presentationDisplaySplit?: number
   editorCollapsed?: boolean
   consoleCollapsed?: boolean
+  tabGroup?: TabGroupPrefs
 }
 
 export interface PanelVisibility {

@@ -9,9 +9,11 @@ interface Props {
   title?: string
   onSave: (parentPath: string, filename: string) => void
   onCancel: () => void
+  /** Making a new file: an existing file of that name would be emptied, so refuse it. */
+  refuseExistingFile?: boolean
 }
 
-export function SaveFileDialog({ fsId, initialPath = '/', initialName = '', title = 'Save File', onSave, onCancel }: Props) {
+export function SaveFileDialog({ fsId, initialPath = '/', initialName = '', title = 'Save File', onSave, onCancel, refuseExistingFile = false }: Props) {
   const [currentPath, setCurrentPath] = useState(initialPath === '/' ? '/' : initialPath)
   const [entries, setEntries] = useState<VFSEntry[]>([])
   const [filename, setFilename] = useState(initialName)
@@ -38,6 +40,7 @@ export function SaveFileDialog({ fsId, initialPath = '/', initialName = '', titl
     if (!filename.trim()) { setError('Please enter a filename.'); return }
     const existing = await getEntryByPath(fsId, currentPath === '/' ? `/${filename.trim()}` : `${currentPath}/${filename.trim()}`)
     if (existing && existing.type === 'folder') { setError('A folder with that name exists.'); return }
+    if (existing && refuseExistingFile) { setError('A file with that name already exists.'); return }
     setError('')
     onSave(currentPath, filename.trim())
   }
@@ -54,7 +57,7 @@ export function SaveFileDialog({ fsId, initialPath = '/', initialName = '', titl
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-      <div className="bg-slate-800 border border-slate-600 rounded-lg shadow-2xl w-full max-w-md mx-4 flex flex-col" style={{ maxHeight: '80vh' }}>
+      <div role="dialog" aria-modal="true" aria-label={title} className="bg-slate-800 border border-slate-600 rounded-lg shadow-2xl w-full max-w-md mx-4 flex flex-col" style={{ maxHeight: '80vh' }}>
         <div className="px-5 py-4 border-b border-slate-700 flex items-center justify-between">
           <span className="font-semibold text-slate-200 text-sm">{title}</span>
           <button onClick={onCancel} className="text-slate-400 hover:text-slate-200 transition-colors">

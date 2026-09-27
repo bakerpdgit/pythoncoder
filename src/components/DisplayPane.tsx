@@ -1,4 +1,4 @@
-import type { CSSProperties, MutableRefObject } from 'react'
+import type { CSSProperties, MutableRefObject, ReactNode } from 'react'
 import type { DisplaySurface, DisplayZoom, PlotFigure } from '../types'
 import { DISPLAY_ZOOM_LEVELS } from '../utils/storage'
 import { CanvasPane, type CanvasPaneHandle } from './CanvasPane'
@@ -42,6 +42,8 @@ interface DisplayPaneProps {
   onScrubTogglePlay: () => void
   onScrubSpeedChange: (speed: number) => void
   onScrubClose: () => void
+  /** The tab group's tabs, shown in place of the "Display" title while the pane is one of them. */
+  headerTabs?: ReactNode
 }
 
 /**
@@ -84,6 +86,7 @@ export function DisplayPane({
   onScrubTogglePlay,
   onScrubSpeedChange,
   onScrubClose,
+  headerTabs,
 }: DisplayPaneProps) {
   const scale = zoom === 'fit' ? null : zoom / 100
   const zoomStyle: CSSProperties | undefined = scale === null ? undefined : { zoom: scale }
@@ -94,7 +97,7 @@ export function DisplayPane({
   return (
     <div className="flex flex-1 flex-col overflow-hidden min-h-0">
       <div className="bg-slate-900 py-2 px-3 border-b border-slate-700 flex-shrink-0 flex items-center justify-between gap-2">
-        <div className="font-bold uppercase tracking-wider text-xs text-teal-400">Display</div>
+        {headerTabs ?? <div className="font-bold uppercase tracking-wider text-xs text-teal-400">Display</div>}
         <div className="flex items-center gap-2">
           {/* Tabs only earn their place when a program drives more than one surface. */}
           {availableSurfaces.length > 1 && (

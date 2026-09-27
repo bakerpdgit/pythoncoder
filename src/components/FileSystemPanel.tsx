@@ -26,6 +26,13 @@ interface Props {
   onFilesystemCreated: (id: string) => void
   onCwdChange: (path: string) => void
   onOpenFile: (entry: VFSEntry) => void
+  /**
+   * New file only (never an upload): asked before the name is chosen, so the
+   * student can save or drop the editor's changes first. False cancels.
+   */
+  onBeforeNewFile?: () => Promise<boolean>
+  /** A file just made with New file, to open in the editor as VS Code does. */
+  onOpenNewFile?: (entry: VFSEntry) => void
   onPreviewHtml: (entry: VFSEntry) => void
   onError: (msg: string) => void
   onBookOpen?: (url: string) => void
@@ -65,7 +72,7 @@ export function FileSystemPanel({
   activeFilesystemId, currentWorkingDir, openFilePath, hiddenPaths, isChallengeMode,
   isBookOpen, onCloseBook, onOpenResourceUrl,
   onFilesystemChange, onFilesystemForcedChange, onFilesystemCreated, onCwdChange, onOpenFile, onError, onBookOpen,
-  onPreviewHtml, onLocalFileImport, onFolderConnect,
+  onBeforeNewFile, onOpenNewFile, onPreviewHtml, onLocalFileImport, onFolderConnect,
   isLocalFolderConnected, onLocalFolderSync, onReloadFolder, onDisconnectFolder, onCloseFolder,
   diskDeleteWarnDismissed, onDismissDiskDeleteWarn,
   reloadTrigger,
@@ -85,7 +92,7 @@ export function FileSystemPanel({
   const [showNewFsDialog, setShowNewFsDialog] = useState(false)
   const [newFsName, setNewFsName] = useState('')
   const [showSaveDialog, setShowSaveDialog] = useState(false)
-  const [pendingUpload, setPendingUpload] = useState<{ name: string; content: ArrayBuffer; mimeType: string } | null>(null)
+  const [pendingUpload, setPendingUpload] = useState<{ name: string; content: ArrayBuffer; mimeType: string; isNewFile?: boolean } | null>(null)
   const [imagePreview, setImagePreview] = useState<ImagePreview | null>(null)
 
   // Single owner for the preview's blob URL: revoked when it is replaced and
@@ -243,14 +250,21 @@ export function FileSystemPanel({
     try {
       const path = parentPath === '/' ? `/${filename}` : `${parentPath}/${filename}`
       const existing = await getEntryByPath(activeFilesystemId, path)
+      // A new file is typed by the name the student gave it, not the default's .py.
+      const mimeType = pendingUpload.isNewFile ? guessMimeType(filename) : pendingUpload.mimeType
       if (existing) {
-        await writeFile(activeFilesystemId, path, pendingUpload.content, pendingUpload.mimeType)
+        await writeFile(activeFilesystemId, path, pendingUpload.content, mimeType)
       } else {
-        await createEntry(activeFilesystemId, parentPath, filename, 'file', pendingUpload.content, pendingUpload.mimeType)
+        await createEntry(activeFilesystemId, parentPath, filename, 'file', pendingUpload.content, mimeType)
       }
       if (isLocalFolderConnected) await onLocalFolderSync?.({ kind: 'write', path, content: pendingUpload.content })
+      const isNewFile = pendingUpload.isNewFile === true
       setPendingUpload(null); setShowSaveDialog(false)
       setCurrentPath(parentPath); void reload()
+      if (isNewFile) {
+        const created = await getEntryByPath(activeFilesystemId, path)
+        if (created) onOpenNewFile?.(created)
+      }
     } catch (err) { onError(String(err)) }
   }
 
@@ -265,8 +279,9 @@ export function FileSystemPanel({
     } catch (err) { onError(String(err)) }
   }
 
-  const handleNewFile = () => {
-    setPendingUpload({ name: 'new_file.py', content: new ArrayBuffer(0), mimeType: 'text/x-python' })
+  const handleNewFile = async () => {
+    if (onBeforeNewFile && !(await onBeforeNewFile())) return
+    setPendingUpload({ name: 'new_file.py', content: new ArrayBuffer(0), mimeType: 'text/x-python', isNewFile: true })
     setShowSaveDialog(true)
   }
 
@@ -514,7 +529,7 @@ export function FileSystemPanel({
             {showNewMenu && (
               <div className="absolute right-0 top-full z-40 pt-1">
                 <div className="bg-slate-800 border border-slate-600 rounded shadow-xl py-1 min-w-[120px]">
-                  <button type="button" onClick={() => { setShowNewMenu(false); handleNewFile() }}
+                  <button type="button" onClick={() => { setShowNewMenu(false); void handleNewFile() }}
                     className="w-full text-left px-3 py-1.5 text-slate-300 hover:bg-slate-700 flex items-center gap-2 transition-colors">
                     <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 13h6m-3-3v6m-9 1V7a2 2 0 012-2h6l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
@@ -691,7 +706,8 @@ export function FileSystemPanel({
         <SaveFileDialog fsId={activeFilesystemId}
           initialPath={currentPath}
           initialName={pendingUpload?.name ?? ''}
-          title={pendingUpload?.name ? `Save "${pendingUpload.name}"` : 'Save File'}
+          title={pendingUpload?.isNewFile ? 'New file' : pendingUpload?.name ? `Save "${pendingUpload.name}"` : 'Save File'}
+          refuseExistingFile={pendingUpload?.isNewFile === true}
           onSave={(p, n) => void handleSaveDialogSave(p, n)}
           onCancel={() => { setShowSaveDialog(false); setPendingUpload(null) }} />
       )}

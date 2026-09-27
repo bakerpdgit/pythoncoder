@@ -55,6 +55,13 @@ import { DiagramFontControls } from './components/ui/DiagramFontControls'
 import { IconButton } from './components/ui/IconButton'
 import { FoldButton } from './components/ui/FoldButton'
 import { SettingsDialog } from './components/ui/SettingsDialog'
+import { TabGroupDialog } from './components/ui/TabGroupDialog'
+import { PanelTabStrip } from './components/ui/PanelTabStrip'
+import {
+  NO_TAB_GROUP, describeTabGroup, groupSlot, resolveGroupTab, sanitiseTabGroup, visibleTabGroup,
+  type CenterPanel, type GroupSlot, type TabGroupPrefs,
+} from './utils/tabGroup'
+import { resolveShortcut, type ShortcutAction } from './utils/shortcuts'
 import { HierarchyChart } from './components/diagrams/HierarchyChart'
 import { UmlDiagram } from './components/diagrams/UmlDiagram'
 import { OutlinePanel } from './components/diagrams/OutlinePanel'
@@ -140,6 +147,9 @@ const MONACO_LIGHT_THEME: MonacoEditor.IStandaloneThemeData = {
     'editorGutter.background': '#f8fbff', 'editorOverviewRuler.border': '#f8fbff',
   },
 }
+
+// The editor's font sizes: the header's dropdown, and the steps Ctrl+Shift+> / < take.
+const EDITOR_FONT_SIZES = [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 28, 32, 36, 40]
 
 const PYTHON_KEYWORDS = new Set([
   'False', 'None', 'True', 'and', 'as', 'assert', 'async', 'await', 'break', 'class',
@@ -239,6 +249,16 @@ export default function App() {
   const [leftSidebarCollapsed, setLeftSidebarCollapsed] = useState<boolean>(initialLayoutPrefs.leftSidebarCollapsed)
   const [editorCollapsed, setEditorCollapsed] = useState<boolean>(initialLayoutPrefs.editorCollapsed)
   const [consoleCollapsed, setConsoleCollapsed] = useState<boolean>(initialLayoutPrefs.consoleCollapsed)
+  // Panels of the central column sharing one tabbed panel, and the tab on show.
+  const [tabGroup, setTabGroup] = useState<TabGroupPrefs>(() => ({ ...initialLayoutPrefs.tabGroup }))
+  const [groupTab, setGroupTab] = useState<CenterPanel>('editor')
+  const [isTabGroupDialogOpen, setIsTabGroupDialogOpen] = useState(false)
+  const closeTabGroupDialog = useCallback(() => setIsTabGroupDialogOpen(false), [])
+  // F11: the editor alone, everything else hidden (not unmounted) until F11 again.
+  const [isEditorFullScreen, setIsEditorFullScreen] = useState(false)
+  // A Run ended with "Stay on run view" ticked: its layout is still on screen,
+  // and the bar above the panels offers the way back.
+  const [runViewHeld, setRunViewHeld] = useState(false)
   const [centerVerticalSplit, setCenterVerticalSplit] = useState<number>(70) // % code editor in minimal mode center
   // notes is now a tab inside Structure, not a separate panel — kept in type for compat
   const [activeFilesystemId, setActiveFilesystemId] = useState<string>('default')
@@ -355,6 +375,10 @@ export default function App() {
   // Assigned below, once the derived flag exists — the splitter's mousemove
   // listener is installed once and would otherwise read a stale closure.
   const isRunPresentationModeRef = useRef(false)
+  // Read at the end of a run, from closures made when it started.
+  const runViewHeldRef = useRef(false)
+  const stayOnRunViewRef = useRef(appSettings.stayOnRunView)
+  stayOnRunViewRef.current = appSettings.stayOnRunView
   const traceWorkerStartGuardRef = useRef(new RuntimeStartGuard<TraceWorkerStartSource>())
   const traceWorkerSourceRef = useRef<TraceWorkerStartSource>({
     filesystemId: activeFilesystemId,
@@ -582,13 +606,14 @@ export default function App() {
   const displayedTurtleSvg = turtleSvgHistory.length > 0 && turtleScrubStep >= 0 && turtleScrubStep < turtleSvgHistory.length
     ? turtleSvgHistory[turtleScrubStep]
     : turtleSvg
-  const hasLeftSidebar = visiblePanels.filesystem || visiblePanels.visualizer
+  // The full-screen editor (F11) takes both sidebars off screen with everything else.
+  const hasLeftSidebar = (visiblePanels.filesystem || visiblePanels.visualizer) && !isEditorFullScreen
   const hasInspectorAndFs = visiblePanels.filesystem && visiblePanels.visualizer
   const hasRightCol = visiblePanels.output
   const hasBookPanel = !!bookNavState
   // The right sidebar stacks, top to bottom: Learning book · Teacher Tools · Structure.
   // The last visible section fills the leftover height; the ones above it are sized in px.
-  const hasRightSidebar = hasBookPanel || visiblePanels.teacherTools || visiblePanels.diagram
+  const hasRightSidebar = (hasBookPanel || visiblePanels.teacherTools || visiblePanels.diagram) && !isEditorFullScreen
   const rightSidebarSections = [
     ...(hasBookPanel ? ['book' as const] : []),
     ...(visiblePanels.teacherTools ? ['teacher' as const] : []),
@@ -621,8 +646,25 @@ export default function App() {
     : (availableDisplaySurfaces[0] ?? 'canvas')
   const showDisplayPane = visiblePanels.output && hasDisplay
   const isRunPresentationMode = isPygameRunActive || isTurtleCanvasRunActive || isSvgTurtleRunActive || isTkinterRunActive || isConsolePresentationMode
-  isRunPresentationModeRef.current = isRunPresentationMode
-  const effectiveDisplaySplit = isRunPresentationMode ? presentationDisplaySplit : displaySplit
+  // A run's layout, whether the run is still going or has ended and been held
+  // on screen by "Stay on run view".
+  const isRunLayout = isRunPresentationMode || runViewHeld
+  isRunPresentationModeRef.current = isRunLayout
+  const effectiveDisplaySplit = isRunLayout ? presentationDisplaySplit : displaySplit
+
+  // ── Derived: the central column's tab group ───────────────────────────────
+  // Grouped panels are laid out with CSS alone — the one panel left out goes
+  // first, the chosen tab fills the rest, the others are hidden — so no member
+  // is ever remounted: Monaco, the xterm buffer and both canvases survive every
+  // tab switch and every change to the group.
+  const centerVisible: Record<CenterPanel, boolean> = { editor: visiblePanels.code, console: visiblePanels.output, display: showDisplayPane }
+  const groupedPanels = isEditorFullScreen ? [] : visibleTabGroup(tabGroup, centerVisible)
+  const isTabGrouped = groupedPanels.length > 0
+  const activeGroupTab = resolveGroupTab(groupTab, groupedPanels)
+  const editorSlot = groupSlot('editor', groupedPanels, activeGroupTab, centerVisible)
+  const consoleSlot = groupSlot('console', groupedPanels, activeGroupTab, centerVisible)
+  const displaySlot = groupSlot('display', groupedPanels, activeGroupTab, centerVisible)
+  const hasGroupLead = editorSlot === 'lead' || consoleSlot === 'lead' || displaySlot === 'lead'
 
   // ── Derived: the editor and console folded to their headers ───────────────
   // Each folds vertically, and only where a neighbour can take the height it
@@ -630,8 +672,10 @@ export default function App() {
   // the console gives way to the Display pane below it or the editor above it.
   // Anywhere else a fold would just leave a gap, so the control is not offered
   // and a remembered fold waits until it can apply.
-  const canCollapseEditor = viewMode === 'minimal' && visiblePanels.code && visiblePanels.output
-  const canCollapseConsole = visiblePanels.output && (showDisplayPane || canCollapseEditor)
+  // Tabs and full screen already decide who has the room, so neither folds there.
+  const canFold = !isTabGrouped && !isEditorFullScreen
+  const canCollapseEditor = canFold && viewMode === 'minimal' && visiblePanels.code && visiblePanels.output
+  const canCollapseConsole = canFold && visiblePanels.output && (showDisplayPane || canCollapseEditor)
   const isConsoleCollapsed = canCollapseConsole && consoleCollapsed
   // Only the output panel's header strip is left, so the editor takes the column.
   const isOutputHeaderOnly = isConsoleCollapsed && !showDisplayPane
@@ -786,7 +830,7 @@ export default function App() {
     if (!editorRef.current || !visiblePanels.code) return
     const frameId = requestAnimationFrame(() => editorRef.current?.layout())
     return () => cancelAnimationFrame(frameId)
-  }, [leftWidth, fsSidebarWidth, leftSidebarSplit, inspectorSplit, centerVerticalSplit, effectiveDisplaySplit, showDisplayPane, isEditorCollapsed, isConsoleCollapsed, rightSidebarWidth, rightSidebarCollapsed, visiblePanels.code, visiblePanels.visualizer, visiblePanels.diagram, visiblePanels.output, visiblePanels.filesystem])
+  }, [leftWidth, fsSidebarWidth, leftSidebarSplit, inspectorSplit, centerVerticalSplit, effectiveDisplaySplit, showDisplayPane, isEditorCollapsed, isConsoleCollapsed, rightSidebarWidth, rightSidebarCollapsed, visiblePanels.code, visiblePanels.visualizer, visiblePanels.diagram, visiblePanels.output, visiblePanels.filesystem, isEditorFullScreen, activeGroupTab, isTabGrouped])
 
   useEffect(() => {
     if (!visiblePanels.diagram) setShowExportDialog(false)
@@ -803,7 +847,7 @@ export default function App() {
   useEffect(() => { tkRendererRef.current?.setZoom(displayZoom === 'fit' ? 'fit' : displayZoom / 100) }, [displayZoom])
   useEffect(() => { persistWatches(watches); watchesRef.current = watches }, [watches])
   useEffect(() => { persistNamedLayouts(savedLayouts) }, [savedLayouts])
-  useEffect(() => { persistLayoutPrefs({ viewMode, visiblePanels, leftSidebarCollapsed, rightSidebarCollapsed, displaySplit, presentationDisplaySplit, editorCollapsed, consoleCollapsed }) }, [viewMode, visiblePanels, leftSidebarCollapsed, rightSidebarCollapsed, displaySplit, presentationDisplaySplit, editorCollapsed, consoleCollapsed])
+  useEffect(() => { persistLayoutPrefs({ viewMode, visiblePanels, leftSidebarCollapsed, rightSidebarCollapsed, displaySplit, presentationDisplaySplit, editorCollapsed, consoleCollapsed, tabGroup }) }, [viewMode, visiblePanels, leftSidebarCollapsed, rightSidebarCollapsed, displaySplit, presentationDisplaySplit, editorCollapsed, consoleCollapsed, tabGroup])
 
   // Something arriving in the right sidebar must be visible, or the student sees
   // nothing happen: opening a book, or turning on Teacher Tools or Structure,
@@ -821,9 +865,12 @@ export default function App() {
     if (hasBookPanel && !prev.book) setBookSectionHeight(null)
   }, [hasBookPanel, visiblePanels.teacherTools, visiblePanels.diagram])
 
-  // A program waiting on input() must not be waiting behind a folded console.
+  // A program waiting on input() must not be waiting behind a folded console,
+  // or behind another tab of the tab group.
   useEffect(() => {
-    if (inputRequest && appSettings.inputMode !== 'popup-dialog') setConsoleCollapsed(false)
+    if (!inputRequest || appSettings.inputMode === 'popup-dialog') return
+    setConsoleCollapsed(false)
+    setGroupTab('console')
   }, [inputRequest, appSettings.inputMode])
 
   useEffect(() => startVersionPolling(() => setUpdateAvailable(true)), [])
@@ -904,6 +951,29 @@ export default function App() {
     document.addEventListener('keydown', handleKeyDown)
     return () => { document.removeEventListener('mousedown', handlePointerDown); document.removeEventListener('keydown', handleKeyDown) }
   }, [isPanelMenuOpen, isLearningMenuOpen, isQuickSettingsOpen])
+
+  // Function-key shortcuts (utils/shortcuts.ts): F5 Debug, Ctrl+F5 Run,
+  // Ctrl+Shift+F5 Trace, the debugger's step keys, F11 full-screen editor.
+  // Listened for on window in the capture phase, so they arrive before Monaco
+  // or the xterm console can act on them — and before the browser reloads.
+  // The handler is re-pointed every render (below, once it exists).
+  const shortcutHandlerRef = useRef<(action: ShortcutAction) => void>(() => {})
+  const shortcutStateRef = useRef({ isRunning: false, isPaused: false })
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const action = resolveShortcut(event, shortcutStateRef.current)
+      if (!action) return
+      event.preventDefault()
+      event.stopPropagation()
+      if (event.repeat || action.kind === 'swallow') return
+      // A dialog has the keyboard: the key is claimed, so the page does not
+      // reload, but nothing behind the dialog starts or steps.
+      if (document.querySelector('[aria-modal="true"], dialog[open]')) return
+      shortcutHandlerRef.current(action)
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => window.removeEventListener('keydown', onKeyDown, true)
+  }, [])
 
   useEffect(() => {
     const onMouseMove = (e: MouseEvent) => {
@@ -1193,7 +1263,9 @@ export default function App() {
       setEditorCursorLine(e.position.lineNumber)
     })
 
-    // Ctrl+Alt+Shift+> / < — editor font size (also updates the stored value)
+    // Ctrl+Shift+> / < — editor font size, as in Python Sponge (and the older
+    // Ctrl+Alt+Shift chord). Monaco's own Ctrl+Shift+. / , (in-place replace)
+    // gives way: an action's keybinding is registered after the defaults.
     const KM = monaco.KeyMod
     const KC = monaco.KeyCode
 
@@ -1207,10 +1279,10 @@ export default function App() {
     editor.addAction({
       id: 'increase-font-size',
       label: 'Increase Font Size',
-      keybindings: [KM.CtrlCmd | KM.Alt | KM.Shift | KC.Period],
+      keybindings: [KM.CtrlCmd | KM.Shift | KC.Period, KM.CtrlCmd | KM.Alt | KM.Shift | KC.Period],
       run: (ed) => {
         const size = ed.getOption(monaco.editor.EditorOption.fontSize)
-        const next = Math.min(size + 1, 40)
+        const next = EDITOR_FONT_SIZES.find(sz => sz > size) ?? size
         ed.updateOptions({ fontSize: next })
         setEditorFontSize(next)
       },
@@ -1218,10 +1290,10 @@ export default function App() {
     editor.addAction({
       id: 'decrease-font-size',
       label: 'Decrease Font Size',
-      keybindings: [KM.CtrlCmd | KM.Alt | KM.Shift | KC.Comma],
+      keybindings: [KM.CtrlCmd | KM.Shift | KC.Comma, KM.CtrlCmd | KM.Alt | KM.Shift | KC.Comma],
       run: (ed) => {
         const size = ed.getOption(monaco.editor.EditorOption.fontSize)
-        const next = Math.max(size - 1, 8)
+        const next = [...EDITOR_FONT_SIZES].reverse().find(sz => sz < size) ?? size
         ed.updateOptions({ fontSize: next })
         setEditorFontSize(next)
       },
@@ -1357,7 +1429,7 @@ export default function App() {
       const mimeType = pendingCodeLoad.mimeType || guessMimeType(filename)
       await writeFile(activeFilesystemId, path, pendingCodeLoad.rawBuffer, mimeType)
       if (isTextMime(mimeType)) {
-        loadCodeText(pendingCodeLoad.content, filename, path)
+        if (loadCodeText(pendingCodeLoad.content, filename, path)) revealEditor()
       } else {
         setCodeStatus(`${filename} saved to virtual filesystem.`)
       }
@@ -1520,7 +1592,31 @@ export default function App() {
     setCodeStatus('Closed connected folder.')
   }
 
-  const onOpenVFSFile = async (entry: VFSEntry) => {
+  /**
+   * New file, from the File System panel: settle the editor's unsaved changes
+   * before a name is even asked for, because the new file then opens in their
+   * place. Only one file is ever open — a second, unsaved tab is too easily
+   * lost in a browser. False cancels the new file.
+   */
+  const handleBeforeNewFile = async (): Promise<boolean> => {
+    if (!canSwitchCodeSource()) return false
+    if (!openFilePath || codeText === savedCodeRef.current) return true
+    const choice = await dialogs.choose({
+      title: 'New file',
+      message: `Save changes to "${codeFileName}" before creating a new file?`,
+      buttons: [
+        { label: 'Save', value: 'save', tone: 'primary' },
+        { label: "Don't save", value: 'discard', tone: 'neutral' },
+        { label: 'Cancel', value: 'cancel', tone: 'neutral' },
+      ],
+    })
+    if (choice === 'cancel' || choice === null) return false
+    if (choice === 'save') return saveCurrentToVFS()
+    return true
+  }
+
+  /** `unsavedSettled`: the student has already said what happens to the editor's changes. */
+  const onOpenVFSFile = async (entry: VFSEntry, { unsavedSettled = false } = {}) => {
     if (!canSwitchCodeSource()) return
     if (entry.type !== 'file') return
     const mime = entry.mimeType ?? guessMimeType(entry.name)
@@ -1528,7 +1624,7 @@ export default function App() {
       setCodeStatus(`Cannot open '${entry.name}' in the editor (not a text file). Use the file panel to download it.`)
       return
     }
-    if (openFilePath && codeText !== savedCodeRef.current) {
+    if (!unsavedSettled && openFilePath && codeText !== savedCodeRef.current) {
       const choice = await dialogs.choose({
         title: 'Open file',
         message: `Save changes to "${codeFileName}" before opening "${entry.name}"?`,
@@ -1544,7 +1640,7 @@ export default function App() {
     if (entry.content) {
       const text = new TextDecoder().decode(entry.content)
       // Opening a file into a folded editor would look like nothing happened.
-      if (loadCodeText(text, entry.name, entry.path)) setEditorCollapsed(false)
+      if (loadCodeText(text, entry.name, entry.path)) revealEditor()
     }
   }
 
@@ -1754,6 +1850,7 @@ export default function App() {
   const increaseDiagramFontSize = () => setDiagramFontSize(f => clampDiagramFontSize(f + 1))
   const decreaseDiagramFontSize = () => setDiagramFontSize(f => clampDiagramFontSize(f - 1))
   const togglePanelVisibility = (panelKey: string) => {
+    setIsEditorFullScreen(false)
     setVisiblePanels(current => {
       const visibleCount = Object.values(current).filter(Boolean).length
       if (current[panelKey as keyof PanelVisibility] && visibleCount === 1) return current
@@ -1786,7 +1883,39 @@ export default function App() {
     if (isEditorCollapsed && !showDisplayPane) setEditorCollapsed(false)
   }
 
+  /**
+   * The student has picked a layout of their own, so the temporary ones give
+   * way: the full-screen editor, and a run view held after its program ended
+   * (whose snapshot is dropped, not restored — the new layout replaces it).
+   */
+  const leaveTransientLayouts = () => {
+    setIsEditorFullScreen(false)
+    if (runViewHeldRef.current) {
+      runLayoutSnapshotRef.current = null
+      runViewHeldRef.current = false
+      setRunViewHeld(false)
+    }
+  }
+
+  /** Opening a file or turning to an activity shows the code, folded or tabbed away or not. */
+  const revealEditor = () => {
+    setEditorCollapsed(false)
+    setGroupTab('editor')
+  }
+
+  const toggleEditorFullScreen = () => {
+    if (isEditorFullScreen) { setIsEditorFullScreen(false); return }
+    // From a held run view, go via the layout the run took over, so the next
+    // F11 lands there rather than back on the run view.
+    if (runViewHeldRef.current) restoreRunPresentationMode({ release: true })
+    setVisiblePanels(p => (p.code ? p : { ...p, code: true }))
+    setIsEditorFullScreen(true)
+    requestAnimationFrame(() => editorRef.current?.focus())
+  }
+
   const handleRestoreDefaults = () => {
+    leaveTransientLayouts()
+    setTabGroup({ ...NO_TAB_GROUP })
     setViewMode('minimal')
     setVisiblePanels({ ...MINIMAL_VISIBLE_PANELS })
     setLeftSidebarCollapsed(true)
@@ -1806,7 +1935,10 @@ export default function App() {
     setIsPanelMenuOpen(false)
   }
 
+  // A view is a fresh start, so it also breaks up any tab group.
   const handleSelectViewMode = (mode: ViewMode) => {
+    leaveTransientLayouts()
+    setTabGroup({ ...NO_TAB_GROUP })
     setViewMode(mode)
     setVisiblePanels(defaultPanelsForView(mode))
     setLeftSidebarCollapsed(mode === 'minimal')
@@ -1822,12 +1954,14 @@ export default function App() {
     const layout: NamedLayout = {
       name: name.trim(), visiblePanels: { ...visiblePanels }, leftWidth, fsSidebarWidth, leftSidebarSplit, inspectorSplit, bookPanelWidth: rightSidebarWidth,
       viewMode, leftSidebarCollapsed, rightSidebarCollapsed, centerVerticalSplit, bookSectionHeight, teacherSectionHeight, displaySplit, presentationDisplaySplit,
-      editorCollapsed, consoleCollapsed,
+      editorCollapsed, consoleCollapsed, tabGroup: { ...tabGroup },
     }
     setSavedLayouts(prev => [...prev.filter(l => l.name !== layout.name), layout])
   }
 
   const handleRestoreLayout = (layout: NamedLayout) => {
+    leaveTransientLayouts()
+    setTabGroup(sanitiseTabGroup(layout.tabGroup))
     setVisiblePanels(layout.visiblePanels)
     setLeftWidth(layout.leftWidth)
     setFsSidebarWidth(layout.fsSidebarWidth)
@@ -1883,6 +2017,7 @@ export default function App() {
     setHasMainThreadCanvasOutput(true)
     setVisiblePanels(p => (p.output ? p : { ...p, output: true }))
     setDisplaySurface('canvas')
+    setGroupTab('display')
     clearMainThreadCanvas()
   }
 
@@ -1895,6 +2030,7 @@ export default function App() {
     setHasTkinterOutput(true)
     setVisiblePanels(p => (p.output ? p : { ...p, output: true }))
     setDisplaySurface('tkinter')
+    setGroupTab('display')
     tkRendererRef.current?.dispose()
     tkRendererRef.current = null
     for (let i = 0; i < 10 && !tkinterHostRef.current; i++) {
@@ -1965,9 +2101,13 @@ export default function App() {
    * those), and which split the console/display divider uses.
    */
   const enterRunPresentationMode = (kind: 'pygame' | 'turtle-canvas' | 'turtle-svg' | 'tkinter' | 'console') => {
+    // A run view held from the last run keeps its snapshot, so Previous still
+    // means the layout from before the first of them.
     if (!runLayoutSnapshotRef.current) {
       runLayoutSnapshotRef.current = { visiblePanels: { ...visiblePanelsRef.current }, leftWidth: leftWidthRef.current }
     }
+    runViewHeldRef.current = false
+    setRunViewHeld(false)
     setShowExportDialog(false)
     setVisiblePanels({ code: false, visualizer: false, diagram: false, notes: false, output: true, filesystem: false, teacherTools: false })
     if (kind === 'pygame') setIsPygameRunActive(true)
@@ -1989,15 +2129,28 @@ export default function App() {
    * pane, so a pygame window, a turtle drawing or a stdctx canvas would vanish
    * with the program that drew it if the pre-run layout happened to have the
    * panel hidden. Safe to call at any ending, snapshot or not.
+   *
+   * With "Stay on run view" ticked, a run's ending keeps the run view instead
+   * and raises the bar that offers the way back — the one place that still asks
+   * for a click, and only because the student asked for it. `release` is that
+   * way back (and navigation's): it always restores.
    */
-  const restoreRunPresentationMode = () => {
+  const restoreRunPresentationMode = ({ release = false }: { release?: boolean } = {}) => {
     setIsPygameRunActive(false)
     setIsTurtleCanvasRunActive(false)
     setIsSvgTurtleRunActive(false)
     setIsTkinterRunActive(false)
     setIsConsolePresentationMode(false)
     const snapshot = runLayoutSnapshotRef.current
+    if (snapshot && !release && stayOnRunViewRef.current) {
+      runViewHeldRef.current = true
+      setRunViewHeld(true)
+      setVisiblePanels(p => (p.output ? p : { ...p, output: true }))
+      return
+    }
     runLayoutSnapshotRef.current = null
+    runViewHeldRef.current = false
+    setRunViewHeld(false)
     if (!snapshot) {
       setVisiblePanels(p => (p.output ? p : { ...p, output: true }))
       return
@@ -2113,6 +2266,7 @@ export default function App() {
     setPlotFigures(previous => [...previous, figure])
     setVisiblePanels(p => (p.output ? p : { ...p, output: true }))
     setDisplaySurface('plot')
+    setGroupTab('display')
   }
 
   const addPlotImage = (dataUri: unknown) => {
@@ -2134,6 +2288,7 @@ export default function App() {
     // The Display pane only exists while the Console Output panel is on screen.
     setVisiblePanels(p => (p.output ? p : { ...p, output: true }))
     setDisplaySurface('stdctx')
+    setGroupTab('display')
     canvasPaneRef.current?.clear()
     // The canvas must own focus for stdctx.check_key() to see arrow keys.
     // Not if the program has already asked for input (see inputOwnsFocus).
@@ -2229,6 +2384,10 @@ export default function App() {
     if (!svg) return
     setVisiblePanels(p => (p.output ? p : { ...p, output: true }))
     setDisplaySurface('turtle')
+    // The first frame of a run brings the Display tab forward; later frames
+    // leave the tab alone, or a student stepping in the Code tab would be
+    // dragged away from it on every line that moves the turtle.
+    if (turtleSvgHistoryRef.current.length === 0) setGroupTab('display')
     addToTurtleHistory(svg)
   }
 
@@ -2386,7 +2545,7 @@ export default function App() {
     }
     // A run that ended normally has already restored the layout itself; this
     // covers navigating away from one that was still on screen.
-    if (isRunPresentationModeRef.current) restoreRunPresentationMode()
+    if (isRunPresentationModeRef.current) restoreRunPresentationMode({ release: true })
     return true
   }
 
@@ -2457,8 +2616,8 @@ export default function App() {
       if (loadId !== challengeLoadIdRef.current) return
       if (!clearEditorForSwitch()) return
       // Turning to an activity shows its code (or its Parsons puzzle), even if
-      // the editor was folded away while the last one ran.
-      setEditorCollapsed(false)
+      // the editor was folded, or tabbed, away while the last one ran.
+      revealEditor()
       setEditorTab('starter')
       solutionPathRef.current = challenge.sol?.file ?? null
       setActiveBookChallenge(challenge)
@@ -3421,10 +3580,17 @@ export default function App() {
 
     workerRunModeRef.current = choice
     workerStartModeRef.current = choice
+    // A run needs its console, so the full-screen editor gives way.
+    setIsEditorFullScreen(false)
+    // Stepping is done in the code; a plain run is watched in the console.
+    setGroupTab(choice === 'run' ? 'console' : 'editor')
     // Capture runs stay in the editor (no fullscreen console) so the teacher can
     // immediately review the captured test.
     if (choice === 'run' && !captureRunRef.current) {
       enterRunPresentationMode(isSvgTurtleRun ? 'turtle-svg' : 'console')
+    } else if (runViewHeldRef.current) {
+      // Debugging from a held run view needs the editor back.
+      restoreRunPresentationMode({ release: true })
     }
 
     resetExecutionState()
@@ -3546,6 +3712,7 @@ export default function App() {
           // condition (if any) held, so trust its verdict rather than re-checking.
           if (data.isBreakpoint) {
             workerRunModeRef.current = 'trace'
+            setGroupTab('editor')
             setCurrentLine(data.line); setCurrentFunc(data.func); setCurrentClass(data.cls || '')
             if (data.state && data.state !== '{}') {
               try { setSimState(JSON.parse(data.state)) } catch { /* ignore */ }
@@ -3739,6 +3906,8 @@ export default function App() {
     const runUsesFixedInputs = appSettings.useFixedInputs
     // Show the console, not the Inputs tab, exactly as a worker run does.
     setConsoleTab('console')
+    setIsEditorFullScreen(false)
+    setGroupTab('console')
     enterRunPresentationMode(
       shouldRunPygame ? 'pygame'
       : shouldRunTurtleCanvas ? 'turtle-canvas'
@@ -4302,6 +4471,76 @@ ${runProgramPython('exec(code_obj, globals())')}
     </div>
   )
 
+  // ── Layout of the central column ──────────────────────────────────────────
+  const PANEL_CARD = 'bg-slate-800 rounded-lg shadow border border-slate-700'
+  /**
+   * A panel's box while the tab group is on screen: the one panel left out of
+   * the group goes first at the column's usual split, the chosen tab fills the
+   * rest, and the other tabs are hidden (never unmounted). `order` does the
+   * placing, which is why the output column's wrappers become `contents` —
+   * their console and display boxes then sit in the column beside the editor.
+   */
+  const groupedBox = (slot: GroupSlot): { className: string; style?: React.CSSProperties } => {
+    if (slot === 'hidden' || slot === null) return { className: 'hidden' }
+    const base = `${PANEL_CARD} flex flex-col overflow-hidden min-h-0 min-w-0`
+    if (slot === 'tab') return { className: `${base} flex-1`, style: { order: 3 } }
+    return {
+      className: `${base} flex-shrink-0`,
+      style: viewMode === 'developer'
+        ? { order: 1, width: `calc(${leftWidth}% - 6px)` }
+        : { order: 1, height: `calc(${centerVerticalSplit}% - 3px)` },
+    }
+  }
+  const tabStrip = activeGroupTab && (
+    <PanelTabStrip tabs={groupedPanels} active={activeGroupTab} onSelect={setGroupTab} />
+  )
+  const editorBox = isEditorFullScreen
+    ? { className: `${PANEL_CARD} flex flex-col overflow-hidden flex-1 min-h-0 min-w-0`, style: undefined }
+    : editorSlot !== null
+      ? groupedBox(editorSlot)
+      : {
+        className: `${PANEL_CARD} flex flex-col overflow-hidden ${isOutputHeaderOnly ? 'flex-1 min-h-0' : 'flex-shrink-0'}`,
+        style: viewMode === 'minimal'
+          ? (isEditorCollapsed || isOutputHeaderOnly
+            ? { width: '100%' }
+            : { height: visiblePanels.output ? `calc(${centerVerticalSplit}% - 3px)` : '100%', width: '100%' })
+          : { width: hasRightCol ? `calc(${leftWidth}% - 6px)` : '100%' },
+      }
+
+  // ── Keyboard shortcuts ───────────────────────────────────────────────────
+  // Exactly when the step buttons are on screen and enabled.
+  const isPausedInDebugger = isRunning && activeRuntime === 'trace-worker' && currentLine > 0
+    && !isConsolePresentationMode && inputRequest === null
+  shortcutStateRef.current = { isRunning: isRunning || isCodeSourceLocked, isPaused: isPausedInDebugger }
+  shortcutHandlerRef.current = (action: ShortcutAction) => {
+    switch (action.kind) {
+      case 'start':
+        // A shortcut is a choice in the Debug / Run / Trace menu too.
+        setRunModeChoice(action.mode)
+        setIsRunDropdownOpen(false)
+        if (selectedRuntime === 'trace-worker') {
+          if (hasCode && hasSab) void startTraceWorker(action.mode)
+        } else if (hasCode) {
+          void startMainThreadRun()
+        }
+        break
+      case 'step':
+        sendTraceCommand(
+          action.step === 'into' ? TRACE_CMD_STEP_INTO
+          : action.step === 'over' ? TRACE_CMD_STEP_OVER
+          : action.step === 'out' ? TRACE_CMD_STEP_OUT_BLOCK
+          : TRACE_CMD_CONTINUE,
+        )
+        break
+      case 'stop':
+        forceStop()
+        break
+      case 'toggle-editor-full-screen':
+        toggleEditorFullScreen()
+        break
+    }
+  }
+
   return (
     <div className="h-screen w-screen flex flex-col overflow-hidden text-sm">
       {/* sys.stdaud playback target — always mounted so a clip survives layout changes */}
@@ -4322,14 +4561,16 @@ ${runProgramPython('exec(code_obj, globals())')}
           <PanelVisibilityMenu menuRef={panelMenuRef} isOpen={isPanelMenuOpen}
             onToggleOpen={() => { setIsLearningMenuOpen(false); setIsQuickSettingsOpen(false); setIsPanelMenuOpen(o => !o) }}
             panelOptions={PANEL_OPTIONS} visiblePanels={visiblePanels} onTogglePanel={togglePanelVisibility}
-            buttonHoverClass="hover:border-emerald-400" checkboxAccent="#34d399" disabled={isRunPresentationMode}
+            buttonHoverClass="hover:border-emerald-400" checkboxAccent="#34d399" disabled={isRunLayout}
             onRestoreDefaults={handleRestoreDefaults}
             savedLayouts={savedLayouts}
             onSaveLayout={handleSaveLayout}
             onRestoreLayout={handleRestoreLayout}
             onDeleteLayout={handleDeleteLayout}
             viewMode={viewMode}
-            onSelectViewMode={handleSelectViewMode} />
+            onSelectViewMode={handleSelectViewMode}
+            onOpenTabGroup={() => { setIsPanelMenuOpen(false); setIsEditorFullScreen(false); setIsTabGroupDialogOpen(true) }}
+            tabGroupSummary={describeTabGroup(tabGroup)} />
           <div ref={quickSettingsRef} className="relative">
             <button type="button" title="Settings"
               onClick={() => { setIsLearningMenuOpen(false); setIsPanelMenuOpen(false); setIsQuickSettingsOpen(o => !o) }}
@@ -4395,7 +4636,7 @@ ${runProgramPython('exec(code_obj, globals())')}
                   type="button"
                   onClick={() => setIsRunDropdownOpen(o => !o)}
                   disabled={!hasCode || !hasSab}
-                  title="Choose run mode"
+                  title="Choose run mode (F5 Debug · Ctrl+F5 Run · Ctrl+Shift+F5 Trace)"
                   className={`rounded-r border-l border-white/20 px-2 py-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-white ${
                     runModeChoice === 'trace' ? 'bg-emerald-600 hover:bg-emerald-500' :
                     runModeChoice === 'run'   ? 'bg-sky-600 hover:bg-sky-500' :
@@ -4407,24 +4648,35 @@ ${runProgramPython('exec(code_obj, globals())')}
                   </svg>
                 </button>
                 {isRunDropdownOpen && (
-                  <div className="absolute right-0 top-full mt-1 z-50 w-52 rounded-lg border border-slate-600 bg-slate-800 shadow-xl py-1">
+                  <div className="absolute right-0 top-full mt-1 z-50 w-60 rounded-lg border border-slate-600 bg-slate-800 shadow-xl py-1">
                     {([
-                      { key: 'debug' as const, label: 'Debug', desc: 'Run here and pause at enabled breakpoints', color: 'text-violet-300' },
-                      { key: 'run'   as const, label: 'Run',   desc: 'Run without stopping',  color: 'text-sky-300' },
-                      { key: 'trace' as const, label: 'Trace', desc: 'Pause on the first line, then step through', color: 'text-emerald-300' },
-                    ] as Array<{ key: WorkerRunMode; label: string; desc: string; color: string }>).map(({ key, label, desc, color }) => (
-                      <button
-                        key={key}
-                        type="button"
-                        onClick={() => { setRunModeChoice(key); setIsRunDropdownOpen(false); void startTraceWorker(key) }}
-                        className="w-full px-3 py-2.5 text-left transition-colors hover:bg-slate-700"
-                      >
-                        <div className={`font-semibold text-sm flex items-center gap-1.5 ${runModeChoice === key ? color : 'text-slate-200'}`}>
-                          {runModeChoice === key && <span className="text-[10px]">✓</span>}
-                          {label}
-                        </div>
-                        <div className="text-[11px] text-slate-500 mt-0.5">{desc}</div>
-                      </button>
+                      { key: 'debug' as const, label: 'Debug', desc: 'Run here and pause at enabled breakpoints', color: 'text-violet-300', keys: 'F5' },
+                      { key: 'trace' as const, label: 'Trace', desc: 'Pause on the first line, then step through', color: 'text-emerald-300', keys: 'Ctrl+Shift+F5' },
+                      { key: 'run'   as const, label: 'Run',   desc: 'Run without stopping',  color: 'text-sky-300', keys: 'Ctrl+F5' },
+                    ] as Array<{ key: WorkerRunMode; label: string; desc: string; color: string; keys: string }>).map(({ key, label, desc, color, keys }) => (
+                      <div key={key}>
+                        <button
+                          type="button"
+                          onClick={() => { setRunModeChoice(key); setIsRunDropdownOpen(false); void startTraceWorker(key) }}
+                          className="w-full px-3 py-2.5 text-left transition-colors hover:bg-slate-700"
+                        >
+                          <div className={`font-semibold text-sm flex items-center gap-1.5 ${runModeChoice === key ? color : 'text-slate-200'}`}>
+                            {runModeChoice === key && <span className="text-[10px]">✓</span>}
+                            {label}
+                            <kbd className="ml-auto font-sans text-[10px] font-normal text-slate-500">{keys}</kbd>
+                          </div>
+                          <div className="text-[11px] text-slate-500 mt-0.5">{desc}</div>
+                        </button>
+                        {/* A setting of Run's, not a way to start it: ticking it leaves the menu open. */}
+                        {key === 'run' && (
+                          <label className="flex cursor-pointer items-start gap-2 px-3 pb-2.5 pl-6 text-[11px] text-slate-400 hover:text-slate-200">
+                            <input type="checkbox" checked={appSettings.stayOnRunView}
+                              onChange={() => setAppSettings(prev => ({ ...prev, stayOnRunView: !prev.stayOnRunView }))}
+                              className="mt-0.5 h-3.5 w-3.5 rounded border-slate-500 bg-slate-900" style={{ accentColor: '#38bdf8' }} />
+                            Stay on run view when the program ends
+                          </label>
+                        )}
+                      </div>
                     ))}
                     {isBookEditMode && editorTab === 'solution' && activeBookChallenge && (
                       <>
@@ -4481,7 +4733,7 @@ ${runProgramPython('exec(code_obj, globals())')}
                 Over
               </button>
               <button onClick={() => sendTraceCommand(TRACE_CMD_STEP_OUT_BLOCK)} disabled={inputRequest !== null}
-                title="Step Out"
+                title="Step Out (Shift+F11)"
                 className="bg-cyan-700 hover:bg-cyan-600 text-white px-4 py-2 rounded font-semibold transition-colors flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed">
                 {/* Step Out: arrow going up and out */}
                 <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -4500,7 +4752,7 @@ ${runProgramPython('exec(code_obj, globals())')}
                 </svg>
                 Continue
               </button>
-              <button onClick={forceStop} className="bg-red-600 hover:bg-red-500 text-white px-4 py-2 rounded font-semibold transition-colors">Stop</button>
+              <button onClick={forceStop} title="Stop (Shift+F5)" className="bg-red-600 hover:bg-red-500 text-white px-4 py-2 rounded font-semibold transition-colors">Stop</button>
             </>
           ) : (activeRuntime === 'trace-worker' && (isConsolePresentationMode || currentLine <= 0)) ? (
             <div className="flex items-center overflow-hidden rounded border border-sky-500/70 bg-sky-900/30 text-sm font-semibold text-sky-100">
@@ -4648,6 +4900,36 @@ ${runProgramPython('exec(code_obj, globals())')}
         </div>
       </dialog>
 
+      {/* A Run that ended with "Stay on run view" ticked: its layout stays until
+          the student picks where to go back to. */}
+      {runViewHeld && (
+        <div className="flex-shrink-0 flex flex-wrap items-center gap-2 border-b border-emerald-500/40 bg-emerald-500/10 px-5 py-2 text-sm text-emerald-300"
+          role="region" aria-label="Return to editor view">
+          <span className="mr-1 font-semibold">Program ended. Return to editor view:</span>
+          {([
+            { label: 'Previous', title: 'The layout from before the run', onClick: () => restoreRunPresentationMode({ release: true }) },
+            { label: 'Minimal', title: 'The Minimal view', onClick: () => handleSelectViewMode('minimal') },
+            { label: 'Developer', title: 'The Developer view', onClick: () => handleSelectViewMode('developer') },
+          ]).map(({ label, title, onClick }) => (
+            <button key={label} type="button" title={title} onClick={onClick}
+              className="rounded border border-emerald-500/50 px-3 py-0.5 text-xs font-semibold text-emerald-300 transition-colors hover:bg-emerald-500/20">
+              {label}
+            </button>
+          ))}
+          {savedLayouts.length > 0 && (
+            <select value="" aria-label="Return to a saved layout"
+              onChange={e => {
+                const layout = savedLayouts.find(l => l.name === e.target.value)
+                if (layout) handleRestoreLayout(layout)
+              }}
+              className="rounded border border-emerald-500/50 bg-slate-800 px-2 py-0.5 text-xs text-slate-300 cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-500">
+              <option value="" disabled>…or choose a saved layout</option>
+              {savedLayouts.map(layout => <option key={layout.name} value={layout.name}>{layout.name}</option>)}
+            </select>
+          )}
+        </div>
+      )}
+
       {/* Main Layout */}
       <div ref={mainContainerRef} className="flex-1 flex overflow-hidden p-2 gap-[3px]">
 
@@ -4736,6 +5018,8 @@ ${runProgramPython('exec(code_obj, globals())')}
                             onFilesystemCreated={id => void handleFilesystemCreated(id)}
                             onCwdChange={setCurrentWorkingDir}
                             onOpenFile={entry => void onOpenVFSFile(entry)}
+                            onBeforeNewFile={handleBeforeNewFile}
+                            onOpenNewFile={entry => void onOpenVFSFile(entry, { unsavedSettled: true })}
                             onPreviewHtml={entry => void handlePreviewHtml(entry)}
                             onError={msg => setCodeStatus(msg)}
                             onBookOpen={url => void handleBookOpen(url)}
@@ -4891,12 +5175,7 @@ ${runProgramPython('exec(code_obj, globals())')}
 
         {/* Code Editor */}
         {visiblePanels.code && (
-          <div className={`bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden ${isOutputHeaderOnly ? 'flex-1 min-h-0' : 'flex-shrink-0'}`}
-            style={viewMode === 'minimal'
-              ? (isEditorCollapsed || isOutputHeaderOnly
-                ? { width: '100%' }
-                : { height: visiblePanels.output ? `calc(${centerVerticalSplit}% - 3px)` : '100%', width: '100%' })
-              : { width: hasRightCol ? `calc(${leftWidth}% - 6px)` : '100%' }}>
+          <div className={editorBox.className} style={editorBox.style}>
             {/* Code editor area */}
             <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
               <input ref={fileInputRef} type="file" className="hidden" aria-hidden="true" onChange={handleCodeFileChange} />
@@ -4905,6 +5184,7 @@ ${runProgramPython('exec(code_obj, globals())')}
                 <div className="flex justify-between items-center gap-3">
                   <div className="min-w-0 flex items-baseline gap-2">
                     <div className="font-bold uppercase tracking-wider flex-shrink-0 flex items-center gap-1.5">
+                      {editorSlot === 'tab' && tabStrip}
                       {openFilePath && (
                         <button type="button" onClick={() => void handleCloseFile()}
                           title="Close file" aria-label="Close file"
@@ -4915,7 +5195,10 @@ ${runProgramPython('exec(code_obj, globals())')}
                         </button>
                       )}
                       {isUnsaved && <span className="inline-block w-2 h-2 rounded-full bg-amber-400 flex-shrink-0" title="Unsaved changes" />}
-                      {isParsonsChallenge ? 'Parsons Problem' : `Code Editor${openFilePath ? ` (${codeFileName})` : ''}`}
+                      {isParsonsChallenge ? 'Parsons Problem'
+                        // The Code tab already says what the panel is.
+                        : editorSlot === 'tab' ? (openFilePath ? codeFileName : '')
+                        : `Code Editor${openFilePath ? ` (${codeFileName})` : ''}`}
                     </div>
                     <div className="normal-case tracking-normal text-[11px] text-slate-500 truncate">
                       {isParsonsChallenge
@@ -4935,7 +5218,7 @@ ${runProgramPython('exec(code_obj, globals())')}
                       title="Editor font size"
                       className="bg-slate-800 border border-slate-600 rounded text-[11px] text-slate-300 px-1.5 py-0.5 focus:outline-none hover:border-slate-400 cursor-pointer"
                     >
-                      {[8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,28,32,36,40].map(sz => (
+                      {EDITOR_FONT_SIZES.map(sz => (
                         <option key={sz} value={sz}>{sz}px</option>
                       ))}
                     </select>
@@ -4983,6 +5266,18 @@ ${runProgramPython('exec(code_obj, globals())')}
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2zM17 21v-8H7v8M7 3v5h8" />
                       </svg>
                     </IconButton>
+                    )}
+                    {!isRunning && (
+                      <button type="button" onClick={toggleEditorFullScreen}
+                        title={isEditorFullScreen ? 'Exit full-screen editor (F11)' : 'Full-screen editor (F11)'}
+                        aria-label={isEditorFullScreen ? 'Exit full-screen editor' : 'Full-screen editor'}
+                        aria-pressed={isEditorFullScreen}
+                        className={`p-0.5 transition-colors ${isEditorFullScreen ? 'text-emerald-300 hover:text-emerald-200' : 'text-slate-400 hover:text-slate-200'}`}>
+                        <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2"
+                            d={isEditorFullScreen ? 'M8 4v4H4M16 4v4h4M8 20v-4H4M16 20v-4h4' : 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5'} />
+                        </svg>
+                      </button>
                     )}
                     {canCollapseEditor && (
                       <FoldButton collapsed={isEditorCollapsed} towards="up" label="editor" onToggle={toggleEditorCollapsed} />
@@ -5074,40 +5369,61 @@ ${runProgramPython('exec(code_obj, globals())')}
         )}
 
         {/* Resize handle: code ↔ right column (developer) or code ↔ console row (minimal) */}
-        {viewMode === 'developer' && visiblePanels.code && hasRightCol && (
+        {viewMode === 'developer' && visiblePanels.code && hasRightCol && !isTabGrouped && !isEditorFullScreen && (
           <div className="resize-handle-col"
             onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'col-main', startX: e.clientX, startY: e.clientY, startVal: leftWidth }; document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none' }}>
             <div className="resize-bar" style={{ width: '3px', height: '48px' }} />
           </div>
         )}
-        {viewMode === 'minimal' && visiblePanels.code && visiblePanels.output && !isEditorCollapsed && !isOutputHeaderOnly && (
+        {viewMode === 'minimal' && visiblePanels.code && visiblePanels.output && !isEditorCollapsed && !isOutputHeaderOnly && !isTabGrouped && !isEditorFullScreen && (
           <div className="resize-handle-row"
             onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'row-center', startX: e.clientX, startY: e.clientY, startVal: centerVerticalSplit }; document.body.style.cursor = 'row-resize'; document.body.style.userSelect = 'none' }}>
             <div className="resize-bar" style={{ height: '3px', width: '48px' }} />
           </div>
         )}
 
+        {/* Resize handle: the panel left out of the tab group ↔ the group. It
+            drives the same split as the handles above. */}
+        {isTabGrouped && hasGroupLead && (viewMode === 'developer' ? (
+          <div className="resize-handle-col" style={{ order: 2 }}
+            onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'col-main', startX: e.clientX, startY: e.clientY, startVal: leftWidth }; document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none' }}>
+            <div className="resize-bar" style={{ width: '3px', height: '48px' }} />
+          </div>
+        ) : (
+          <div className="resize-handle-row" style={{ order: 2 }}
+            onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'row-center', startX: e.clientX, startY: e.clientY, startVal: centerVerticalSplit }; document.body.style.cursor = 'row-resize'; document.body.style.userSelect = 'none' }}>
+            <div className="resize-bar" style={{ height: '3px', width: '48px' }} />
+          </div>
+        ))}
+
         {/* RIGHT COLUMN (developer) — Console Output (top) + Structure (bottom).
             In minimal mode, the right column is just the Console rendered directly inside the flex-col center. */}
         {(viewMode === 'developer' ? hasRightCol : visiblePanels.output) && (
           <div ref={rightColRef}
-            className={`${outputHasSplitHeight || isOutputHeaderOnly ? 'flex-shrink-0' : 'flex-1'} bg-slate-800 rounded-lg shadow border border-slate-700 flex flex-col overflow-hidden min-w-0`}
-            style={outputHasSplitHeight
-              ? { height: `calc(${100 - centerVerticalSplit}% - 3px)`, width: '100%' }
-              : isOutputHeaderOnly ? { width: '100%' } : undefined}>
+            // Full screen hides the output rather than unmounting it, so the
+            // console's transcript and the drawing are there to come back to.
+            className={isEditorFullScreen ? 'hidden' : isTabGrouped ? 'contents'
+              : `${outputHasSplitHeight || isOutputHeaderOnly ? 'flex-shrink-0' : 'flex-1'} ${PANEL_CARD} flex flex-col overflow-hidden min-w-0`}
+            style={isEditorFullScreen || isTabGrouped ? undefined
+              : outputHasSplitHeight
+                ? { height: `calc(${100 - centerVerticalSplit}% - 3px)`, width: '100%' }
+                : isOutputHeaderOnly ? { width: '100%' } : undefined}>
 
             {/* OUTPUT REGION — Console (top) + Display (bottom), one draggable split.
                 Every kind of visual output lands in the Display pane, so the console
                 and the drawing are always on screen together. */}
             {visiblePanels.output && (
-              <div ref={outputPaneRef} className="flex flex-col overflow-hidden min-h-0 flex-shrink-0"
-                style={{ height: isOutputHeaderOnly ? undefined : '100%' }}>
+              <div ref={outputPaneRef} className={isTabGrouped ? 'contents' : 'flex flex-col overflow-hidden min-h-0 flex-shrink-0'}
+                style={isTabGrouped ? undefined : { height: isOutputHeaderOnly ? undefined : '100%' }}>
 
               {/* Folded, the console shrinks to its header: its tabs unmount and
                   the terminal (which holds its buffer) is only hidden. */}
-              <div className="flex flex-col overflow-hidden min-h-0 flex-shrink-0"
-                style={{ height: isConsoleCollapsed ? undefined : showDisplayPane ? `calc(${effectiveDisplaySplit}% - 3px)` : '100%' }}>
+              <div className={consoleSlot !== null ? groupedBox(consoleSlot).className : 'flex flex-col overflow-hidden min-h-0 flex-shrink-0'}
+                style={consoleSlot !== null ? groupedBox(consoleSlot).style
+                  : { height: isConsoleCollapsed ? undefined : showDisplayPane ? `calc(${effectiveDisplaySplit}% - 3px)` : '100%' }}>
                 <div className="bg-slate-900 py-2 px-3 border-b border-slate-700 flex-shrink-0 flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                  {consoleSlot === 'tab' && tabStrip}
                   {hasConsoleTabs ? (
                     <div className="flex rounded overflow-hidden border border-slate-700 text-[11px]" role="tablist" aria-label="Console views" onKeyDown={handleConsoleTabKeyDown}>
                       <button id="console-tab-console" type="button" role="tab" aria-selected={consoleTab === 'console'} aria-controls="console-panel-console" tabIndex={consoleTab === 'console' ? 0 : -1} onClick={() => setConsoleTab('console')}
@@ -5133,9 +5449,10 @@ ${runProgramPython('exec(code_obj, globals())')}
                         </button>
                       )}
                     </div>
-                  ) : (
+                  ) : consoleSlot !== 'tab' && (
                     <div className="font-bold uppercase tracking-wider text-xs text-teal-400">Console Output</div>
                   )}
+                  </div>
                   <div className="flex items-center gap-1.5">
                     {(consoleTab === 'console') && (
                       <>
@@ -5266,7 +5583,7 @@ ${runProgramPython('exec(code_obj, globals())')}
               </div>
 
               {/* Resize handle: console ↔ display */}
-              {showDisplayPane && !isConsoleCollapsed && (
+              {showDisplayPane && !isConsoleCollapsed && !isTabGrouped && (
                 <div className="resize-handle-row flex-shrink-0"
                   onMouseDown={e => { e.preventDefault(); resizeDragRef.current = { type: 'row-display', startX: e.clientX, startY: e.clientY, startVal: effectiveDisplaySplit }; document.body.style.cursor = 'row-resize'; document.body.style.userSelect = 'none' }}>
                   <div className="resize-bar" style={{ height: '3px', width: '48px' }} />
@@ -5275,8 +5592,10 @@ ${runProgramPython('exec(code_obj, globals())')}
 
               {/* Display pane — stays mounted even with nothing to show, so a run can
                   start drawing into the canvases before React reveals the pane. */}
-              <div className={showDisplayPane ? 'flex flex-1 flex-col min-h-0 overflow-hidden' : 'hidden'}>
+              <div className={displaySlot !== null ? groupedBox(displaySlot).className : showDisplayPane ? 'flex flex-1 flex-col min-h-0 overflow-hidden' : 'hidden'}
+                style={displaySlot !== null ? groupedBox(displaySlot).style : undefined}>
                 <DisplayPane
+                  headerTabs={displaySlot === 'tab' ? tabStrip : undefined}
                   availableSurfaces={availableDisplaySurfaces}
                   activeSurface={activeDisplaySurface}
                   plotFigures={plotFigures}
@@ -5457,6 +5776,8 @@ ${runProgramPython('exec(code_obj, globals())')}
         )}
       </div>
 
+      <TabGroupDialog isOpen={isTabGroupDialogOpen} onClose={closeTabGroupDialog}
+        tabGroup={tabGroup} onChange={setTabGroup} viewMode={viewMode} />
       <SettingsDialog isOpen={isSettingsOpen} settings={appSettings} onClose={() => setIsSettingsOpen(false)} onSettingsChange={setAppSettings} />
       <ExecutionModeDialog isOpen={isExecutionDialogOpen} onClose={closeExecutionDialog}
         runtimePreference={runtimePreference} selectedRuntime={selectedRuntime}
