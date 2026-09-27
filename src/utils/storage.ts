@@ -1,4 +1,5 @@
 import { THEME_STORAGE_KEY, NOTES_STORAGE_KEY, SETTINGS_STORAGE_KEY } from '../constants'
+import { NO_TAB_GROUP, sanitiseTabGroup } from './tabGroup'
 import type { Theme, AppSettings, BookNavState, DisplayZoom, InputMode, NamedLayout, LayoutPrefs, PanelVisibility, ViewMode } from '../types'
 import type { ParsonsArrangement } from './parsons'
 
@@ -136,9 +137,10 @@ export const getStoredSettings = (): AppSettings => {
       inputMode: VALID_INPUT_MODES.includes(parsed.inputMode) ? (parsed.inputMode as InputMode) : 'inline-console',
       useFixedInputs: parsed.useFixedInputs === true,
       inlineTraceValues: parsed.inlineTraceValues !== false,
+      stayOnRunView: parsed.stayOnRunView === true,
     }
   } catch {
-    return { turtleMode: 'pyo-js-turtle', inputMode: 'inline-console', useFixedInputs: false, inlineTraceValues: true }
+    return { turtleMode: 'pyo-js-turtle', inputMode: 'inline-console', useFixedInputs: false, inlineTraceValues: true, stayOnRunView: false }
   }
 }
 
@@ -277,6 +279,7 @@ export const DEFAULT_LAYOUT_PREFS: LayoutPrefs = {
   presentationDisplaySplit: DEFAULT_PRESENTATION_DISPLAY_SPLIT,
   editorCollapsed: false,
   consoleCollapsed: false,
+  tabGroup: { ...NO_TAB_GROUP },
 }
 
 const sanitiseSplit = (raw: unknown, fallback: number): number => {
@@ -303,7 +306,7 @@ const sanitisePanels = (raw: unknown): PanelVisibility | null => {
 export const getStoredLayoutPrefs = (): LayoutPrefs => {
   try {
     const raw = localStorage.getItem(LAYOUT_PREFS_KEY)
-    if (!raw) return { ...DEFAULT_LAYOUT_PREFS, visiblePanels: { ...DEFAULT_LAYOUT_PREFS.visiblePanels } }
+    if (!raw) return { ...DEFAULT_LAYOUT_PREFS, visiblePanels: { ...DEFAULT_LAYOUT_PREFS.visiblePanels }, tabGroup: { ...NO_TAB_GROUP } }
     const parsed = JSON.parse(raw)
     const viewMode: ViewMode = parsed?.viewMode === 'developer' ? 'developer' : 'minimal'
     const panels = sanitisePanels(parsed?.visiblePanels) ?? defaultPanelsForView(viewMode)
@@ -317,9 +320,10 @@ export const getStoredLayoutPrefs = (): LayoutPrefs => {
       presentationDisplaySplit: sanitiseSplit(parsed?.presentationDisplaySplit, DEFAULT_PRESENTATION_DISPLAY_SPLIT),
       editorCollapsed: parsed?.editorCollapsed === true,
       consoleCollapsed: parsed?.consoleCollapsed === true,
+      tabGroup: sanitiseTabGroup(parsed?.tabGroup),
     }
   } catch {
-    return { ...DEFAULT_LAYOUT_PREFS, visiblePanels: { ...DEFAULT_LAYOUT_PREFS.visiblePanels } }
+    return { ...DEFAULT_LAYOUT_PREFS, visiblePanels: { ...DEFAULT_LAYOUT_PREFS.visiblePanels }, tabGroup: { ...NO_TAB_GROUP } }
   }
 }
 

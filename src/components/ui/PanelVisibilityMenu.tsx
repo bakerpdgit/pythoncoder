@@ -24,13 +24,16 @@ interface Props {
   onDeleteLayout?: (name: string) => void
   viewMode?: ViewMode
   onSelectViewMode?: (mode: ViewMode) => void
+  /** Opens the Tab Group dialog; `tabGroupSummary` names what is grouped now. */
+  onOpenTabGroup?: () => void
+  tabGroupSummary?: string
 }
 
 export const PanelVisibilityMenu = ({
   menuRef, isOpen, onToggleOpen, panelOptions, visiblePanels, onTogglePanel,
   buttonHoverClass = 'hover:border-emerald-400', checkboxAccent = '#34d399', disabled = false,
   onRestoreDefaults, savedLayouts = [], onSaveLayout, onRestoreLayout, onDeleteLayout,
-  viewMode, onSelectViewMode,
+  viewMode, onSelectViewMode, onOpenTabGroup, tabGroupSummary,
 }: Props) => {
   const visibleCount = panelOptions.filter(({ key }) => visiblePanels[key as keyof PanelVisibility]).length
   const hasLayoutActions = Boolean(onRestoreDefaults || onSaveLayout)
@@ -129,6 +132,18 @@ export const PanelVisibilityMenu = ({
                     <span className="text-sm font-medium text-slate-200">{label}</span>
                   </button>
                 ))}
+                {onOpenTabGroup && (
+                  <button type="button" onClick={onOpenTabGroup}
+                    className="w-full flex items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-slate-900/70">
+                    <span className="flex h-4 w-4 flex-shrink-0 items-center justify-center text-slate-400">
+                      <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 7h6V4H4v16h16V7h-6M10 4h4v3" />
+                      </svg>
+                    </span>
+                    <span className="text-sm font-medium text-slate-200">Tab group…</span>
+                    {tabGroupSummary && <span className="ml-auto truncate text-[11px] text-slate-500">{tabGroupSummary}</span>}
+                  </button>
+                )}
               </div>
               <div className="my-1.5 border-t border-slate-700" />
             </>

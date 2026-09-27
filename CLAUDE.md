@@ -52,7 +52,10 @@ Three layers, all of which should pass before a change is called done:
   each engine is sent the COEP it can honour. `tkinter.spec.ts` drives tkinter
   programs (a form and message box, canvas keys, ttk, a GUI in an imported
   module, an `update()` game loop, `tkraise` pages, two `Tk()`s in a row, the
-  no-JSPI fallback) and runs every page of the shipped Tkinter book. It sets the
+  no-JSPI fallback) and runs every page of the shipped Tkinter book.
+  `workflow.spec.ts` covers the keyboard shortcuts (font size, F5 / Ctrl+F5 /
+  Ctrl+Shift+F5, F11), Stay on run view, New file opening in the editor, and
+  the tab group. `tkinter.spec.ts` sets the
   editor through Monaco's API rather than `insertText`, which re-indents every
   line after a colon, and reads the console through its copy button, because a
   finished run shrinks the console below what the program printed. Shared helpers live in
@@ -136,6 +139,8 @@ src/
     mainThreadInput.ts        # input() on the main thread: JSPI, pop-up fallback
     isolationStatus.ts        # Why a tab is not cross-origin isolated, in words
     storage.ts                # localStorage helpers (theme, notes, fixed inputs, layout)
+    shortcuts.ts              # F5 / Ctrl+F5 / Ctrl+Shift+F5 / F10 / F11 → an action
+    tabGroup.ts               # the central column's tab group (pure layout rules)
     versionCheck.ts           # Background poll for new deployed versions
   components/
     InspectorPane.tsx         # Variable inspector with breadcrumb navigation
@@ -157,6 +162,7 @@ src/
     ui/
       IconButton.tsx  FoldButton.tsx  ThemeToggleButton.tsx  ExecutionModeDialog.tsx
       PanelVisibilityMenu.tsx  DiagramFontControls.tsx  SettingsDialog.tsx
+      TabGroupDialog.tsx  PanelTabStrip.tsx
     diagrams/
       diagramLayout.ts        # Layout algorithms for SVG diagrams
       HierarchyChart.tsx      # Function call hierarchy SVG
@@ -682,10 +688,12 @@ SharedArrayBuffer, Safari missing its header, or headers missing generally.
   only picks which run flag to raise.
 - **A run restores the layout the moment it ends** — worker `done`, worker
   `error`, forced stop, and the main-thread `finally` all call
-  `restoreRunPresentationMode()`. There is no "Return to editor" bar any more:
-  it depended on every one of those endings remembering to arm a `pendingRestore`
-  callback, and pygame and turtle runs (which end in the most places) kept
-  missing one, stranding the student in the full-screen layout.
+  `restoreRunPresentationMode()`. The old "Return to editor" bar depended on
+  every one of those endings remembering to arm a `pendingRestore` callback, and
+  pygame and turtle runs (which end in the most places) kept missing one,
+  stranding the student in the full-screen layout. The one exception is opt-in:
+  see *Stay on run view* below — and it still lives inside that single function,
+  so no ending can miss it.
 - Restoring always forces `visiblePanels.output` back on, snapshot or not,
   because the Display pane lives in that panel — a pygame window or turtle
   drawing must outlive the program that made it.
@@ -697,6 +705,107 @@ SharedArrayBuffer, Safari missing its header, or headers missing generally.
   `beginStdctxRun` and `beginMainThreadCanvasRun` each force `visiblePanels.output`
   true and select their surface. Without that, a debug run draws into a hidden
   panel and looks as though it did nothing.
+
+### Keyboard shortcuts
+
+- `utils/shortcuts.ts` (`resolveShortcut`, tested as a table) decides every
+  function key from the key and two facts: is a program running, and is the
+  debugger paused with the step buttons on screen and enabled.
+  **F5** Debug · **Ctrl+F5** Run · **Ctrl+Shift+F5** Trace · **Shift+F5** Stop ·
+  while paused **F5** Continue, **F10** Step Over, **F11** Step Into,
+  **Shift+F11** Step Out · otherwise **F11** toggles the full-screen editor.
+  F11 means Step Into only while paused, which is VS Code's convention and what
+  the step buttons' tooltips always said.
+- A shortcut that starts a run **is a choice in the Debug / Run / Trace menu**:
+  it sets `runModeChoice`, so the split button then offers the same mode.
+- One listener on `window`, **capture phase**, so the key arrives before Monaco
+  or the xterm console act on it. It always `preventDefault`s a key it claims —
+  even one with nothing to do right now (`swallow`) — because F5 is the
+  browser's reload and a student pressing it to run must never lose unsaved
+  code. With a modal open (`[aria-modal="true"]`, `dialog[open]`) the key is
+  still claimed but does nothing, which is why `DialogProvider` and
+  `SaveFileDialog` now carry `role="dialog" aria-modal="true"`.
+- The handler is re-pointed every render through `shortcutHandlerRef`, like
+  `saveCodeRef`, because the listener is installed once.
+- **Ctrl+Shift+> / <** size the editor font (a Monaco action, so inside the
+  editor), as in Python Sponge; the older Ctrl+Alt+Shift chord still works.
+  Monaco's own binding for those keys (in-place replace) gives way because an
+  action's keybinding is registered after the defaults. The steps are the
+  header dropdown's sizes (`EDITOR_FONT_SIZES`), so the dropdown always agrees.
+
+### The full-screen editor (F11)
+
+- `isEditorFullScreen` shows the editor alone. It is a render-time override,
+  not a change to `visiblePanels`, so leaving it needs no snapshot: the sidebars
+  unmount (they already do when toggled) but the output column is **hidden, not
+  unmounted**, so the console transcript and any drawing are still there on the
+  way back.
+- It gives way to anything that needs the rest of the screen: a run of any mode,
+  choosing a view or layout, toggling a panel, opening the Tab Group dialog.
+- F11 from a held run view (below) first releases it to the pre-run layout, so
+  the second F11 lands there rather than back on the run view.
+- A button beside the editor's fold control does the same for the mouse.
+
+### Stay on run view
+
+- The Run entry of the Debug / Run / Trace menu (now Debug · Trace · Run, so the
+  setting sits under Run) carries a checkbox, `appSettings.stayOnRunView`.
+  Ticking it leaves the menu open: it is a setting of Run's, not a way to start.
+- Ticked, `restoreRunPresentationMode()` at a run's ending keeps the run layout
+  and its snapshot and sets `runViewHeld`. A bar above the panels then offers
+  **Previous** (the snapshot), **Minimal**, **Developer**, and — only when the
+  student has any — a dropdown of saved layouts.
+- `restoreRunPresentationMode({ release: true })` always restores; the bar's
+  Previous, book navigation (`stopRunBeforeNavigating`) and a Debug/Trace start
+  use it. A new Run from the held view keeps the old snapshot, so Previous
+  still means the layout from before the first of them.
+- Choosing a view or layout drops the snapshot instead (`leaveTransientLayouts`).
+- While held, `isRunLayout` stays true: the presentation display split is kept
+  and the Panels menu stays disabled, as during the run itself.
+- The hold needs a snapshot, so it applies to exactly the runs that took over
+  the screen — every Run, and every main-thread run — never to Debug or Trace.
+
+### The tab group
+
+- **Tab group…** in the Panels menu (`TabGroupDialog`) ticks any of the central
+  column's Code editor, Console and Display into one tabbed panel. The group
+  always comes **last** in the column; a panel left out goes first. It is saved
+  in `LayoutPrefs` and `NamedLayout`, and **choosing Minimal or Developer**,
+  and **Restore defaults**, break it up.
+- A group needs **two members on screen** (`visibleTabGroup`). The Display pane
+  only exists once a program draws, and a Run's presentation layout hides the
+  editor, so with fewer than two the column simply lays out as usual — the tabs
+  come back by themselves when the second member does. A strip holding one tab
+  would only be a header.
+- **It is CSS, never a remount.** Each member keeps its place in the tree; the
+  output column's two wrappers become `display: contents`, so the console and
+  display boxes sit in the column beside the editor, and `order` places them:
+  the left-out panel (`lead`) at the column's usual split, a handle, then the
+  chosen tab filling the rest; other tabs are `hidden`. Monaco, the xterm
+  buffer and both canvases survive every tab switch and every change of group.
+  `groupSlot` (`utils/tabGroup.ts`) is the pure half and is tested.
+- Every grouped panel draws the same `PanelTabStrip` in its own header, and only
+  the chosen one is on screen, so the group reads as one panel while each
+  member keeps its own tools (font size, copy, zoom, sub-tabs).
+- Folding is off while grouped, as it is in full screen: the tabs already decide
+  who has the room.
+- **Something arriving brings its tab forward**, the tab-group form of the
+  fold rule above: `input()` → Console; a Run → Console, Debug/Trace → Code; a
+  breakpoint hit → Code; pygame/tkinter/stdctx starting, a chart, or a run's
+  first turtle frame → Display; opening a file or an activity → Code
+  (`revealEditor`). Later turtle frames deliberately do not, or a student
+  stepping in the Code tab would be pulled away on every line.
+
+### New file opens in the editor
+
+- **New file** in the File System panel asks about the editor's unsaved changes
+  first (Save / Don't save / Cancel — `handleBeforeNewFile`), then for a name,
+  then opens the new file. Only one file is ever open, deliberately: a second,
+  unsaved tab is too easily lost in a browser.
+- Uploads never do this — only New file, which is marked `isNewFile` on the
+  panel's pending entry. The name dialog refuses an existing file's name
+  (`refuseExistingFile`), because saving an empty new file over it would wipe
+  it, and the new file is typed by its own name rather than always as `.py`.
 
 ### Display zoom
 

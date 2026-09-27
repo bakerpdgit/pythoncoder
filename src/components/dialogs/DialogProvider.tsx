@@ -145,7 +145,7 @@ function DialogHost({ req, onDone }: { req: DialogReq; onDone: () => void }) {
 
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60" onMouseDown={cancel} onKeyDown={onKeyDown}>
-      <div className="bg-slate-800 border border-slate-600 rounded-lg shadow-2xl w-full max-w-sm mx-4 p-6"
+      <div role="dialog" aria-modal="true" aria-label={req.title || undefined} className="bg-slate-800 border border-slate-600 rounded-lg shadow-2xl w-full max-w-sm mx-4 p-6"
         onMouseDown={e => e.stopPropagation()}>
         {req.title && <div className="text-white text-sm font-bold mb-2">{req.title}</div>}
         <p className="text-slate-200 text-sm whitespace-pre-wrap">{req.message}</p>
