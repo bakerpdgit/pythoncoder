@@ -249,6 +249,15 @@ export default function App() {
   const [leftSidebarCollapsed, setLeftSidebarCollapsed] = useState<boolean>(initialLayoutPrefs.leftSidebarCollapsed)
   const [editorCollapsed, setEditorCollapsed] = useState<boolean>(initialLayoutPrefs.editorCollapsed)
   const [consoleCollapsed, setConsoleCollapsed] = useState<boolean>(initialLayoutPrefs.consoleCollapsed)
+  // The console folded for the run, not by the student: a program that draws
+  // before it prints gives the Display pane the room (see foldConsoleForDisplay).
+  // Never persisted — it belongs to one run.
+  const [consoleAutoFolded, setConsoleAutoFoldedState] = useState(false)
+  const consoleAutoFoldedRef = useRef(false)
+  // This run has written to the console itself (print, stderr, an error, input).
+  const runHasConsoleOutputRef = useRef(false)
+  // input() pulled the tab group from Display to Console; the next thing drawn pulls it back.
+  const displayTabAfterInputRef = useRef(false)
   // Panels of the central column sharing one tabbed panel, and the tab on show.
   const [tabGroup, setTabGroup] = useState<TabGroupPrefs>(() => ({ ...initialLayoutPrefs.tabGroup }))
   const [groupTab, setGroupTab] = useState<CenterPanel>('editor')
@@ -676,7 +685,8 @@ export default function App() {
   const canFold = !isTabGrouped && !isEditorFullScreen
   const canCollapseEditor = canFold && viewMode === 'minimal' && visiblePanels.code && visiblePanels.output
   const canCollapseConsole = canFold && visiblePanels.output && (showDisplayPane || canCollapseEditor)
-  const isConsoleCollapsed = canCollapseConsole && consoleCollapsed
+  // An automatic fold exists for the Display pane's sake, so it lapses without one.
+  const isConsoleCollapsed = canCollapseConsole && (consoleCollapsed || (consoleAutoFolded && showDisplayPane))
   // Only the output panel's header strip is left, so the editor takes the column.
   const isOutputHeaderOnly = isConsoleCollapsed && !showDisplayPane
   // Both folded with nothing below to fill the column: the editor stays open.
@@ -867,10 +877,23 @@ export default function App() {
 
   // A program waiting on input() must not be waiting behind a folded console,
   // or behind another tab of the tab group.
+  // Once answered, the Display tab comes back with the next thing drawn (see
+  // displayUpdated) — not on the answer itself, so whatever the program prints
+  // in reply is still on screen until it draws again.
   useEffect(() => {
     if (!inputRequest || appSettings.inputMode === 'popup-dialog') return
+    runHasConsoleOutputRef.current = true
     setConsoleCollapsed(false)
+    setConsoleAutoFolded(false)
+    if (isTabGrouped && activeGroupTab === 'display') displayTabAfterInputRef.current = true
     setGroupTab('console')
+    // The terminal focused itself while it was still folded or behind another
+    // tab, which a hidden element cannot take; once it is on screen, again.
+    if (appSettings.inputMode === 'inline-console') {
+      requestAnimationFrame(() => consoleTermRef.current?.focus())
+    }
+    // Only a new request moves anything; the tab group changing under a pending one must not.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [inputRequest, appSettings.inputMode])
 
   useEffect(() => startVersionPolling(() => setUpdateAvailable(true)), [])
@@ -1810,6 +1833,47 @@ export default function App() {
     }
   }
 
+  const setConsoleAutoFolded = (folded: boolean) => {
+    if (consoleAutoFoldedRef.current === folded) return
+    consoleAutoFoldedRef.current = folded
+    setConsoleAutoFoldedState(folded)
+  }
+
+  /**
+   * Output the program wrote itself — print, stderr, an error, an echoed input —
+   * as opposed to the app's own lines ([INFO] notes, [RUN FINISHED]).
+   *
+   * The first of a run opens the console, however it came to be folded: an
+   * error behind a folded header is an error the student never sees. Only the
+   * first, so a student who folds it again mid-run is not overruled on every print.
+   */
+  const appendProgramOutput = (text: string) => {
+    if (!runHasConsoleOutputRef.current) {
+      runHasConsoleOutputRef.current = true
+      setConsoleAutoFolded(false)
+      setConsoleCollapsed(false)
+    }
+    appendOutput(text)
+  }
+
+  /**
+   * A Display surface has just appeared for this run. If the program has not
+   * written to the console yet, fold it to its header so the drawing gets the
+   * room; appendProgramOutput opens it again the moment there is something to
+   * read. The tab group ignores folds, so there this does nothing.
+   */
+  const foldConsoleForDisplay = () => {
+    if (runHasConsoleOutputRef.current) return
+    setConsoleAutoFolded(true)
+  }
+
+  /** Something was drawn: if input() took the tab group away from Display, give it back. */
+  const displayUpdated = () => {
+    if (!displayTabAfterInputRef.current) return
+    displayTabAfterInputRef.current = false
+    setGroupTab('display')
+  }
+
   const clearConsole = () => {
     setOutputLog('')
     consoleTermRef.current?.clear()
@@ -1878,7 +1942,7 @@ export default function App() {
   }
 
   const toggleConsoleCollapsed = () => {
-    if (isConsoleCollapsed) { setConsoleCollapsed(false); return }
+    if (isConsoleCollapsed) { setConsoleCollapsed(false); setConsoleAutoFolded(false); return }
     setConsoleCollapsed(true)
     if (isEditorCollapsed && !showDisplayPane) setEditorCollapsed(false)
   }
@@ -1932,6 +1996,7 @@ export default function App() {
     setPresentationDisplaySplit(DEFAULT_PRESENTATION_DISPLAY_SPLIT)
     setEditorCollapsed(false)
     setConsoleCollapsed(false)
+    setConsoleAutoFolded(false)
     setIsPanelMenuOpen(false)
   }
 
@@ -1945,6 +2010,7 @@ export default function App() {
     if (mode === 'minimal') setCenterVerticalSplit(70)
     setEditorCollapsed(false)
     setConsoleCollapsed(false)
+    setConsoleAutoFolded(false)
     setIsPanelMenuOpen(false)
   }
 
@@ -2018,6 +2084,7 @@ export default function App() {
     setVisiblePanels(p => (p.output ? p : { ...p, output: true }))
     setDisplaySurface('canvas')
     setGroupTab('display')
+    foldConsoleForDisplay()
     clearMainThreadCanvas()
   }
 
@@ -2031,6 +2098,7 @@ export default function App() {
     setVisiblePanels(p => (p.output ? p : { ...p, output: true }))
     setDisplaySurface('tkinter')
     setGroupTab('display')
+    foldConsoleForDisplay()
     tkRendererRef.current?.dispose()
     tkRendererRef.current = null
     for (let i = 0; i < 10 && !tkinterHostRef.current; i++) {
@@ -2253,6 +2321,7 @@ export default function App() {
     }
     if (commands.length === 0) return
     setHasCanvasOutput(true)
+    displayUpdated()
     canvasPaneRef.current?.draw(commands)
   }
 
@@ -2267,6 +2336,8 @@ export default function App() {
     setVisiblePanels(p => (p.output ? p : { ...p, output: true }))
     setDisplaySurface('plot')
     setGroupTab('display')
+    displayTabAfterInputRef.current = false
+    foldConsoleForDisplay()
   }
 
   const addPlotImage = (dataUri: unknown) => {
@@ -2289,6 +2360,7 @@ export default function App() {
     setVisiblePanels(p => (p.output ? p : { ...p, output: true }))
     setDisplaySurface('stdctx')
     setGroupTab('display')
+    foldConsoleForDisplay()
     canvasPaneRef.current?.clear()
     // The canvas must own focus for stdctx.check_key() to see arrow keys.
     // Not if the program has already asked for input (see inputOwnsFocus).
@@ -2305,7 +2377,7 @@ export default function App() {
       fsId: activeFilesystemId,
       cwd: currentWorkingDir,
       defaultMimeType: 'audio/mpeg',
-      onMissing: src => appendOutput(`
+      onMissing: src => appendProgramOutput(`
 [stdaud] file not found: ${src}`),
     })
 
@@ -2315,7 +2387,7 @@ export default function App() {
     return vfsMediaCacheRef.current.resolve(uri, {
       fsId: activeFilesystemId,
       cwd: currentWorkingDir,
-      onMissing: src => appendOutput(`
+      onMissing: src => appendProgramOutput(`
 [stdctx] image not found: ${src}`),
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2387,7 +2459,15 @@ export default function App() {
     // The first frame of a run brings the Display tab forward; later frames
     // leave the tab alone, or a student stepping in the Code tab would be
     // dragged away from it on every line that moves the turtle.
-    if (turtleSvgHistoryRef.current.length === 0) setGroupTab('display')
+    // After an input() the next frame does too (displayUpdated), as the answer
+    // is what the student was waiting to see drawn.
+    if (turtleSvgHistoryRef.current.length === 0) {
+      setGroupTab('display')
+      foldConsoleForDisplay()
+    } else if (turtleSvgHistoryRef.current[turtleSvgHistoryRef.current.length - 1] !== svg) {
+      // Trace steps repeat the current frame; only a changed one counts as drawing.
+      displayUpdated()
+    }
     addToTurtleHistory(svg)
   }
 
@@ -2410,6 +2490,16 @@ export default function App() {
     // runs that do) put them back.
     setHasCanvasOutput(false)
     setHasMainThreadCanvasOutput(false)
+    // The last run's tkinter windows go too; beginTkinterRun makes a fresh
+    // renderer for a run that needs one. Without this, a finished GUI stayed
+    // on screen through every later run, whatever program was loaded.
+    setHasTkinterOutput(false)
+    tkRendererRef.current?.dispose()
+    tkRendererRef.current = null
+    // Each run decides afresh whether its console gives way to its drawing.
+    runHasConsoleOutputRef.current = false
+    displayTabAfterInputRef.current = false
+    setConsoleAutoFolded(false)
     // Last run's charts are not this run's. Unlike the canvases (latched so a
     // drawing outlives its program), figures are a list that would otherwise
     // grow without bound across runs.
@@ -3733,7 +3823,7 @@ export default function App() {
         setInputValue('')
         if (appSettings.useFixedInputs && fixedInputsQueueRef.current.length > 0) {
           const next = fixedInputsQueueRef.current.shift()!
-          appendOutput((data.prompt ?? '') + next)
+          appendProgramOutput((data.prompt ?? '') + next)
           setTimeout(() => handleInputSubmit(next), 0)
         } else {
           const handoff = beginTraceInputTabHandoff(
@@ -3745,14 +3835,14 @@ export default function App() {
           setInputRequest({ id: Date.now(), prompt: data.prompt ?? '' })
         }
       } else if (data.type === 'print') {
-        appendOutput(data.text)
+        appendProgramOutput(data.text)
       } else if (data.type === 'stderr') {
-        appendOutput('[stderr] ' + data.text)
+        appendProgramOutput('[stderr] ' + data.text)
       } else if (data.type === 'error') {
         if (data.files?.length) {
           void syncFilesFromPyodide(capturedFsId, data.files).then(() => setVfsReloadTrigger(t => t + 1))
         }
-        appendOutput('\n[ERROR] ' + data.error)
+        appendProgramOutput('\n[ERROR] ' + data.error)
         setInputRequest(null); setInputValue(''); setIsRunning(false); setActiveRuntime('')
         if (workerStartModeRef.current === 'trace' && traceSessionRef.current?.status !== 'error') {
           finishTraceSession('error', String(data.error))
@@ -3823,7 +3913,7 @@ export default function App() {
 
     worker.onerror = (event: ErrorEvent) => {
       if (workerRef.current !== worker) return
-      appendOutput(`\n[ERROR] Worker failed to start: ${event.message || 'Unknown worker error'}`)
+      appendProgramOutput(`\n[ERROR] Worker failed to start: ${event.message || 'Unknown worker error'}`)
       setInputRequest(null); setInputValue(''); setIsRunning(false); setActiveRuntime('')
       setCodeStatus('Worker runtime failed.')
       if (workerStartModeRef.current === 'trace') finishTraceSession('error', event.message || 'Worker failed')
@@ -3942,7 +4032,7 @@ export default function App() {
 
       const printFromRun = (text: string) => {
         mainThreadRecentOutputRef.current = rememberRecentOutput(mainThreadRecentOutputRef.current, text + '\n')
-        appendOutput(text)
+        appendProgramOutput(text)
       }
       if (typeof pyodide.setStdout === 'function') pyodide.setStdout({ batched: (text: string) => printFromRun(text) })
       if (typeof pyodide.setStderr === 'function') pyodide.setStderr({ batched: (text: string) => printFromRun('[stderr] ' + text) })
@@ -4037,7 +4127,13 @@ export default function App() {
         // too, so it ends at its next input() or frame instead of running on.
         js_should_stop_main_thread: () => Boolean(mainThreadStopRequestedRef.current) || runId !== mainThreadRunIdRef.current,
         js_set_main_thread_status: (message: string) => setMainThreadStatus(String(message ?? '')),
-        js_append_main_thread_log: (message: string) => appendOutput(String(message ?? '')),
+        // The bootstraps' own [INFO] notes are the app talking; anything else
+        // (an [ERROR], a key callback failing) is the program's.
+        js_append_main_thread_log: (message: string) => {
+          const text = String(message ?? '')
+          if (text.startsWith('[INFO]')) appendOutput(text)
+          else appendProgramOutput(text)
+        },
       }
       if (shouldRunPygame) {
         // pygame.quit() blanks the canvas as it tears SDL down; these lift the
@@ -4096,7 +4192,11 @@ export default function App() {
       if (shouldRunTkinter && tkRenderer) {
         const renderer = tkRenderer
         execGlobalsObj.__coder_tk_files__ = JSON.stringify(TKINTER_SHIM_FILES)
-        execGlobalsObj.js_tk_flush = (ops: string) => renderer.flush(String(ops ?? '[]'))
+        execGlobalsObj.js_tk_flush = (ops: string) => {
+          const json = String(ops ?? '[]')
+          if (json.length > 2) displayUpdated()
+          renderer.flush(json)
+        }
         execGlobalsObj.js_tk_query = (q: string) => renderer.query(String(q ?? '{}'))
         execGlobalsObj.js_tk_poll = () => renderer.poll()
         execGlobalsObj.js_tk_sleep = (ms: number) => renderer.sleep(Number(ms) || 0)
@@ -4197,7 +4297,7 @@ ${runProgramPython('exec(code_obj, globals())')}
         } catch { /* ignore */ }
       }
       const message = error instanceof Error ? error.message : String(error)
-      appendOutput('\n[ERROR] ' + message)
+      appendProgramOutput('\n[ERROR] ' + message)
       setCodeStatus('Main-thread runtime failed.')
       setMainThreadStatus('Main-thread run failed. See console output for details.')
       setIsRunning(false); setActiveRuntime('')
@@ -4253,6 +4353,9 @@ ${runProgramPython('exec(code_obj, globals())')}
       mainThreadInputResolveRef.current = null
       if (captureRunRef.current) captureInputsRef.current.push(submittedValue)
       setInputRequest(null); setInputValue('')
+      // pygame and the canvas turtle paint the canvas directly, with nothing
+      // for displayUpdated to hear, so their Display tab returns with the answer.
+      if (activeDisplaySurface === 'canvas') displayUpdated()
       resolveMainThreadInput(submittedValue)
       return
     }

@@ -55,7 +55,11 @@ Three layers, all of which should pass before a change is called done:
   no-JSPI fallback) and runs every page of the shipped Tkinter book.
   `workflow.spec.ts` covers the keyboard shortcuts (font size, F5 / Ctrl+F5 /
   Ctrl+Shift+F5, F11), Stay on run view, New file opening in the editor, and
-  the tab group. `tkinter.spec.ts` sets the
+  the tab group. `display.spec.ts` covers the Display pane across runs: emptied
+  at every run's start, the console folding for a drawing and opening on the
+  first print, and input() borrowing the Console tab until the next drawing. A
+  program that only draws leaves its console folded, so specs read its
+  transcript through the Copy button rather than the rows. `tkinter.spec.ts` sets the
   editor through Monaco's API rather than `insertText`, which re-indents every
   line after a colon, and reads the console through its copy button, because a
   finished run shrinks the console below what the program printed. Shared helpers live in
@@ -649,12 +653,27 @@ SharedArrayBuffer, Safari missing its header, or headers missing generally.
   (`isOutputHeaderOnly`). The console's chevron then points down, because that
   is the way that panel folds.
 - Folding hides, never unmounts: Monaco (the dispose churn) and the xterm
-  console (its buffer) stay mounted under `hidden`, and xterm's fit is a no-op
-  while hidden, exactly as on a console tab switch. The other console tabs
+  console (its buffer) stay mounted under `hidden`. The other console tabs
   unmount, as they already do when not selected.
+- **xterm's fit must be skipped while hidden** (`fitToBox` in
+  `ConsoleTerminal.tsx`). FitAddon reads a `display: none` box's computed
+  width as `"100%"` — 100px — and refits to ~11 columns; a prompt written then
+  stayed broken across lines after the console came back.
 - Something arriving opens its panel: an `input()` request opens the console
   (except in popup-dialog input mode), and opening a file or turning to a book
   activity opens the editor.
+- **The console folds for a drawing** (`consoleAutoFolded`, never persisted).
+  When a run's Display surface appears before the program has written to the
+  console (`foldConsoleForDisplay`: pygame/tkinter/stdctx starting, a chart, the
+  first turtle frame), the console folds to its header so the drawing gets the
+  room. The run's **first program output** — print, stderr, an error, an input
+  echo, `input()` itself — opens it again (`appendProgramOutput`), and opens a
+  student's own fold too, so an error is never behind a header. Only the first,
+  so a student who folds it again mid-run is not overruled on every print. The
+  app's own lines (`[INFO]`, `[RUN FINISHED]`) go through plain `appendOutput`
+  and open nothing, or the console would pop open at the end of every run. The
+  automatic fold lapses whenever there is no Display pane, and each run
+  (`resetExecutionState`) decides afresh.
 
 ### The Display pane
 
@@ -671,6 +690,12 @@ SharedArrayBuffer, Safari missing its header, or headers missing generally.
   Basthon SVG turtle, the stdctx canvas and charts.
   A surface is offered once it has something to show; a tab strip appears in the
   Display header **only** when a program drives more than one.
+- **Every Debug/Run/Trace starts with an empty Display pane**
+  (`resetExecutionState`): the canvas, tkinter, turtle and plot surfaces are all
+  retired, and the ones this run uses come back as it starts or draws. A
+  drawing outlives its program only until the next run. tkinter was once missed
+  here, and a finished GUI from another book stayed on screen through every
+  later run of an unrelated `print("hello")`.
 - All three surfaces stay mounted and are hidden with the `hidden` class, never
   unmounted — both canvases are driven imperatively through refs, so a remount
   throws the drawing away. For the same reason `DisplayPane` itself stays mounted
@@ -795,6 +820,12 @@ SharedArrayBuffer, Safari missing its header, or headers missing generally.
   first turtle frame → Display; opening a file or an activity → Code
   (`revealEditor`). Later turtle frames deliberately do not, or a student
   stepping in the Code tab would be pulled away on every line.
+- **input() borrows the Console tab from Display, and only until the next
+  drawing** (`displayTabAfterInputRef`, `displayUpdated`). Printed output never
+  moves the tab; what the program prints in reply to the answer stays in front
+  of the student until it draws again — a changed turtle frame, a stdctx batch,
+  a non-empty tkinter flush, a chart. pygame and the canvas turtle paint with
+  nothing to hear, so their Display tab returns with the answer itself.
 
 ### New file opens in the editor
 

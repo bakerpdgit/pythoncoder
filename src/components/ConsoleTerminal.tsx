@@ -116,6 +116,19 @@ export const ConsoleTerminal = forwardRef<ConsoleTerminalHandle, Props>(
     const onInputRef = useRef(onInput)
     const onStopRef = useRef(onStop)
 
+    /**
+     * Fit the terminal to its box, unless it has no box. A console folded, or
+     * behind another tab, is `display: none`, and FitAddon then reads its
+     * computed width as "100%" — 100px — and wraps everything written at ~11
+     * columns. A prompt written in that state stays broken across lines after
+     * the console comes back, so a hidden console keeps the size it last had.
+     */
+    const fitToBox = useCallback(() => {
+      const el = containerRef.current
+      if (!el || el.getClientRects().length === 0) return
+      try { fitAddonRef.current?.fit() } catch { /* ignore */ }
+    }, [])
+
     useEffect(() => { onInputRef.current = onInput }, [onInput])
     useEffect(() => { onStopRef.current = onStop }, [onStop])
 
@@ -195,11 +208,11 @@ export const ConsoleTerminal = forwardRef<ConsoleTerminalHandle, Props>(
       const fitAddon = new FitAddon()
       term.loadAddon(fitAddon)
       term.open(containerRef.current)
-      requestAnimationFrame(() => { try { fitAddon.fit() } catch { /* ignore */ } })
       term.write(HIDE_CURSOR)
 
       termRef.current = term
       fitAddonRef.current = fitAddon
+      requestAnimationFrame(fitToBox)
 
       // Ctrl+C is two things in a terminal. With text selected it is Copy —
       // which is what a student pressing it expects, and there was previously no
@@ -281,7 +294,7 @@ export const ConsoleTerminal = forwardRef<ConsoleTerminalHandle, Props>(
     useEffect(() => {
       if (!termRef.current) return
       termRef.current.options.fontSize = fontSize
-      try { fitAddonRef.current?.fit() } catch { /* ignore */ }
+      fitToBox()
     }, [fontSize])
 
     // Theme changes
@@ -320,9 +333,7 @@ export const ConsoleTerminal = forwardRef<ConsoleTerminalHandle, Props>(
     useEffect(() => {
       const el = containerRef.current
       if (!el) return
-      const ro = new ResizeObserver(() => {
-        try { fitAddonRef.current?.fit() } catch { /* ignore */ }
-      })
+      const ro = new ResizeObserver(fitToBox)
       ro.observe(el)
       return () => ro.disconnect()
     }, [])

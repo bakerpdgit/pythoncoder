@@ -246,7 +246,9 @@ test('a game loop of update() and time.sleep() keeps the page alive until Stop',
   const counter = windowEl(page).locator('.tkx-label')
   await expect.poll(async () => Number(await counter.textContent())).toBeGreaterThan(10)
   await page.getByRole('button', { name: /stop/i }).click()
-  await expect(consolePanel(page)).toContainText('[MAIN-THREAD RUN STOPPED]')
+  // It only drew, so its console is folded: read the buffer, not the rows.
+  await expect(runButton(page)).toBeVisible()
+  expect(await consoleText(page)).toContain('[MAIN-THREAD RUN STOPPED]')
   expect(problems).toEqual([])
 })
 
@@ -299,7 +301,9 @@ test('a login window closed before the main window opens, then another run', asy
   await expect(windowEl(page).locator('.tkx-titletext')).toHaveText('Main')
   await expect(page.locator('.tkx-window')).toHaveCount(1)
   await windowEl(page).locator('.tkx-close').click()
-  await expect(consolePanel(page)).toContainText('[MAIN-THREAD RUN FINISHED]')
+  // A program that only drew leaves its console folded, so read the buffer.
+  await expect(runButton(page)).toBeVisible()
+  expect(await consoleText(page)).toContain('[MAIN-THREAD RUN FINISHED]')
 
   // A second run reuses the cached main-thread Pyodide: it gets a fresh
   // tkinter, with no windows or timers from the last run, and its own
@@ -386,8 +390,9 @@ test('every page of the Tkinter book runs and draws its window', async ({ page }
     await page.waitForTimeout(300)
     await windowEl(page).screenshot({ path: `test-results/tkinter-book/${activity.id}.png` })
     await page.getByRole('button', { name: /stop/i }).click()
-    await expect(consolePanel(page)).toContainText('[MAIN-THREAD RUN STOPPED]')
+    await expect(runButton(page)).toBeVisible()
     const text = await consoleText(page)
+    expect(text, activity.name).toContain('[MAIN-THREAD RUN STOPPED]')
     expect(text, activity.name).not.toMatch(/Traceback|Exception in Tkinter callback|\[ERROR\]/)
   }
   expect(problems).toEqual([])
