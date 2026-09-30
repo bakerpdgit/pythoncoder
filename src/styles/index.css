@@ -43,6 +43,18 @@ body {
 ::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: #64748b; }
 
+/* A scroller nested inside a scrolling column (a left-sidebar section inside
+   the sidebar stack). Thinner, trackless and inset from the card's edge, so
+   when both show it reads as the card's own and not as a second copy of the
+   column's bar beside it. */
+.section-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+.section-scroll::-webkit-scrollbar-track { background: transparent; }
+.section-scroll::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; border: 1px solid transparent; background-clip: padding-box; }
+.section-scroll::-webkit-scrollbar-thumb:hover { background: #64748b; background-clip: padding-box; }
+@supports not selector(::-webkit-scrollbar) {
+  .section-scroll { scrollbar-width: thin; scrollbar-color: #475569 transparent; }
+}
+
 .grid-bg {
   background-image: radial-gradient(#334155 1px, transparent 1px);
   background-size: 20px 20px;
@@ -149,6 +161,12 @@ html[data-theme="light"] body { background: #e8eef6; color: #0f172a; }
 html[data-theme="light"] ::-webkit-scrollbar-track { background: #dbe4ee; }
 html[data-theme="light"] ::-webkit-scrollbar-thumb { background: #94a3b8; }
 html[data-theme="light"] ::-webkit-scrollbar-thumb:hover { background: #64748b; }
+html[data-theme="light"] .section-scroll::-webkit-scrollbar-track { background: transparent; }
+html[data-theme="light"] .section-scroll::-webkit-scrollbar-thumb { background: #94a3b8; background-clip: padding-box; }
+html[data-theme="light"] .section-scroll::-webkit-scrollbar-thumb:hover { background: #64748b; background-clip: padding-box; }
+@supports not selector(::-webkit-scrollbar) {
+  html[data-theme="light"] .section-scroll { scrollbar-color: #94a3b8 transparent; }
+}
 html[data-theme="light"] .grid-bg { background-image: radial-gradient(#cbd5e1 1px, transparent 1px); }
 html[data-theme="light"] .resize-bar { background: #cbd5e1; }
 /* Keep every slate content surface on the active side of the theme.  These

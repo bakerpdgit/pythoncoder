@@ -1,6 +1,7 @@
 import type { VFSEntry, VFSFile, VFSFilesystem } from '../types'
 import { fetchResourceBuffer, MIN_PLAUSIBLE_ZIP_BYTES } from './bookSource'
 import { pyodideSkipDirs } from './pyodideFs'
+import { clearDraft } from './editorDraft'
 
 const DB_NAME = 'pythoncoder-vfs'
 
@@ -138,6 +139,9 @@ export async function deleteFilesystem(id: string): Promise<void> {
     idbDelete(fsStore, id),
     ...allEntries.map(e => idbDelete(entryStore, e.id)),
   ])
+  // Reset challenge / Reset book / reopening a book delete filesystems: an
+  // unsaved-changes backup must not outlive the files it was a change to.
+  clearDraft(id)
 }
 
 export async function listChildren(fsId: string, parentPath: string): Promise<VFSEntry[]> {

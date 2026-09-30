@@ -107,6 +107,8 @@ import { githubRepositoryBookUrl } from './utils/bookSource'
 import { isRuntimeSourceLocked, RuntimeStartGuard } from './utils/runtimeStartGuard'
 import { PYODIDE_RUNTIME_RESET_CODE } from './utils/pyodideReset'
 import { stopAndAwaitRuntimeRelease } from './utils/runtimeRelease'
+import { isPyodideFatalError, isPyodideUsable, pyodideCrashRetryNote, PYODIDE_CRASHED_AGAIN_NOTE } from './utils/pyodideCrash'
+import { readDraft, writeDraft, clearDraft, describeDraftTime, type EditorDraft } from './utils/editorDraft'
 import {
   beginTraceInputTabHandoff, completeTraceInputTabHandoff, type ConsolePanelTab,
 } from './utils/traceInputTab'
@@ -187,6 +189,11 @@ const buildBreakpointDecorations = (map: Map<number, Breakpoint>): MonacoEditor.
       options: { glyphMarginClassName: classes.join(' '), glyphMarginHoverMessage: { value: hover }, stickiness: 1 },
     }
   })
+
+/** A run whose Pyodide crashed, and how to start it again. */
+type CrashedRun =
+  | { runtime: 'trace-worker'; mode: WorkerRunMode }
+  | { runtime: 'main-thread'; note?: string }
 
 export default function App() {
   const dialogs = useDialogs()
@@ -299,6 +306,13 @@ export default function App() {
   const [challengeHiddenPaths, setChallengeHiddenPaths] = useState<string[]>([])
   const [vfsReloadTrigger, setVfsReloadTrigger] = useState(0)
   const [isUnsaved, setIsUnsaved] = useState(false)
+  // Unsaved-changes backups (utils/editorDraft.ts). Startup routing (a ?book=
+  // link, ?filesystem=, or the default main.py) finishes before any is offered,
+  // so the offer is about the filesystem the student actually lands in.
+  const [startupSettled, setStartupSettled] = useState(false)
+  // The filesystem whose backup is being offered: nothing may overwrite or
+  // clear it until the student has answered.
+  const draftGateFsRef = useRef<string | null>(null)
   const [pendingCodeLoad, setPendingCodeLoad] = useState<{ content: string; name: string; rawBuffer: ArrayBuffer; mimeType: string } | null>(null)
   const [showCodeSaveDialog, setShowCodeSaveDialog] = useState(false)
   const [htmlPreview, setHtmlPreview] = useState<{ fsId: string; path: string; name: string; url: string } | null>(null)
@@ -370,6 +384,13 @@ export default function App() {
   const workerRef = useRef<Worker | null>(null)
   const isRunningRef = useRef(isRunning)
   isRunningRef.current = isRunning
+  // Automatic recovery from a crashed Pyodide (scheduleCrashRecovery). The flag
+  // marks the next run to start as the one automatic retry, so a second crash
+  // is reported instead of retried; the token lets any run started in the
+  // meantime cancel a recovery that has not happened yet.
+  const crashRetryRunRef = useRef(false)
+  const crashRecoveryTokenRef = useRef(0)
+  const pyodideCrashRecoveryRef = useRef<(crashed: CrashedRun, wasRetry: boolean, error: string) => void>(() => {})
   // Read after an `await`, where the render closure's copies would be stale.
   const isConsolePresentationModeRef = useRef(isConsolePresentationMode)
   isConsolePresentationModeRef.current = isConsolePresentationMode
@@ -792,7 +813,7 @@ export default function App() {
         const text = new TextDecoder().decode(entry.content)
         loadCodeText(text, 'main.py', '/main.py')
       }
-    })()
+    })().finally(() => setStartupSettled(true))
   }, [])
 
   // Compile Pyodide in a background worker as soon as browser isolation is
@@ -1352,6 +1373,9 @@ export default function App() {
     setCodeText(nextValue)
     setCodeStatus(nextValue.trim() ? 'Code edited in the browser.' : 'Editor is empty. Load or type Python.')
     setIsUnsaved(openFilePath !== null && nextValue !== savedCodeRef.current)
+    // Typing is an answer too: a backup the student dismissed gives way to
+    // the changes they are making now.
+    draftGateFsRef.current = null
   }
 
   // ── Code loading ─────────────────────────────────────────────────────────
@@ -1495,6 +1519,7 @@ export default function App() {
       await writeFile(activeFilesystemId, openFilePath, content.buffer as ArrayBuffer, guessMimeType(openFilePath))
       savedCodeRef.current = codeText
       setIsUnsaved(false)
+      clearDraft(activeFilesystemId)
       setCodeStatus(`Saved to ${openFilePath}.`)
       setVfsReloadTrigger(t => t + 1)
       await syncToLocalFolder({ kind: 'write', path: openFilePath, content: content.buffer as ArrayBuffer })
@@ -1521,6 +1546,7 @@ export default function App() {
       })
       if (choice === 'cancel' || choice === null) return
       if (choice === 'save') await saveCurrentToVFS()
+      else clearDraft(activeFilesystemId)
     }
     if (!clearEditorForSwitch()) return
   }
@@ -1542,6 +1568,8 @@ export default function App() {
       await writeFile(activeFilesystemId, openFilePath, content.buffer as ArrayBuffer, guessMimeType(openFilePath))
       savedCodeRef.current = codeText
       setIsUnsaved(false)
+      // Every run saves through here, so a run clears the backup too.
+      clearDraft(activeFilesystemId)
       setVfsReloadTrigger(t => t + 1)
     } catch { return false }
     await syncToLocalFolder({ kind: 'write', path: openFilePath, content: content.buffer as ArrayBuffer })
@@ -1666,6 +1694,98 @@ export default function App() {
       if (loadCodeText(text, entry.name, entry.path)) revealEditor()
     }
   }
+
+  // ── Unsaved-changes backup (utils/editorDraft.ts) ─────────────────────────
+
+  // Book edit mode is left out: its Solution tab saves into the book's source
+  // filesystem, not the one on screen, so a backup could not say which it was.
+  const draftsEnabled = startupSettled && !isBookEditMode
+  // What pagehide needs, current as of the last render.
+  const draftSnapshotRef = useRef({ enabled: false, fsId: '', path: null as string | null, code: '' })
+  draftSnapshotRef.current = { enabled: draftsEnabled, fsId: activeFilesystemId, path: openFilePath, code: codeText }
+
+  const syncDraft = () => {
+    const { enabled, fsId, path, code } = draftSnapshotRef.current
+    if (!enabled || !path || draftGateFsRef.current === fsId) return
+    if (code !== savedCodeRef.current) writeDraft(fsId, { path, content: code, savedAt: Date.now() })
+    else clearDraft(fsId)
+  }
+
+  // Kept shortly after typing pauses, rather than on every keystroke.
+  useEffect(() => {
+    if (!draftsEnabled || !openFilePath) return
+    const timer = window.setTimeout(syncDraft, 500)
+    return () => window.clearTimeout(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [codeText, openFilePath, activeFilesystemId, draftsEnabled])
+
+  // …and immediately when the page is hidden or closed, so the last half
+  // second of typing is not the part that goes. `visibilitychange` is the one
+  // that fires reliably on an iPad; `pagehide` covers closing the tab.
+  useEffect(() => {
+    const flush = () => { if (document.visibilityState === 'hidden') syncDraft() }
+    window.addEventListener('pagehide', syncDraft)
+    document.addEventListener('visibilitychange', flush)
+    return () => {
+      window.removeEventListener('pagehide', syncDraft)
+      document.removeEventListener('visibilitychange', flush)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  /** Put a backup's changes back in the editor, unsaved, exactly as they were left. */
+  const restoreDraft = async (fsId: string, draft: EditorDraft) => {
+    if (fsId !== activeFilesystemId || !canSwitchCodeSource()) return
+    if (openFilePath !== draft.path) {
+      const entry = await getEntryByPath(fsId, draft.path)
+      if (!entry?.content) return
+      if (!loadCodeText(new TextDecoder().decode(entry.content), entry.name, entry.path)) return
+    }
+    replaceProgrammaticEditorCode(draft.content, true)
+    setCodeStatus(`Restored unsaved changes to ${draft.path.replace(/^.*\//, '')}.`)
+    revealEditor()
+  }
+  const restoreDraftRef = useRef(restoreDraft)
+  restoreDraftRef.current = restoreDraft
+
+  /** Offer a filesystem's backup, if it holds changes the saved file does not. */
+  const offerDraft = async (fsId: string, draft: EditorDraft) => {
+    const release = () => { if (draftGateFsRef.current === fsId) draftGateFsRef.current = null }
+    const entry = await getEntryByPath(fsId, draft.path)
+    // A file that is gone was deleted on purpose; one that matches was saved
+    // after all (a run, say, that the tab closed straight after).
+    if (!entry?.content || cleanCodeText(new TextDecoder().decode(entry.content)) === draft.content) {
+      clearDraft(fsId)
+      release()
+      return
+    }
+    const name = draft.path.replace(/^.*\//, '')
+    const choice = await dialogs.choose({
+      title: 'Recover unsaved changes?',
+      message: `"${name}" has changes from ${describeDraftTime(draft.savedAt)} that were never saved — the page closed before they were.`,
+      detail: 'Restore them to carry on where you left off, or open the last saved version instead.',
+      buttons: [
+        { label: 'Restore my changes', value: 'restore', tone: 'primary' },
+        { label: 'Use last saved version', value: 'saved', tone: 'neutral' },
+      ],
+    })
+    // Dismissed: keep the backup (the gate stays up until the student types),
+    // so it is offered again next time rather than lost to a stray Escape.
+    if (choice === null) return
+    if (choice === 'saved') clearDraft(fsId)
+    release()
+    if (choice === 'restore') await restoreDraftRef.current(fsId, draft)
+  }
+
+  useEffect(() => {
+    draftGateFsRef.current = null
+    if (!draftsEnabled) return
+    const draft = readDraft(activeFilesystemId)
+    if (!draft) return
+    draftGateFsRef.current = activeFilesystemId
+    void offerDraft(activeFilesystemId, draft)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeFilesystemId, draftsEnabled])
 
   const handlePreviewHtml = async (entry: VFSEntry) => {
     if (entry.type !== 'file' || !isHtmlFile(entry.name, entry.mimeType ?? guessMimeType(entry.name))) {
@@ -2267,6 +2387,7 @@ export default function App() {
       })
       if (choice === 'cancel' || choice === null) return
       if (choice === 'save') await saveCurrentToVFS()
+      else clearDraft(activeFilesystemId)
     }
     if (!clearEditorForSwitch()) return
     setActiveFilesystemId(id)
@@ -3545,7 +3666,7 @@ export default function App() {
    * throw away the parked worker *and* any worker mid-run, or the next Debug
    * would just pick the same runtime back up.
    */
-  const handlePyodideReset = () => {
+  const resetPyodideRuntimes = (announce: boolean) => {
     traceWorkerStartGuardRef.current.cancel()
     if (isRunning && activeRuntime === 'main-thread') {
       mainThreadAbandonedRef.current = true
@@ -3577,11 +3698,53 @@ export default function App() {
     if (selectedRuntime === 'trace-worker') prepareTraceWorker()
     else void loadMainThreadPyodide().catch(() => { /* reported by the next run */ })
     setMainThreadStatus('Pyodide reset. Ready.')
-    appendOutput('\n[INFO] Pyodide environment reset. Files are preserved.')
+    if (announce) appendOutput('\n[INFO] Pyodide environment reset. Files are preserved.')
+  }
+  const handlePyodideReset = () => resetPyodideRuntimes(true)
+
+  /**
+   * A run's Pyodide has died (utils/pyodideCrash.ts): do what the student
+   * would otherwise have to find in the menu — Reset Pyodide — and run the
+   * program again, once. A retry that crashes too is reset but not retried, so
+   * a program that crashes Pyodide by itself cannot loop.
+   *
+   * Called from a run's own ending, whose closure still sees the run as
+   * active, so the work waits until React has committed the run's end; a run
+   * started in the meantime (the student pressing Run again) cancels it.
+   */
+  const scheduleCrashRecovery = (crashed: CrashedRun, wasRetry: boolean, error: string) => {
+    const token = ++crashRecoveryTokenRef.current
+    const deadline = Date.now() + 5000
+    const attempt = () => {
+      if (token !== crashRecoveryTokenRef.current) return
+      if (isRunningRef.current || workerRef.current) {
+        if (Date.now() < deadline) window.setTimeout(attempt, 50)
+        return
+      }
+      pyodideCrashRecoveryRef.current(crashed, wasRetry, error)
+    }
+    window.setTimeout(attempt, 0)
+  }
+  // Re-pointed every render, so the recovery sees committed state.
+  pyodideCrashRecoveryRef.current = (crashed, wasRetry, error) => {
+    resetPyodideRuntimes(false)
+    if (wasRetry) {
+      appendOutput(PYODIDE_CRASHED_AGAIN_NOTE)
+      setCodeStatus('Pyodide crashed again after restarting.')
+      return
+    }
+    const note = pyodideCrashRetryNote(error)
+    crashRetryRunRef.current = true
+    if (crashed.runtime === 'trace-worker') void startTraceWorker(crashed.mode, note)
+    else void startMainThreadRun(crashed.note ? `${crashed.note}\n${note}` : note)
   }
 
-  const startTraceWorker = async (modeOverride?: WorkerRunMode) => {
+  /** `note` is printed once the console has been cleared for the run. */
+  const startTraceWorker = async (modeOverride?: WorkerRunMode, note?: string) => {
     if (!hasSab || !hasCode || isRunningRef.current || workerRef.current) return
+    const isCrashRetry = crashRetryRunRef.current
+    crashRetryRunRef.current = false
+    crashRecoveryTokenRef.current++
     const startGuard = traceWorkerStartGuardRef.current
     const startClaim = startGuard.begin({ ...traceWorkerSourceRef.current })
     if (!startClaim) return
@@ -3642,7 +3805,9 @@ export default function App() {
     // at all. The open file may not import it itself (a GUI in gui.py), which
     // is why the runtime was not already locked to the main thread.
     if (detectTkinter(capturedCode, programFiles)) {
-      void startMainThreadRun('[INFO] This program uses tkinter, which runs on the main thread: it runs normally, without stepping or the variable inspector.')
+      crashRetryRunRef.current = isCrashRetry
+      const tkinterNote = '[INFO] This program uses tkinter, which runs on the main thread: it runs normally, without stepping or the variable inspector.'
+      void startMainThreadRun(note ? `${tkinterNote}\n${note}` : tkinterNote)
       return
     }
     const traceTableSessionId = choice === 'trace'
@@ -3685,6 +3850,7 @@ export default function App() {
 
     resetExecutionState()
     resetTurtleHistory()
+    if (note) appendOutput(note)
     if (usesSpongeLibsForRun) resetStdaud()
     if (usesStdctxForRun) beginStdctxRun()
     setIsRunning(true); setActiveRuntime('trace-worker')
@@ -3851,8 +4017,11 @@ export default function App() {
         restoreRunPresentationMode()
         workerRunModeRef.current = 'debug'
         workerStartModeRef.current = 'debug'
-        // A reported Python error still means the worker unwound cleanly.
-        releaseWorker(true)
+        // A reported Python error still means the worker unwound cleanly —
+        // unless its Pyodide died, when recycling it would hand every later
+        // run the same dead runtime.
+        releaseWorker(!data.fatal)
+        if (data.fatal) scheduleCrashRecovery({ runtime: 'trace-worker', mode: choice }, isCrashRetry, String(data.error))
       } else if (data.type === 'done') {
         if (data.files?.length) {
           void syncFilesFromPyodide(capturedFsId, data.files).then(() => setVfsReloadTrigger(t => t + 1))
@@ -3962,6 +4131,9 @@ export default function App() {
   /** `note` is printed once the console has been cleared for the run. */
   const startMainThreadRun = async (note?: string) => {
     if (!hasCode) return
+    const isCrashRetry = crashRetryRunRef.current
+    crashRetryRunRef.current = false
+    crashRecoveryTokenRef.current++
     await saveCurrentToVFS()
     const vfsFiles = await getAllFiles(activeFilesystemId)
     const capturedFsId = activeFilesystemId
@@ -4037,6 +4209,26 @@ export default function App() {
       if (typeof pyodide.setStdout === 'function') pyodide.setStdout({ batched: (text: string) => printFromRun(text) })
       if (typeof pyodide.setStderr === 'function') pyodide.setStderr({ batched: (text: string) => printFromRun('[stderr] ' + text) })
       if (pyodide._api) pyodide._api._skip_unwind_fatal_error = true
+      // Pyodide calls this the moment it dies, and a fatal error inside
+      // runPythonAsync can leave that promise unsettled for good — so the run
+      // is ended from here rather than left waiting for a catch that never
+      // comes. It is abandoned exactly as Reset Pyodide abandons a run, which
+      // makes anything the dead run does later a no-op.
+      if (pyodide._api) pyodide._api.on_fatal = (err: unknown) => {
+        if (runId !== mainThreadRunIdRef.current) return
+        mainThreadRunIdRef.current++
+        mainThreadAbandonedRef.current = true
+        mainThreadInputResolveRef.current = null
+        appendProgramOutput('\n[ERROR] ' + String(err))
+        setCodeStatus('Main-thread runtime failed.')
+        setMainThreadStatus('Main-thread run failed. See console output for details.')
+        setInputRequest(null); setInputValue('')
+        setIsRunning(false); setActiveRuntime('')
+        tkRenderer?.end()
+        stopMainThreadCanvasWatcher({ restoreSnapshot: shouldRunPygame || shouldRunTurtleCanvas })
+        restoreRunPresentationMode()
+        scheduleCrashRecovery({ runtime: 'main-thread', note }, isCrashRetry, String(err))
+      }
 
       cleanFilesFromPyodide(pyodide, mainThreadMountedPathsRef.current)
       // This Pyodide is cached across runs, so the last run's imported modules
@@ -4301,6 +4493,11 @@ ${runProgramPython('exec(code_obj, globals())')}
       setCodeStatus('Main-thread runtime failed.')
       setMainThreadStatus('Main-thread run failed. See console output for details.')
       setIsRunning(false); setActiveRuntime('')
+      // The cached Pyodide is reused by every later run, so a dead one has to
+      // be replaced. A null one never loaded, which a reset would not cure.
+      if (pyodide && (isPyodideFatalError(error) || !isPyodideUsable(pyodide))) {
+        scheduleCrashRecovery({ runtime: 'main-thread', note }, isCrashRetry, message)
+      }
     } finally {
       mainThreadStopRequestedRef.current = false
       // The windows stay on screen, but nothing is left to answer their buttons.
@@ -5228,7 +5425,7 @@ ${runProgramPython('exec(code_obj, globals())')}
                         </div>
                       </div>
                       {!inspectorCollapsed.watches && (
-                        <div className="flex-1 overflow-y-auto min-h-0">
+                        <div className="section-scroll flex-1 overflow-y-auto min-h-0">
                           {watches.length === 0
                             ? <div className="px-3 py-2 text-xs text-slate-500 italic">No watches. Click + to add.</div>
                             : <div className="p-2 flex flex-col gap-1">

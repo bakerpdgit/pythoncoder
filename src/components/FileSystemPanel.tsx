@@ -574,7 +574,7 @@ export function FileSystemPanel({
       </div>
 
       {/* File list */}
-      <div className="flex-1 overflow-y-auto py-1 min-h-0">
+      <div className="section-scroll flex-1 overflow-y-auto py-1 min-h-0">
         {showNewFolderInline && (
           <div className="flex items-center gap-1 px-2 py-1">
             <svg className="w-4 h-4 text-amber-400 flex-shrink-0" fill="currentColor" viewBox="0 0 24 24">

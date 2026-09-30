@@ -4,6 +4,7 @@ import { TRACE_TABLE_EVENT_LIMIT } from '../types/traceTable'
 import { pyodideSkipDirs } from '../utils/pyodideFs'
 import { PYODIDE_RUNTIME_RESET_CODE } from '../utils/pyodideReset'
 import { runProgramPython } from '../utils/programExit'
+import { isPyodideFatalError, isPyodideUsable } from '../utils/pyodideCrash'
 
 const PYODIDE_BASE_URL = 'https://cdn.jsdelivr.net/pyodide/v0.29.3/full'
 const PYODIDE_URL = `${PYODIDE_BASE_URL}/pyodide.js`
@@ -14,6 +15,15 @@ const PYODIDE_URL = `${PYODIDE_BASE_URL}/pyodide.js`
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let pyodidePromise: Promise<any> | null = null
 let traceStdoutCapture: ((text: string) => void) | null = null
+
+// A dead Pyodide is reported once, as a fatal `error` that tells the page to
+// terminate this worker (never recycle it) and recover — see utils/pyodideCrash.ts.
+let fatalReported = false
+function reportFatal(error: string) {
+  if (fatalReported) return
+  fatalReported = true
+  self.postMessage({ type: 'error', error, fatal: true })
+}
 
 // This worker is recycled after a clean run rather than terminated, so a second
 // `init` reuses the Pyodide already compiled above. Everything the previous run
@@ -61,7 +71,7 @@ const ensurePyodide = (): Promise<any> => {
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return (self as any).loadPyodide({
+    const pyodide = await (self as any).loadPyodide({
       indexURL: `${PYODIDE_BASE_URL}/`,
       stdout: (text: string) => {
         self.postMessage({ type: 'print', text })
@@ -72,6 +82,11 @@ const ensurePyodide = (): Promise<any> => {
       // posted from the catch blocks below terminate the worker.
       stderr: (text: string) => self.postMessage({ type: 'stderr', text }),
     })
+    // Pyodide calls this the moment it dies. The run cannot be left to report
+    // the crash itself: a fatal error inside runPythonAsync can leave that
+    // promise unsettled for good, and the page waiting on "starting..." forever.
+    if (pyodide._api) pyodide._api.on_fatal = (err: unknown) => reportFatal(String(err))
+    return pyodide
   })()
 
   return pyodidePromise
@@ -1400,7 +1415,16 @@ self.onmessage = async function (e: MessageEvent) {
   try {
     pyodide = await ensurePyodide()
   } catch (err) {
+    // This worker is recycled after an error, so let the next run try again
+    // rather than be handed the same failed load.
+    pyodidePromise = null
     self.postMessage({ type: 'error', error: 'Failed to load Pyodide in the worker. ' + String(err) })
+    return
+  }
+  // A recycled worker whose Pyodide has since died would otherwise throw from
+  // the first globals.set below, outside any try, and never answer at all.
+  if (!isPyodideUsable(pyodide)) {
+    reportFatal('Pyodide already fatally failed and can no longer be used.')
     return
   }
 
@@ -1717,6 +1741,11 @@ self.onmessage = async function (e: MessageEvent) {
     self.postMessage({ type: 'done', files: updatedFiles })
   } catch (err) {
     traceStdoutCapture = null
+    if (fatalReported) return
+    if (isPyodideFatalError(err) || !isPyodideUsable(pyodide)) {
+      reportFatal(String(err))
+      return
+    }
     // Flush ordinary runtime/stop failures, but never retry a transport batch
     // after the bridge has failed: its delivered prefix is the only history
     // the terminal acknowledgement may claim as complete.

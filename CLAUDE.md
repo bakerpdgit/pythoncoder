@@ -57,7 +57,9 @@ Three layers, all of which should pass before a change is called done:
   Ctrl+Shift+F5, F11), Stay on run view, New file opening in the editor, and
   the tab group. `display.spec.ts` covers the Display pane across runs: emptied
   at every run's start, the console folding for a drawing and opening on the
-  first print, and input() borrowing the Console tab until the next drawing. A
+  first print, and input() borrowing the Console tab until the next drawing.
+  `recovery.spec.ts` covers the unsaved-changes backup (offered after a reload,
+  restored or discarded) and a crashed Pyodide being reset and re-run once. A
   program that only draws leaves its console folded, so specs read its
   transcript through the Copy button rather than the rows. `tkinter.spec.ts` sets the
   editor through Monaco's API rather than `insertText`, which re-indents every
@@ -136,6 +138,8 @@ src/
     vfsMediaUrl.ts            # deduped blob URLs for VFS-backed media (stdaud, drawImage)
     pyodideFs.ts              # which Pyodide MEMFS dirs are off-limits when syncing back
     pyodideReset.ts           # Python-side reset that makes a reused Pyodide look fresh
+    pyodideCrash.ts           # telling a dead Pyodide from a failed program
+    editorDraft.ts            # per-filesystem backup of the editor's unsaved changes
     testMatcher.ts            # Challenge test evaluation
     download.ts               # File download helpers
     export.ts                 # Note/docstring export formatting
@@ -290,6 +294,57 @@ SharedArrayBuffer, Safari missing its header, or headers missing generally.
   files in place for the post-run walk to sweep into the next activity's
   filesystem.
 
+### A crashed Pyodide is reset and the run tried again, once
+
+- A Python exception leaves Pyodide usable; a *fatal* error (a wasm trap, an
+  internal failure) does not. Pyodide then marks the error
+  `pyodide_fatal_error` and makes every public property of the instance throw
+  "Pyodide already fatally failed". Both runtimes keep their Pyodide between
+  runs, and the trace worker was recycled after *any* reported error — so one
+  crash broke every later run until the student found Reset Pyodide. The next
+  `init` even threw from `pyodide.globals.set`, outside any try, and the run sat
+  on "Debug runtime starting..." for good.
+- **A fatal error inside `runPythonAsync` can leave that promise unsettled
+  forever**, so no catch block ever hears of it. Pyodide calls
+  `pyodide._api.on_fatal` as it dies; the worker (`reportFatal`) and the
+  main-thread run both hook it, and the run is ended from there.
+- `utils/pyodideCrash.ts`: `isPyodideFatalError` reads the error,
+  `isPyodideUsable` runs `None` — the error text alone is not enough, because
+  what the program reports is often the trap, not Pyodide's message. The worker
+  also checks a recycled Pyodide is usable before its first `globals.set`.
+- A fatal worker `error` carries `fatal: true` and the worker is terminated,
+  never recycled. `scheduleCrashRecovery` (`App.tsx`) then waits for React to
+  commit the run's end, does what Reset Pyodide does (`resetPyodideRuntimes`),
+  and starts the same run again with a note saying why. `crashRetryRunRef`
+  marks that run as the retry, so a second crash is reset but *not* retried —
+  a program that crashes Pyodide by itself cannot loop. Any run the student
+  starts meanwhile cancels a pending recovery (`crashRecoveryTokenRef`).
+- The e2e spec crashes it on purpose with `pyodide_js._api.fatal_error(...)`.
+
+### Unsaved changes survive the page closing
+
+- One file is open at a time and every file or filesystem switch already asks
+  about unsaved changes, so the only way to lose them was the page itself going
+  — the browser closed, the tab crashed. `utils/editorDraft.ts` keeps what the
+  editor holds whenever it differs from the saved file: **one backup per
+  filesystem**, so per book activity as well as the student's own.
+- It is **localStorage, not a hidden file in the virtual filesystem.** A file
+  there would be mounted into every run, swept into ZIP downloads, mirrored to
+  a connected folder's disk, and need hiding everywhere. localStorage is also
+  synchronous, which is what lets `pagehide` / `visibilitychange` write the
+  last keystrokes as the tab goes; the rest is written 500ms after typing stops.
+- Cleared by every save — `saveCurrentToVFS`, so every run too — by an explicit
+  "Don't save", and by `deleteFilesystem` (Reset challenge, Reset book).
+- Offered when a filesystem becomes active, but only after startup routing has
+  settled (`startupSettled`), so a `?book=` link offers the activity the student
+  lands in rather than `default`. Nothing is offered unless the backup differs
+  from the saved file. **Restore** puts the changes back *unsaved*, exactly as
+  left; **Use last saved version** discards it. While the question is open
+  `draftGateFsRef` stops the auto-opened file's clean state from clearing it,
+  and a dismissed dialog keeps it until the student types.
+- Off in book edit mode: its Solution tab saves into the book's source
+  filesystem, not the one on screen.
+
 ### UI conventions
 
 - **No native browser dialogs.** Never use `window.confirm`, `window.alert`, or
@@ -307,6 +362,14 @@ SharedArrayBuffer, Safari missing its header, or headers missing generally.
   `bg-*/10` tint or an amber warning), verify it in light mode or add an override.
 - Prefer translucent tints (e.g. `bg-slate-500/20`, `bg-emerald-500/10`) for
   subtle selection/highlight states so they work in both themes without overrides.
+- A scroller nested in the left sidebar's scrolling column takes
+  `section-scroll` (`styles/index.css`): thinner and trackless, so when both
+  scroll it reads as the card's own bar rather than a second copy of the
+  column's. Inside a flex-column scroller, a child with `overflow-hidden` (for
+  rounded corners) needs `flex-shrink-0` — `overflow-hidden` drops a flex
+  item's minimum height to zero, so it shrinks to fit and clips instead of
+  letting the scroller scroll. That is why the variable inspector never showed
+  a scroll bar.
 
 ### Student links (URL parameters)
 

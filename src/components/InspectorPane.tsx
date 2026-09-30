@@ -175,7 +175,7 @@ export const InspectorPane = ({
       <div className="flex h-full flex-col rounded-lg border border-slate-700 bg-slate-900/60">
         {header}
 
-        <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-3">
+        <div className="section-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-3">
           {/* Breadcrumbs */}
           {path.length > 0 && (
             <div className="flex-shrink-0 flex flex-wrap items-center gap-2 text-xs">
@@ -218,7 +218,10 @@ export const InspectorPane = ({
           {/* Variable list — one row per variable, click a compound to drill in */}
           {isInspectorCompound(activeNode) ? (
             children.length > 0 ? (
-              <div className="flex flex-col overflow-hidden rounded-lg border border-slate-700 divide-y divide-slate-800">
+              // flex-shrink-0: overflow-hidden (for the rounded corners) drops a flex
+              // item's minimum height to zero, so without it the list shrank to fit
+              // the section and clipped its last rows instead of letting it scroll.
+              <div className="flex flex-shrink-0 flex-col overflow-hidden rounded-lg border border-slate-700 divide-y divide-slate-800">
                 {children.map((child, index) => {
                   const childNode = child.value
                   const canOpen = isInspectorCompound(childNode)
