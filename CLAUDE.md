@@ -58,6 +58,8 @@ Three layers, all of which should pass before a change is called done:
   the tab group. `display.spec.ts` covers the Display pane across runs: emptied
   at every run's start, the console folding for a drawing and opening on the
   first print, and input() borrowing the Console tab until the next drawing.
+  `indent.spec.ts` covers per-file indentation (a four-space exercise after a
+  two-space one, Enter after a colon, re-indenting from the cog menu).
   `recovery.spec.ts` covers the unsaved-changes backup (offered after a reload,
   restored or discarded) and a crashed Pyodide being reset and re-run once. A
   program that only draws leaves its console folded, so specs read its
@@ -900,6 +902,26 @@ SharedArrayBuffer, Safari missing its header, or headers missing generally.
   panel's pending entry. The name dialog refuses an existing file's name
   (`refuseExistingFile`), because saving an empty new file over it would wipe
   it, and the new file is typed by its own name rather than always as `.py`.
+
+### Indentation follows the file
+
+- Books arrive indented with two spaces as often as four. One Monaco model
+  serves every file and a model only guesses indentation when it is created,
+  so `replaceProgrammaticEditorCode` (and `handleEditorMount`) set each file's
+  indentation as it arrives: `detectIndentUnit` (`utils/indentation.ts`), or
+  **4 spaces** when nothing in the file is indented. The editor's `options`
+  prop carries no `tabSize`/`insertSpaces` (and `detectIndentation: false`) so
+  a re-render can never put a fixed value back.
+- The cog menu's **Indent** dropdown shows what was detected. Choosing another
+  re-indents the open file (`reindentEdits`) as one undoable edit, leaving it
+  unsaved. Disabled while running and on a Parsons problem.
+- Both read the file as Python, not text: only lines that start a statement
+  count, block depth is worked out as the tokenizer does, and lines inside
+  brackets, after a backslash or inside a multi-line string are not indents.
+  A multi-line string is never re-indented — that would change what the
+  program prints — except a docstring, whose indentation follows the code.
+  `indentation.test.ts` runs a converted program under native `python` and
+  checks it prints the same.
 
 ### Display zoom
 

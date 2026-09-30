@@ -69,6 +69,32 @@ export async function setProgram(page: Page, source: string): Promise<void> {
   await expect(editor.locator('.line-numbers')).toHaveCount(source.split('\n').length)
 }
 
+/**
+ * What the code editor's model holds and how it indents, read through Monaco's
+ * own API rather than the rendered lines (which drop leading whitespace into
+ * separate spans and virtualise anything off screen).
+ */
+export async function editorModelState(page: Page): Promise<{ value: string; tabSize: number; insertSpaces: boolean }> {
+  return page.evaluate(async () => {
+    const w = window as any
+    let editors: any[] = []
+    if (typeof w.require === 'function') {
+      const monaco = await new Promise<any>(resolve => w.require(['vs/editor/editor.main'], resolve))
+      editors = (monaco ?? w.monaco)?.editor?.getEditors?.() ?? []
+    }
+    if (!editors.length) {
+      // In dev the editor is the locally installed monaco-editor.
+      const url = performance.getEntriesByType('resource').map(e => e.name)
+        .find(n => /\/node_modules\/\.vite\/deps\/monaco-editor\.js/.test(n))
+      if (url) editors = (await import(/* @vite-ignore */ url)).editor.getEditors()
+    }
+    const model = editors[0].getModel()
+    const { tabSize, insertSpaces } = model.getOptions()
+    // 1 is EndOfLinePreference.LF: a model created empty on Windows uses CRLF.
+    return { value: model.getValue(1), tabSize, insertSpaces }
+  })
+}
+
 export async function run(page: Page): Promise<void> {
   const button = page.getByRole('button', { name: /^(Run|Debug)$/ })
   await expect(button).toBeEnabled()

@@ -109,6 +109,7 @@ import { PYODIDE_RUNTIME_RESET_CODE } from './utils/pyodideReset'
 import { stopAndAwaitRuntimeRelease } from './utils/runtimeRelease'
 import { isPyodideFatalError, isPyodideUsable, pyodideCrashRetryNote, PYODIDE_CRASHED_AGAIN_NOTE } from './utils/pyodideCrash'
 import { readDraft, writeDraft, clearDraft, describeDraftTime, type EditorDraft } from './utils/editorDraft'
+import { DEFAULT_INDENT, INDENT_CHOICES, describeIndent, detectIndentUnit, reindentEdits, type IndentUnit } from './utils/indentation'
 import {
   beginTraceInputTabHandoff, completeTraceInputTabHandoff, type ConsolePanelTab,
 } from './utils/traceInputTab'
@@ -344,6 +345,7 @@ export default function App() {
   )
   const [isRunDropdownOpen, setIsRunDropdownOpen] = useState(false)
   const [editorFontSize, setEditorFontSize] = useState(() => getStoredEditorFontSize())
+  const [editorIndent, setEditorIndent] = useState<IndentUnit>(DEFAULT_INDENT)
   const [consoleFontSize, setConsoleFontSize] = useState(() => getStoredConsoleFontSize())
   const [displayZoom, setDisplayZoom] = useState<DisplayZoom>(() => getStoredDisplayZoom())
   const displayZoomRef = useRef(displayZoom)
@@ -1275,6 +1277,7 @@ export default function App() {
     // Restore breakpoint glyphs: the editor may be remounting after a run that
     // hid the code panel, and the [breakpoints] effect won't re-fire on remount.
     breakpointDecorationsRef.current.set(buildBreakpointDecorations(breakpointsRef.current))
+    applyEditorIndent(detectIndentUnit(editor.getValue()) ?? DEFAULT_INDENT)
 
     editor.onMouseDown(e => {
       if (e.event.leftButton && e.target.type === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN) {
@@ -1406,6 +1409,34 @@ export default function App() {
     tabs[nextIndex].click()
   }
 
+  // One Monaco model serves every file, and a model only guesses its
+  // indentation when it is created, so each file's is set here as it arrives.
+  const applyEditorIndent = (unit: IndentUnit) => {
+    setEditorIndent(unit)
+    const size = unit === 'tab' ? 4 : unit
+    editorRef.current?.getModel()?.updateOptions({ insertSpaces: unit !== 'tab', tabSize: size, indentSize: size })
+  }
+
+  // Picking an indentation in the settings menu re-indents the open file to
+  // it, as one undoable edit that leaves the file unsaved.
+  const handleEditorIndentChange = (unit: IndentUnit) => {
+    const editor = editorRef.current
+    const model = editor?.getModel()
+    if (editor && model && !isParsonsChallenge) {
+      const edits = reindentEdits(model.getValue(), editorIndent, unit)
+      if (edits.length > 0) {
+        editor.pushUndoStop()
+        editor.executeEdits('reindent', edits.map(edit => ({
+          range: { startLineNumber: edit.line, startColumn: 1, endLineNumber: edit.line, endColumn: edit.oldLength + 1 },
+          text: edit.newText,
+        })))
+        editor.pushUndoStop()
+        setCodeStatus(`Re-indented with ${describeIndent(unit).toLowerCase()}.`)
+      }
+    }
+    applyEditorIndent(unit)
+  }
+
   const replaceProgrammaticEditorCode = (
     text: string,
     unsaved: boolean,
@@ -1422,6 +1453,7 @@ export default function App() {
       editorRef.current.setValue(text)
       applyingEditorValueRef.current = false
     }
+    applyEditorIndent(detectIndentUnit(text) ?? DEFAULT_INDENT)
     setIsUnsaved(unsaved)
     return true
   }
@@ -4907,6 +4939,26 @@ ${runProgramPython('exec(code_obj, globals())')}
                   </svg>
                   Execution: {RUNTIME_SHORT_LABELS[selectedRuntime]}…
                 </button>
+                <label
+                  title={isParsonsChallenge
+                    ? 'A Parsons problem is arranged by dragging, not indented here'
+                    : 'Worked out from each file as it opens. Choosing another re-indents the file.'}
+                  className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-slate-400">
+                  <svg className="h-4 w-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 6h16M11 10h9M11 14h9M4 18h16M4 9.5l3 2.5-3 2.5" />
+                  </svg>
+                  Indent:
+                  <select
+                    data-testid="editor-indent"
+                    value={String(editorIndent)}
+                    disabled={isRunning || isParsonsChallenge}
+                    onChange={event => handleEditorIndentChange(event.target.value === 'tab' ? 'tab' : Number(event.target.value))}
+                    className="ml-auto min-w-0 rounded border border-slate-600 bg-slate-900 px-1.5 py-0.5 text-xs text-slate-200 disabled:cursor-not-allowed disabled:opacity-50">
+                    {(INDENT_CHOICES.includes(editorIndent) ? INDENT_CHOICES : [...INDENT_CHOICES, editorIndent]).map(unit => (
+                      <option key={String(unit)} value={String(unit)}>{describeIndent(unit)}</option>
+                    ))}
+                  </select>
+                </label>
                 <button type="button"
                   onClick={() => { setIsSettingsOpen(true); setIsQuickSettingsOpen(false) }}
                   className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-slate-400 hover:bg-slate-700 hover:text-slate-200 transition-colors">
@@ -5629,8 +5681,8 @@ ${runProgramPython('exec(code_obj, globals())')}
                     lineNumbersMinChars: 4,
                     scrollBeyondLastLine: false,
                     smoothScrolling: true,
-                    tabSize: 4,
-                    insertSpaces: true,
+                    // Indentation is the model's, set per file by applyEditorIndent.
+                    detectIndentation: false,
                     fontSize: editorFontSize,
                     padding: { top: 14, bottom: 18 },
                     renderLineHighlight: 'none',
