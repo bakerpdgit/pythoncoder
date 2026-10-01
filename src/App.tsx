@@ -84,7 +84,7 @@ import {
   PANEL_OPTIONS, RUNTIME_SHORT_LABELS,
 } from './constants'
 import type {
-  Theme, RuntimeKey, PanelVisibility, InputRequest, SabRef, SimState, InspectorPath,
+  Theme, RuntimeKey, PanelVisibility, InputRequest, SimState, InspectorPath,
   StructureModel, DiagramModel, HierarchyModel, OutlineModel, DiagramView, DisplaySurface, DisplayZoom, PlotFigure, VFSEntry,
   LocalFolderSyncOp,
   AppSettings, BookNavState, BookChallenge, BookManifest, BookTestCase, BookAdditionalFile, NamedLayout, InspectorNode,
@@ -108,6 +108,12 @@ import { isRuntimeSourceLocked, RuntimeStartGuard } from './utils/runtimeStartGu
 import { PYODIDE_RUNTIME_RESET_CODE } from './utils/pyodideReset'
 import { stopAndAwaitRuntimeRelease } from './utils/runtimeRelease'
 import { isPyodideFatalError, isPyodideUsable, pyodideCrashRetryNote, PYODIDE_CRASHED_AGAIN_NOTE } from './utils/pyodideCrash'
+import { createSabChannel, createXhrChannel, ensureSyncServiceWorker, serviceWorkerSyncSupported, type TraceChannel } from './utils/traceChannel'
+import {
+  decideFallback, fallbackNote, initialWorkerPlan, recallWorkerPlan, rememberWorkerPlan, workerUnavailableMessage,
+  type RememberedPlan, type WorkerFailure, type WorkerPlan,
+} from './utils/runtimeFallback'
+import type { TraceTransport } from './utils/traceSyncProtocol'
 import { readDraft, writeDraft, clearDraft, describeDraftTime, type EditorDraft } from './utils/editorDraft'
 import { DEFAULT_INDENT, INDENT_CHOICES, describeIndent, detectIndentUnit, reindentEdits, type IndentUnit } from './utils/indentation'
 import {
@@ -191,6 +197,23 @@ const buildBreakpointDecorations = (map: Map<number, Breakpoint>): MonacoEditor.
     }
   })
 
+/**
+ * The rung this tab starts on (utils/runtimeFallback.ts): shared memory where
+ * the page is isolated, a service worker where it is not, and whatever an
+ * earlier run in this tab fell back to. `?transport=sab|xhr|none` picks one,
+ * which is how a single rung is tried on a particular browser.
+ */
+function detectWorkerPlan(): RememberedPlan {
+  const remembered = recallWorkerPlan()
+  const plan = initialWorkerPlan({
+    hasSharedMemory: typeof SharedArrayBuffer !== 'undefined' && window.crossOriginIsolated === true,
+    serviceWorkerSupported: serviceWorkerSyncSupported(),
+    forced: new URLSearchParams(window.location.search).get('transport'),
+    remembered: remembered?.plan ?? null,
+  })
+  return { plan, reason: remembered?.plan === plan ? remembered.reason : '' }
+}
+
 /** A run whose Pyodide crashed, and how to start it again. */
 type CrashedRun =
   | { runtime: 'trace-worker'; mode: WorkerRunMode }
@@ -216,8 +239,13 @@ export default function App() {
   const [currentClass, setCurrentClass] = useState('')
   const [simState, setSimState] = useState<SimState | null>(null)
   const [isRunning, setIsRunning] = useState(false)
-  const [hasSab, setHasSab] = useState(false)
   const [isCrossOriginIsolated, setIsCrossOriginIsolated] = useState(false)
+  // How this tab runs the trace worker, and why it stepped down if it did.
+  // The ref is what a run reads: a fallback changes the rung and starts the
+  // next run in the same tick, before React has re-rendered.
+  const [workerPlan, setWorkerPlan] = useState<RememberedPlan>(detectWorkerPlan)
+  const workerPlanRef = useRef<WorkerPlan>(workerPlan.plan)
+  const canUseTraceWorker = workerPlan.plan !== 'none'
   const [inputRequest, setInputRequest] = useState<InputRequest | null>(null)
   const [inputValue, setInputValue] = useState('')
   const [outputLog, setOutputLog] = useState('')
@@ -393,6 +421,12 @@ export default function App() {
   const crashRetryRunRef = useRef(false)
   const crashRecoveryTokenRef = useRef(0)
   const pyodideCrashRecoveryRef = useRef<(crashed: CrashedRun, wasRetry: boolean, error: string) => void>(() => {})
+  // Stepping down a rung when the trace worker itself fails (scheduleWorkerFallback).
+  // `proven` is set once a worker run reaches the student's program in this
+  // tab, after which a crash is the program's doing and not the browser's.
+  const workerFallbackRef = useRef<(failed: TraceTransport, failure: WorkerFailure, reason: string, mode: WorkerRunMode) => void>(() => {})
+  const workerFailuresRef = useRef(0)
+  const workerProvenRef = useRef(false)
   // Read after an `await`, where the render closure's copies would be stale.
   const isConsolePresentationModeRef = useRef(isConsolePresentationMode)
   isConsolePresentationModeRef.current = isConsolePresentationMode
@@ -438,12 +472,15 @@ export default function App() {
   // is set while entering an activity, before bookNavState has re-rendered.
   const parsonsKeyRef = useRef<{ rootUrl: string; id: string } | null>(null)
   const challengeLoadIdRef = useRef(0)
-  const sabRef = useRef<SabRef | null>(null)
+  // How the page answers the worker of the current run (utils/traceChannel.ts).
+  const traceChannelRef = useRef<TraceChannel | null>(null)
+  const disposeTraceChannel = () => {
+    traceChannelRef.current?.dispose()
+    traceChannelRef.current = null
+  }
   const canvasPaneRef = useRef<CanvasPaneHandle | null>(null)
-  // Key state shared with the trace worker so stdctx.check_key() can read it
-  // while the worker is blocked inside Python.
-  const stdctxKeyBufferRef = useRef<Uint8Array | null>(null)
-  // Main-thread runtime equivalent: no SharedArrayBuffer needed there.
+  // Keys held down, for stdctx.check_key() on the main thread. The trace
+  // worker is told through its channel, since it is blocked inside Python.
   const stdctxPressedKeysRef = useRef<Set<number>>(new Set())
   const stdaudRef = useRef<HTMLAudioElement | null>(null)
   // Blob URLs for VFS-backed media, shared by sys.stdaud and stdctx.drawImage
@@ -551,7 +588,15 @@ export default function App() {
   }
 
   const prepareTraceWorker = () => {
-    if (!hasSab || workerRef.current || prewarmedTraceWorkerRef.current) return
+    const plan = workerPlanRef.current
+    if (plan === 'none' || workerRef.current || prewarmedTraceWorkerRef.current) return
+    // A worker answers to the service worker only if it was created under it.
+    if (plan === 'xhr' && !navigator.serviceWorker?.controller) {
+      void ensureSyncServiceWorker().then(problem => {
+        if (!problem && workerPlanRef.current === 'xhr') prepareTraceWorker()
+      })
+      return
+    }
     const worker = new TracerWorker()
     if (!holdIdleTraceWorker(worker)) { worker.terminate(); return }
     worker.postMessage({ type: 'prewarm' })
@@ -593,7 +638,9 @@ export default function App() {
   const effectiveTurtleMode = (code: string): TurtleMode =>
     codeUsesTurtleKeyboard(code) ? 'pyo-js-turtle' : appSettings.turtleMode
   const isTurtleLocked = codeUsesTurtle(codeText) && effectiveTurtleMode(codeText) === 'pyo-js-turtle'
-  const selectedRuntime: RuntimeKey = (isPygameLocked || isTurtleLocked || isTkinterLocked) ? 'main-thread' : runtimePreference
+  // A tab that cannot run the trace worker runs everything on the main thread,
+  // without the student having to find the setting.
+  const selectedRuntime: RuntimeKey = (isPygameLocked || isTurtleLocked || isTkinterLocked || !canUseTraceWorker) ? 'main-thread' : runtimePreference
   const resolvedRuntime = isRunning ? activeRuntime : selectedRuntime
   const isMainThreadRuntime = resolvedRuntime === 'main-thread'
   const isPygameCanvasRuntime = isPygameRunActive || (isMainThreadRuntime && isPygameLocked)
@@ -766,7 +813,6 @@ export default function App() {
 
   useEffect(() => {
     setIsCrossOriginIsolated(window.crossOriginIsolated === true)
-    setHasSab(typeof SharedArrayBuffer !== 'undefined' && window.crossOriginIsolated === true)
     void (async () => {
       await ensureDefaultFilesystem()
       setVfsReloadTrigger(t => t + 1)
@@ -818,10 +864,9 @@ export default function App() {
     })().finally(() => setStartupSettled(true))
   }, [])
 
-  // Compile Pyodide in a background worker as soon as browser isolation is
-  // available. The warmed worker is claimed by the next Debug, Trace, or Run.
+  // Compile Pyodide in a background worker straight away. The warmed worker is
+  // claimed by the next Debug, Trace, or Run.
   useEffect(() => {
-    if (!hasSab) return
     prepareTraceWorker()
     return () => {
       traceWorkerStartGuardRef.current.cancel()
@@ -833,9 +878,10 @@ export default function App() {
       workerRef.current?.terminate()
       workerRef.current = null
     }
-    // `hasSab` changes only once during feature detection.
+    // Mount and unmount only: a change of rung mid-session must not tear down
+    // the run that is being restarted on the new one.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasSab])
+  }, [])
 
   // If code or the user's preference selects main-thread execution, warm that
   // cached runtime too. This does not compete with the default trace worker.
@@ -2580,8 +2626,7 @@ export default function App() {
     if (code === undefined || code <= 0 || code >= STDCTX_KEY_BUFFER_SIZE) return
     if (isDown) stdctxPressedKeysRef.current.add(code)
     else stdctxPressedKeysRef.current.delete(code)
-    const buffer = stdctxKeyBufferRef.current
-    if (buffer) Atomics.store(buffer, code, isDown ? 1 : 0)
+    traceChannelRef.current?.setKey(code, isDown)
   }
 
   // ── Runtime execution ─────────────────────────────────────────────────────
@@ -3716,8 +3761,7 @@ export default function App() {
     if (workerRef.current) {
       workerRef.current.terminate()
       workerRef.current = null
-      sabRef.current = null
-      stdctxKeyBufferRef.current = null
+      disposeTraceChannel()
       setIsRunning(false)
       setActiveRuntime('')
       setInputRequest(null)
@@ -3771,9 +3815,70 @@ export default function App() {
     else void startMainThreadRun(crashed.note ? `${crashed.note}\n${note}` : note)
   }
 
+  /** Put the tab on a rung, remembered for the rest of the tab's session. */
+  const applyWorkerPlan = (plan: WorkerPlan, reason: string) => {
+    workerPlanRef.current = plan
+    setWorkerPlan({ plan, reason })
+    rememberWorkerPlan({ plan, reason })
+    // A parked worker belongs to the rung it was made for: one created before
+    // the service worker took control of the page never hears from it.
+    prewarmedTraceWorkerRef.current?.terminate()
+    prewarmedTraceWorkerRef.current = null
+  }
+
+  /** The banner's "Try again": forget the fallback and start from the best rung. */
+  const retryTraceWorker = () => {
+    rememberWorkerPlan(null)
+    workerFailuresRef.current = 0
+    const fresh = detectWorkerPlan()
+    workerPlanRef.current = fresh.plan
+    setWorkerPlan(fresh)
+    prepareTraceWorker()
+  }
+
+  /**
+   * The trace worker failed in a way that is the browser's, not the program's
+   * (utils/runtimeFallback.ts): step down a rung and run the program again
+   * there, with a note saying what happened. Waits, like crash recovery, until
+   * React has committed the failed run's end.
+   */
+  const scheduleWorkerFallback = (failed: TraceTransport, failure: WorkerFailure, reason: string, mode: WorkerRunMode) => {
+    const token = ++crashRecoveryTokenRef.current
+    const deadline = Date.now() + 5000
+    const attempt = () => {
+      if (token !== crashRecoveryTokenRef.current) return
+      if (isRunningRef.current || workerRef.current) {
+        if (Date.now() < deadline) window.setTimeout(attempt, 50)
+        return
+      }
+      workerFallbackRef.current(failed, failure, reason, mode)
+    }
+    window.setTimeout(attempt, 0)
+  }
+  // Re-pointed every render, so the fallback sees committed state.
+  workerFallbackRef.current = (failed, failure, reason, mode) => {
+    const decision = decideFallback(failed, failure, {
+      serviceWorkerSupported: serviceWorkerSyncSupported(),
+      workerFailures: workerFailuresRef.current,
+    })
+    // Counted only when the worker itself is what sent the run elsewhere.
+    if (decision.rerunOn === 'main-thread' && failure !== 'transport') workerFailuresRef.current++
+    if (decision.plan !== workerPlanRef.current) applyWorkerPlan(decision.plan, reason)
+    const note = fallbackNote(failed, decision, reason)
+    if (decision.rerunOn === 'main-thread') {
+      void startMainThreadRun(note)
+      return
+    }
+    // Pyodide has already been reset and retried once to get here, so a crash
+    // on the new transport goes straight on to the main thread.
+    if (failure === 'crash') crashRetryRunRef.current = true
+    void startTraceWorker(mode, note)
+  }
+
   /** `note` is printed once the console has been cleared for the run. */
   const startTraceWorker = async (modeOverride?: WorkerRunMode, note?: string) => {
-    if (!hasSab || !hasCode || isRunningRef.current || workerRef.current) return
+    const transport = workerPlanRef.current
+    if (transport === 'none' || !hasCode || isRunningRef.current || workerRef.current) return
     const isCrashRetry = crashRetryRunRef.current
     crashRetryRunRef.current = false
     crashRecoveryTokenRef.current++
@@ -3801,6 +3906,15 @@ export default function App() {
       // On every run, re-consume fixed inputs from the top and show the console (not the Inputs tab).
       setConsoleTab('console')
       setCodeStatus('Preparing trace-worker runtime...')
+
+      // Held requests need the service worker in control of the page before
+      // the worker is created. Not having it is that transport failing.
+      const serviceWorkerProblem = transport === 'xhr' ? await ensureSyncServiceWorker() : null
+      if (serviceWorkerProblem) {
+        abortStart('The step-by-step runner could not start.')
+        scheduleWorkerFallback('xhr', 'transport', serviceWorkerProblem, choice)
+        return
+      }
 
       const saved = await saveCurrentToVFS()
       if (!startIsCurrent()) {
@@ -3894,14 +4008,12 @@ export default function App() {
     setMainThreadStatus(choice === 'debug' ? 'Debug worker runtime is active.' : 'Trace-worker runtime is active.')
 
     let worker: Worker
+    let channel: TraceChannel
     try {
-      const sab = new SharedArrayBuffer(1024 * 4)
-      sabRef.current = { sab, int32: new Int32Array(sab), uint8: new Uint8Array(sab) }
-      sabRef.current.int32[750] = -1  // sentinel: -1 = watches not yet written by main thread
-      sabRef.current.int32[751] = 0   // cooperative trace-table stop request
-      stdctxKeyBufferRef.current = usesSpongeLibsForRun
-        ? new Uint8Array(new SharedArrayBuffer(STDCTX_KEY_BUFFER_SIZE))
-        : null
+      channel = transport === 'xhr'
+        ? createXhrChannel()
+        : createSabChannel(usesSpongeLibsForRun ? STDCTX_KEY_BUFFER_SIZE : null)
+      traceChannelRef.current = channel
 
       // Claim the background-warmed worker when available. If the user clicked
       // before warm-up completed, the queued init message simply shares the same
@@ -3912,12 +4024,14 @@ export default function App() {
       startGuard.finish(startClaim)
     } catch (error) {
       startGuard.finish(startClaim)
-      sabRef.current = null
+      disposeTraceChannel()
       setIsRunning(false); setActiveRuntime('')
       workerRunModeRef.current = 'debug'
       workerStartModeRef.current = 'debug'
       if (traceTableSessionId) finishTraceSession('error', String(error))
       setCodeStatus(`Worker runtime failed to start: ${error instanceof Error ? error.message : String(error)}`)
+      restoreRunPresentationMode()
+      scheduleWorkerFallback(transport, 'transport', String(error), choice)
       return
     }
 
@@ -3929,7 +4043,7 @@ export default function App() {
      * its Python has unwound and it is back in its own event loop, ready to
      * clear the run's state on the next `init`. Every other ending — a forced
      * stop, a wedged or errored worker, a trace that hit the event limit and
-     * deliberately parked itself in Atomics.wait — must terminate instead.
+     * deliberately parked itself for good — must terminate instead.
      */
     const releaseWorker = (recycle = false) => {
       traceWorkerStartGuardRef.current.cancel()
@@ -3937,8 +4051,8 @@ export default function App() {
       traceStopTimeoutRef.current = null
       traceStopAckHandlerRef.current = null
       if (workerRef.current === worker) workerRef.current = null
-      sabRef.current = null
-      stdctxKeyBufferRef.current = null
+      if (traceChannelRef.current === channel) traceChannelRef.current = null
+      channel.dispose()
       if (recycle && holdIdleTraceWorker(worker)) return
       worker.terminate()
       window.setTimeout(prepareTraceWorker, 0)
@@ -3967,7 +4081,17 @@ export default function App() {
     worker.onmessage = (e: MessageEvent) => {
       if (workerRef.current !== worker) return
       const data = e.data
-      if (data.type === 'trace-table-batch') {
+      // What the worker is about to block on, noted before anything answers it.
+      // (A `trace` with no turn number only reports state: nothing is waiting.)
+      if ((data.type === 'trace' || data.type === 'input') && typeof data.seq === 'number') channel.workerWaiting(data.type, data.seq)
+      if (data.type === 'sync-probe') {
+        // The handshake a run starts with: answering it is the whole test.
+        channel.workerWaiting('probe', Number(data.seq) || 0)
+        channel.answerProbe()
+      } else if (data.type === 'started') {
+        workerProvenRef.current = true
+        workerFailuresRef.current = 0
+      } else if (data.type === 'trace-table-batch') {
         const current = traceSessionRef.current
         if (!current || data.sessionId !== current.id) return
         try {
@@ -4052,8 +4176,17 @@ export default function App() {
         // A reported Python error still means the worker unwound cleanly —
         // unless its Pyodide died, when recycling it would hand every later
         // run the same dead runtime.
-        releaseWorker(!data.fatal)
-        if (data.fatal) scheduleCrashRecovery({ runtime: 'trace-worker', mode: choice }, isCrashRetry, String(data.error))
+        // The worker is reusable only when the failure was the program's.
+        releaseWorker(!data.fatal && !data.failure)
+        if (data.failure) {
+          scheduleWorkerFallback(transport, data.failure as WorkerFailure, String(data.error), choice)
+        } else if (data.fatal && isCrashRetry && !workerProvenRef.current) {
+          // Dead again straight after a reset, in a tab where no worker run has
+          // ever reached the program: this browser, not this program.
+          scheduleWorkerFallback(transport, 'crash', String(data.error), choice)
+        } else if (data.fatal) {
+          scheduleCrashRecovery({ runtime: 'trace-worker', mode: choice }, isCrashRetry, String(data.error))
+        }
       } else if (data.type === 'done') {
         if (data.files?.length) {
           void syncFilesFromPyodide(capturedFsId, data.files).then(() => setVfsReloadTrigger(t => t + 1))
@@ -4094,7 +4227,7 @@ export default function App() {
         restoreRunPresentationMode()
         workerRunModeRef.current = 'debug'
         workerStartModeRef.current = 'debug'
-        // A trace that hit the event limit parks itself in Atomics.wait after
+        // A trace that hit the event limit parks itself for good after
         // posting this, so that worker can never be reused.
         releaseWorker(!data.traceTableLimitReached)
       } else if (data.type === 'turtle_update') {
@@ -4118,9 +4251,11 @@ export default function App() {
       setInputRequest(null); setInputValue(''); setIsRunning(false); setActiveRuntime('')
       setCodeStatus('Worker runtime failed.')
       if (workerStartModeRef.current === 'trace') finishTraceSession('error', event.message || 'Worker failed')
+      restoreRunPresentationMode()
       workerRunModeRef.current = 'debug'
       workerStartModeRef.current = 'debug'
       releaseWorker()
+      scheduleWorkerFallback(transport, 'start', `Worker failed to start: ${event.message || 'unknown worker error'}`, choice)
     }
 
     const svgTurtleBootstrap = hasTurtleForMode && effectiveTurtleMode(capturedCode) === 'basthon-svg' ? SVG_TURTLE_WORKER_SETUP : ''
@@ -4130,7 +4265,7 @@ export default function App() {
     try {
       worker.postMessage({
         type: 'init',
-        sab: sabRef.current.sab,
+        ...channel.initFields(),
         code: capturedCode,
         files: vfsFiles,
         cwd: capturedCwd,
@@ -4142,7 +4277,6 @@ export default function App() {
         extraPackages: pyodidePackagesFor(plottingLibsForRun),
         micropipInstall: micropipPackagesForRun.length ? micropipInstallCode(micropipPackagesForRun) : '',
         moduleSources: programFiles.map(file => new TextDecoder().decode(file.content)),
-        stdctxKeyBuffer: stdctxKeyBufferRef.current?.buffer ?? null,
         watches: watchesRef.current,
         breakpoints: initialBreakpoints,
         traceTableEnabled: choice === 'trace',
@@ -4154,9 +4288,12 @@ export default function App() {
       setInputRequest(null); setInputValue(''); setIsRunning(false); setActiveRuntime('')
       if (choice === 'trace') finishTraceSession('error', String(error))
       setCodeStatus(`Worker runtime failed to start: ${error instanceof Error ? error.message : String(error)}`)
+      restoreRunPresentationMode()
       workerRunModeRef.current = 'debug'
       workerStartModeRef.current = 'debug'
       releaseWorker()
+      // Shared memory that cannot be handed to the worker is that transport failing.
+      scheduleWorkerFallback(transport, 'transport', String(error), choice)
     }
   }
 
@@ -4543,37 +4680,19 @@ ${runProgramPython('exec(code_obj, globals())')}
   }
 
   const sendTraceCommand = (cmd: number) => {
-    if (!sabRef.current) return
-    const { int32, uint8 } = sabRef.current
-    if (Atomics.load(int32, 0) === 1) {
-      if (turtleScrubLockedRef.current) {
-        turtleScrubLockedRef.current = false
-        setTurtleScrubPlaying(false)
-        setTurtleScrubStep(turtleSvgHistoryRef.current.length - 1)
-      }
-      // Only enabled breakpoints reach the worker. Line numbers go in
-      // int32[500]=count / int32[501..]; conditions (line→expr, conditional
-      // ones only) go as JSON in int32[600]=byteLen / uint8[2404..].
-      const enabledBps = [...breakpointsRef.current.entries()].filter(([, bp]) => bp.enabled)
-      int32[500] = Math.min(enabledBps.length, 99)
-      const conditions: Record<number, string> = {}
-      enabledBps.forEach(([ln, bp], i) => {
-        if (i < 99) int32[501 + i] = ln
-        if (bp.condition.trim()) conditions[ln] = bp.condition.trim()
-      })
-      const condBytes = new TextEncoder().encode(JSON.stringify(conditions))
-      const condLen = Math.min(condBytes.length, 592)
-      uint8.set(condBytes.subarray(0, condLen), 2404)
-      int32[600] = condLen
-      // Write current watch expressions to SAB (int32[750]=length, uint8[3008..]=JSON).
-      const watchJson = JSON.stringify(watchesRef.current)
-      const watchBytes = new TextEncoder().encode(watchJson)
-      const safeLen = Math.min(watchBytes.length, 1088)
-      uint8.set(watchBytes.subarray(0, safeLen), 3008)
-      Atomics.store(int32, 750, safeLen)
-      Atomics.store(int32, 1, cmd); Atomics.store(int32, 0, 0); Atomics.notify(int32, 0, 1)
-      if (workerStartModeRef.current === 'trace') setTraceSessionActivity('recording')
+    const channel = traceChannelRef.current
+    if (!channel?.isWaiting('trace')) return
+    if (turtleScrubLockedRef.current) {
+      turtleScrubLockedRef.current = false
+      setTurtleScrubPlaying(false)
+      setTurtleScrubStep(turtleSvgHistoryRef.current.length - 1)
     }
+    // Only enabled breakpoints reach the worker, with the current watches.
+    const enabledBreakpoints = [...breakpointsRef.current.entries()]
+      .filter(([, breakpoint]) => breakpoint.enabled)
+      .map(([line, breakpoint]) => ({ line, condition: breakpoint.condition.trim() }))
+    channel.sendCommand(cmd, enabledBreakpoints, watchesRef.current)
+    if (workerStartModeRef.current === 'trace') setTraceSessionActivity('recording')
   }
 
   const handleInputSubmit = (submittedValue = inputValue) => {
@@ -4588,19 +4707,10 @@ ${runProgramPython('exec(code_obj, globals())')}
       resolveMainThreadInput(submittedValue)
       return
     }
-    if (!sabRef.current) return
+    const channel = traceChannelRef.current
+    if (!channel) return
     if (captureRunRef.current) captureInputsRef.current.push(submittedValue)
-    const { int32, uint8 } = sabRef.current
-    if (Atomics.load(int32, 0) === 2) {
-      const encoder = new TextEncoder()
-      const bytes = encoder.encode(submittedValue)
-      // Input occupies bytes 12..1999 only. Bytes 2000+ contain breakpoint,
-      // watch-expression, and cooperative-stop metadata that must survive an
-      // input submission or stop wake-up.
-      const inputEnd = 2000
-      const safeBytes = bytes.slice(0, inputEnd - 12)
-      int32[2] = safeBytes.length; uint8.fill(0, 12, inputEnd); uint8.set(safeBytes, 12)
-      Atomics.store(int32, 0, 0); Atomics.notify(int32, 0, 1)
+    if (channel.sendInput(submittedValue)) {
       if (workerStartModeRef.current === 'trace') setTraceSessionActivity('recording')
       setInputRequest(null); setInputValue('')
       const returnTab = completeTraceInputTabHandoff(
@@ -4619,20 +4729,18 @@ ${runProgramPython('exec(code_obj, globals())')}
       return
     }
     if (workerRef.current) {
-      if (workerStartModeRef.current === 'trace' && sabRef.current && traceStopAckHandlerRef.current) {
-        const { int32 } = sabRef.current
-        if (Atomics.compareExchange(int32, 751, 0, 1) === 0) {
+      if (workerStartModeRef.current === 'trace' && traceChannelRef.current && traceStopAckHandlerRef.current) {
+        // Wakes a worker paused either for stepping or for input. The worker
+        // sees the request, flushes, and acknowledges before termination.
+        if (traceChannelRef.current.requestStop()) {
           setCodeStatus('Stopping trace runtime and saving its final trace events...')
-          // Wake a worker paused either for stepping or for input. The worker
-          // observes int32[751], flushes, and acknowledges before termination.
-          Atomics.notify(int32, 0, 1)
           traceStopTimeoutRef.current = window.setTimeout(() => {
             traceStopAckHandlerRef.current?.(null)
           }, 5000)
         }
         return
       }
-      workerRef.current.terminate(); workerRef.current = null; sabRef.current = null
+      workerRef.current.terminate(); workerRef.current = null; disposeTraceChannel()
       setCodeStatus('Worker runtime stopped.')
       restoreRunPresentationMode()
       workerRunModeRef.current = 'debug'
@@ -4851,7 +4959,7 @@ ${runProgramPython('exec(code_obj, globals())')}
         setRunModeChoice(action.mode)
         setIsRunDropdownOpen(false)
         if (selectedRuntime === 'trace-worker') {
-          if (hasCode && hasSab) void startTraceWorker(action.mode)
+          if (hasCode && canUseTraceWorker) void startTraceWorker(action.mode)
         } else if (hasCode) {
           void startMainThreadRun()
         }
@@ -4975,7 +5083,7 @@ ${runProgramPython('exec(code_obj, globals())')}
               <div ref={runDropdownRef} className="relative flex">
                 <button
                   onClick={() => void startTraceWorker()}
-                  disabled={!hasCode || !hasSab}
+                  disabled={!hasCode || !canUseTraceWorker}
                   className={`rounded-l px-5 py-2 font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-white ${
                     runModeChoice === 'trace' ? 'bg-emerald-600 hover:bg-emerald-500' :
                     runModeChoice === 'run'   ? 'bg-sky-600 hover:bg-sky-500' :
@@ -4987,7 +5095,7 @@ ${runProgramPython('exec(code_obj, globals())')}
                 <button
                   type="button"
                   onClick={() => setIsRunDropdownOpen(o => !o)}
-                  disabled={!hasCode || !hasSab}
+                  disabled={!hasCode || !canUseTraceWorker}
                   title="Choose run mode (F5 Debug · Ctrl+F5 Run · Ctrl+Shift+F5 Trace)"
                   className={`rounded-r border-l border-white/20 px-2 py-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-white ${
                     runModeChoice === 'trace' ? 'bg-emerald-600 hover:bg-emerald-500' :
@@ -5173,28 +5281,39 @@ ${runProgramPython('exec(code_obj, globals())')}
         </div>
       )}
 
-      {/* SAB warning — this tab cannot run the trace worker */}
-      {!hasSab && selectedRuntime === 'trace-worker' && (
+      {/* This tab cannot run the trace worker: say why. Programs already run on
+          the main thread; choosing it as the preference dismisses the notice. */}
+      {!canUseTraceWorker && runtimePreference === 'trace-worker' && (
         <div role="alert" className="m-4 rounded border border-red-500 bg-red-900/50 p-4 text-red-200">
           <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div className="min-w-0">
               <strong>The step-by-step runner isn't available in this tab.</strong>{' '}
-              {isolationProblemMessage(
-                diagnoseIsolationProblem(currentIsolationEnvironment()),
-                ['localhost', '127.0.0.1'].includes(window.location.hostname),
-              )}
+              {workerPlan.reason
+                ? workerUnavailableMessage(workerPlan.reason)
+                : isolationProblemMessage(
+                    diagnoseIsolationProblem(currentIsolationEnvironment()),
+                    ['localhost', '127.0.0.1'].includes(window.location.hostname),
+                  )}
               <div className="mt-2 text-sm text-red-100">
-                Programs can still run on the main thread: {mainThreadInputSummary(browserSupportsJspi())}{' '}
+                Programs run on the main thread instead: {mainThreadInputSummary(browserSupportsJspi())}{' '}
                 Step debugging and live inspection are turned off there.
               </div>
               <div className="mt-1 text-[11px] text-red-200/70">
                 (<code>window.crossOriginIsolated</code> is <code>{String(isCrossOriginIsolated)}</code>.)
               </div>
             </div>
-            <button type="button" onClick={() => setRuntimePreference('main-thread')}
-              className="shrink-0 rounded border border-amber-400 bg-amber-500/15 px-4 py-2 text-sm font-semibold text-amber-100 transition-colors hover:bg-amber-500/25">
-              Use Main Thread
-            </button>
+            <div className="flex shrink-0 flex-wrap gap-2">
+              {workerPlan.reason && (
+                <button type="button" onClick={retryTraceWorker}
+                  className="rounded border border-red-300/60 px-4 py-2 text-sm font-semibold text-red-100 transition-colors hover:bg-red-500/20">
+                  Try again
+                </button>
+              )}
+              <button type="button" onClick={() => setRuntimePreference('main-thread')}
+                className="rounded border border-amber-400 bg-amber-500/15 px-4 py-2 text-sm font-semibold text-amber-100 transition-colors hover:bg-amber-500/25">
+                Use Main Thread
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -6135,7 +6254,8 @@ ${runProgramPython('exec(code_obj, globals())')}
         runtimePreference={runtimePreference} selectedRuntime={selectedRuntime}
         onSelectRuntime={key => { setRuntimePreference(key); closeExecutionDialog() }}
         isPygameLocked={isPygameLocked || isTurtleLocked || isTkinterLocked}
-        lockedLibrary={isPygameLocked ? 'pygame' : isTkinterLocked ? 'tkinter' : 'turtle'} hasSab={hasSab} />
+        lockedLibrary={isPygameLocked ? 'pygame' : isTkinterLocked ? 'tkinter' : 'turtle'}
+        traceWorkerAvailable={canUseTraceWorker} />
 
       {showBookJsonEditor && editManifest && (
         <BookJsonEditor

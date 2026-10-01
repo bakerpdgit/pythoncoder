@@ -23,7 +23,10 @@ export default defineConfig({
   expect: { timeout: 60_000 },
   reporter: process.env.CI ? 'list' : [['list']],
   use: {
-    baseURL: 'http://localhost:3000',
+    // E2E_BASE_URL points the suite at another server — the production build
+    // under `npm start`, whose workers are classic scripts that importScripts
+    // Pyodide, where the dev server's are modules that import() it.
+    baseURL: process.env.E2E_BASE_URL ?? 'http://localhost:3000',
     trace: 'retain-on-failure',
     actionTimeout: 15_000,
   },
@@ -32,10 +35,12 @@ export default defineConfig({
     // The Safari engine. Every browser on an iPad is WebKit, and WebKit needs
     // its own cross-origin isolation header (scripts/isolationPolicy.mjs), so
     // the input and isolation specs run here too: `npm run test:e2e:webkit`
-    // after `npx playwright install webkit`.
+    // after `npx playwright install webkit`. So does the transport spec: the
+    // service-worker way of waiting exists for the browsers where shared
+    // memory lets a student down, and those are WebKit.
     {
       name: 'webkit',
-      testMatch: ['isolation.spec.ts', 'input.spec.ts'],
+      testMatch: ['isolation.spec.ts', 'input.spec.ts', 'transport.spec.ts'],
       use: {
         ...devices['Desktop Safari'],
         launchOptions: {

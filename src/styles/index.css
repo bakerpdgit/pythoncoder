@@ -211,6 +211,13 @@ html[data-theme="light"] .text-slate-400 { color: #475569 !important; }
 html[data-theme="light"] .text-slate-500 { color: #64748b !important; }
 html[data-theme="light"] .text-slate-600 { color: #64748b !important; }
 html[data-theme="light"] .text-red-200 { color: #991b1b !important; }
+/* The pale reds and ambers are written for dark tints. On the light theme's
+   pink and cream they vanished: the "runner isn't available" notice lost its
+   second line and both of its buttons. */
+html[data-theme="light"] .text-red-100 { color: #7f1d1d !important; }
+html[data-theme="light"] .text-red-200\/70 { color: rgba(153, 27, 27, 0.75) !important; }
+html[data-theme="light"] .border-red-300\/60 { border-color: rgba(153, 27, 27, 0.5) !important; }
+html[data-theme="light"] .text-amber-100 { color: #78350f !important; }
 html[data-theme="light"] .hover\:text-white:hover { color: #0f172a !important; }
 html[data-theme="light"] .hover\:border-slate-400:hover { border-color: #94a3b8 !important; }
 html[data-theme="light"] .hover\:bg-slate-600:hover { background-color: #e2e8f0 !important; }

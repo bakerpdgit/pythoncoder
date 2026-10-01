@@ -61,7 +61,12 @@ Three layers, all of which should pass before a change is called done:
   `indent.spec.ts` covers per-file indentation (a four-space exercise after a
   two-space one, Enter after a colon, re-indenting from the cog menu).
   `recovery.spec.ts` covers the unsaved-changes backup (offered after a reload,
-  restored or discarded) and a crashed Pyodide being reset and re-run once. A
+  restored or discarded) and a crashed Pyodide being reset and re-run once.
+  `transport.spec.ts` covers the trace worker's second way of waiting and the
+  step down between them: a page stripped of its isolation headers still
+  debugging, Trace stepping / Stop / `time.sleep` over the service worker,
+  shared memory that silently does not work falling back to the service
+  worker, and no service worker either falling back to the main thread. A
   program that only draws leaves its console folded, so specs read its
   transcript through the Copy button rather than the rows. `tkinter.spec.ts` sets the
   editor through Monaco's API rather than `insertText`, which re-indents every
@@ -71,7 +76,7 @@ Three layers, all of which should pass before a change is called done:
   book finds its end by asking for a file that is not there, and the browser logs
   that 404 as a console error. Needs network (Pyodide comes from a CDN), ~50s.
 - **`npm run test:e2e:webkit`** — the Safari engine (after `npx playwright install
-  webkit`): `isolation.spec.ts` and `input.spec.ts` only. Playwright's WebKit build
+  webkit`): `isolation.spec.ts`, `input.spec.ts` and `transport.spec.ts` only. Playwright's WebKit build
   ships SharedArrayBuffer switched off (microsoft/playwright#28513), so the config
   passes `JSC_useSharedArrayBuffer=true`, and every test that needs SAB or JSPI
   skips itself with the reason when the build lacks it. The header test does not
@@ -123,6 +128,7 @@ src/
     tkinter/                  # Coder's own tkinter package (real .py files, ?raw-imported)
   workers/
     tracer.worker.ts          # Pyodide trace worker (imported via ?worker)
+    workerSync.ts             # how that worker blocks on the page: shared memory, or a held request
     tester.worker.ts          # Pyodide worker for running challenge tests
   utils/
     codeAnalysis.ts           # Python source parsing (classes, functions, outline)
@@ -141,6 +147,9 @@ src/
     pyodideFs.ts              # which Pyodide MEMFS dirs are off-limits when syncing back
     pyodideReset.ts           # Python-side reset that makes a reused Pyodide look fresh
     pyodideCrash.ts           # telling a dead Pyodide from a failed program
+    traceSyncProtocol.ts      # what the page and the trace worker say to each other, either way
+    traceChannel.ts           # the page's end of that, and the service worker's registration
+    runtimeFallback.ts        # shared memory → service worker → main thread: when to step down
     editorDraft.ts            # per-filesystem backup of the editor's unsaved changes
     testMatcher.ts            # Challenge test evaluation
     download.ts               # File download helpers
@@ -190,8 +199,9 @@ src/
 
 ### Cross-Origin Isolation requirement
 
-`SharedArrayBuffer` (used to synchronise the Pyodide worker) requires the page to
-be cross-origin isolated:
+`SharedArrayBuffer` (the trace worker's first choice for waiting on the page;
+see *Two ways for the worker to wait* for what happens without it) requires the
+page to be cross-origin isolated:
 
 - `Cross-Origin-Opener-Policy: same-origin`
 - `Cross-Origin-Embedder-Policy:` **`credentialless` for Chromium and Firefox,
@@ -242,17 +252,115 @@ packages, Monaco) and raw.githubusercontent.com send
 - A guide or page `<img>` straight from a site that sends neither CORP nor CORS
   is blocked in Safari (it loads in Chromium).
 
-The banner shown when the trace worker cannot run (`utils/isolationStatus.ts`)
-says *why* in plain words: framed by another page, not https, isolated but no
-SharedArrayBuffer, Safari missing its header, or headers missing generally.
+The banner shown when the trace worker cannot run at all says *why* in plain
+words. A tab that tried and failed quotes what went wrong
+(`workerUnavailableMessage`); one that never could — no shared memory *and* no
+service worker — gets `utils/isolationStatus.ts`: framed by another page, not
+https, isolated but no SharedArrayBuffer, Safari missing its header, or headers
+missing generally.
 
 ### How the tracer works
 
 1. The user pastes Python code into the Monaco editor.
 2. On "Run", the main thread creates a **Web Worker** from `src/workers/tracer.worker.ts` (bundled by Vite as an IIFE so it can call `importScripts`).
 3. The worker calls `importScripts` to load Pyodide from CDN, then injects a Python `sys.settrace` hook that calls back into JS (`js_trace_callback`) on every line.
-4. A **SharedArrayBuffer** (4 KB) is shared between the main thread and the worker. The worker blocks on `Atomics.wait` after each trace event; the main thread unblocks it via `Atomics.notify` when the user clicks Step/Continue.
+4. The worker **blocks** after each trace event until the user clicks Step/Continue. Normally that is `Atomics.wait` on a **SharedArrayBuffer** (4 KB) the main thread writes to and notifies; where that is unavailable or does not work, it is a synchronous request a service worker holds open (next section).
 5. Trace state (current line, variables, object graph) is posted back as structured messages and rendered by the React UI.
+
+### Two ways for the worker to wait, and stepping down when one fails
+
+- A tab used to be judged once, at load, by `crossOriginIsolated`: isolated
+  meant the trace worker was offered, not isolated meant a banner and the main
+  thread. That check says the worker *should* work. Safari on a Mac and an iPad
+  passed it (after the `require-corp` change) and then failed **every** run
+  with an error in the console, leaving students to find the Execution setting.
+  **Why Safari fails is not yet known.** It does not reproduce in WebKitGTK or
+  in Playwright's WebKit: both isolate, and both run the worker — including
+  with the JavaScript stack squeezed to what a Mac worker thread is believed
+  to get (`JSC_maxPerThreadStackUsage`; it takes under ~130KB of usable stack
+  before Pyodide fails to load with a `RangeError`). Those builds also have
+  SharedArrayBuffer forced on by a JavaScriptCore option, so they never
+  exercise the way Safari itself enables it. The first run on a real Safari
+  now reports the cause (below); until that has been read, do not assume one.
+- So there are now three rungs (`utils/runtimeFallback.ts`), and **a run
+  proves its rung**:
+  1. **`sab`** — the trace worker, waiting on shared memory;
+  2. **`xhr`** — the trace worker, waiting on a **synchronous XMLHttpRequest
+     to an address that does not exist**, which `public/trace-sync-sw.js`
+     holds open until the page posts the answer. This is what Python Sponge
+     did (`oldpythongsponge/public/pysw.js`). It needs no isolation at all;
+  3. **`none`** — the main thread, without stepping or the inspector.
+- **A tab that is not isolated starts on `xhr`, not on a banner.** A school
+  filter stripping the headers, or an embedding page, no longer costs the
+  student the debugger.
+- **The handshake.** The first thing a run's worker does, before Pyodide or
+  any Python, is `sync.probe`: announce (`sync-probe`), block, and expect the
+  page's answer within `PROBE_TIMEOUT_MS`. It has to be then — a program that
+  is already executing cannot be moved to another transport.
+- **What counts as the runtime's failure** rather than the program's — the
+  worker marks it on its `error` message as `failure`:
+  `transport` (the handshake failed, or a wait threw mid-run — `watchSync`
+  notes it where it happens, because it reaches the catch block wrapped in a
+  Python exception), `load` (Pyodide would not load in the worker), `start`
+  (the worker's own code threw, or `worker.onerror`). A fourth, `crash`, is
+  decided by the page: Pyodide dead again straight after the automatic reset,
+  in a tab where no worker run has ever reached the program
+  (`workerProvenRef`, set by the worker's `started` message).
+- **What happens then** (`decideFallback`, carried out by
+  `scheduleWorkerFallback` in `App.tsx`): any failure on shared memory except
+  `load` moves the tab to the service worker and runs the program again there
+  — a crash as much as a failed handshake, because on a browser nobody can
+  debug, "it might be the shared memory" cannot be ruled out by reasoning. A
+  `load` failure is the same download on either transport, and a worker that
+  fails on the service worker too has nothing left to change, so those run the
+  program on the main thread at once, and the worker is given one more run
+  before the tab settles on `none` (a dropped connection while Pyodide loads
+  looks identical). Either way the re-run opens with a note saying what happened
+  and `What went wrong: …`, which is the worker's own account plus
+  `[while <stage>; waiting by …; isolated: …; SharedArrayBuffer: …]`
+  (`withContext`). On a browser nobody can attach a debugger to, the Copy
+  button on that note is the diagnosis.
+- The rung is remembered per tab (`sessionStorage`), so a tab does not fail
+  the same way on every run. The banner for `none` quotes the reason and
+  offers **Try again**. With `none`, `selectedRuntime` is the main thread by
+  itself — nobody has to find the setting.
+- **`?transport=sab|xhr|none`** puts a tab on one rung, which is how one is
+  tried on a particular browser (and how the e2e spec reaches `xhr` in a
+  browser that has shared memory).
+- `App.tsx` never touches a SharedArrayBuffer or the service worker. It holds
+  one `TraceChannel` per run (`utils/traceChannel.ts`); the worker holds the
+  matching `WorkerSync` (`workers/workerSync.ts`); `utils/traceSyncProtocol.ts`
+  is what both agree on, including the buffer layout. `workerSync.test.ts`
+  joins the two halves of each transport directly.
+- **The service worker is a relay, never a source of truth**, because the
+  browser may kill it at any moment. A held request is released with `204`
+  after 20s and the worker asks again; a request for a session the service
+  worker has never heard of makes it post `coder-sync-resync`, and the page
+  sends its state and any unanswered reply again. It answers only under
+  `/__coder_sync__/`; every other request returns from its fetch handler
+  untouched.
+- It is registered **only when the `xhr` rung is used**, at scope `/` — it
+  has to control the page, because in Chromium a worker inherits its
+  controller from the page that made it. A worker created before the service
+  worker took control never hears from it, which is why changing rung discards
+  the parked worker and `prepareTraceWorker` waits for the controller.
+- An answer is recognised by its `X-Coder-Sync` header. Plenty of servers —
+  this app's dev server included — answer any unknown address with their index
+  page and a `200`, and a worker that believed that would parse HTML as its
+  debugger command.
+- Things the worker *polls* rather than waits for cannot cost a request per
+  traced line: the stop flag is asked for at most every 200ms and held keys
+  every 25ms, and a `time.sleep()` response carries the key state, so a game
+  loop that sleeps each frame never polls at all.
+- **The page often answers before the worker has begun to wait** — the
+  message is handled faster than the worker gets from `postMessage` to
+  `Atomics.wait` (measured in Chromium). Shared memory copes because the wait
+  compares a value the answer has already changed, so every answer, a stop
+  request included, must *change the state word*, not merely notify. The
+  service worker copes by keeping an early reply for the turn it answers.
+- A stepping round trip over the service worker measured ~4ms in Chromium and
+  ~70ms in Playwright's WebKit. A plain Run or Debug with no breakpoints makes
+  no round trips at all.
 
 ### One Pyodide per session, not per run
 
@@ -379,7 +487,8 @@ SharedArrayBuffer, Safari missing its header, or headers missing generally.
   `?book=<url>` (a `book.json` or a book ZIP), `?challenge=<id>`, `?showFirst`,
   `?simple` (read `?book=` as a *simple learning book*), `?mode=trace|run|debug`,
   and `?filesystem=<url>`. `buildShareLink` (`utils/bookSource.ts`) is the only
-  place that composes them.
+  place that composes them. (`?transport=` is a diagnostic, not a student link:
+  see *Two ways for the worker to wait*.)
 - `?challenge=` resolves through `findBookTargetById` (`utils/bookLoader.ts`),
   which walks the whole tree depth-first: an **activity** id enters that
   activity, a **sub-book** id opens that section's contents. Ids are not

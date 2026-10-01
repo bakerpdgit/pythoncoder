@@ -5,6 +5,7 @@ import { pyodideSkipDirs } from '../utils/pyodideFs'
 import { PYODIDE_RUNTIME_RESET_CODE } from '../utils/pyodideReset'
 import { runProgramPython } from '../utils/programExit'
 import { isPyodideFatalError, isPyodideUsable } from '../utils/pyodideCrash'
+import { SyncChannelError, createSabSync, createXhrSync, watchSync, type WorkerSync } from './workerSync'
 
 const PYODIDE_BASE_URL = 'https://cdn.jsdelivr.net/pyodide/v0.29.3/full'
 const PYODIDE_URL = `${PYODIDE_BASE_URL}/pyodide.js`
@@ -22,7 +23,20 @@ let fatalReported = false
 function reportFatal(error: string) {
   if (fatalReported) return
   fatalReported = true
-  self.postMessage({ type: 'error', error, fatal: true })
+  self.postMessage({ type: 'error', error: withContext(error), fatal: true })
+}
+
+// What the worker was doing, and in what kind of tab, appended to every failure
+// that is the runtime's rather than the program's. A browser nobody at the desk
+// can attach a debugger to (a student's iPad) then says what went wrong in the
+// one place it can be copied from: the console.
+let stage = 'starting'
+let activeTransport = 'nothing yet'
+function withContext(error: unknown): string {
+  const scope = self as unknown as { crossOriginIsolated?: boolean }
+  return `${String(error)}\n[while ${stage}; waiting by ${activeTransport}; `
+    + `isolated: ${scope.crossOriginIsolated === true ? 'yes' : 'no'}; `
+    + `SharedArrayBuffer: ${typeof SharedArrayBuffer === 'function' ? 'yes' : 'no'}]`
 }
 
 // This worker is recycled after a clean run rather than terminated, so a second
@@ -1397,30 +1411,60 @@ sys.settrace(trace_calls)
 self.onmessage = async function (e: MessageEvent) {
   if (e.data.type === 'prewarm') {
     try {
+      stage = 'loading Pyodide'
       await ensurePyodide()
       self.postMessage({ type: 'runtime-ready' })
     } catch (err) {
+      // Let the run that follows load it again rather than inherit this failure.
+      pyodidePromise = null
       self.postMessage({ type: 'warm-error', error: String(err) })
     }
     return
   }
   if (e.data.type !== 'init') return
+  try {
+    await runProgram(e)
+  } catch (err) {
+    // Everything a run can report is reported from inside runProgram. Reaching
+    // here means the worker's own code threw, which used to be an unhandled
+    // rejection: no message at all, and a page left on "starting..." for good.
+    self.postMessage({ type: 'error', failure: 'start', error: withContext(err) })
+  }
+}
 
-  const sab: SharedArrayBuffer = e.data.sab
-  const int32View = new Int32Array(sab)
-  const uint8View = new Uint8Array(sab)
+async function runProgram(e: MessageEvent) {
+  // Before anything else, prove the page can be heard. Whether shared memory
+  // (or the service worker) really works in this browser is only knowable by
+  // using it, and it has to be known before Python runs: a program that is
+  // already executing cannot be moved to another transport.
+  let sync: WorkerSync
+  let syncFailure: unknown = null
+  activeTransport = e.data.transport === 'xhr' ? 'a service worker' : 'shared memory'
+  stage = 'checking the link to the page'
+  try {
+    sync = watchSync(e.data.transport === 'xhr'
+      ? createXhrSync(String(e.data.syncSession), self.location.origin)
+      : createSabSync(e.data.sab as SharedArrayBuffer, (e.data.stdctxKeyBuffer as SharedArrayBuffer | null) ?? null),
+    error => { syncFailure ??= error })
+    sync.probe(seq => self.postMessage({ type: 'sync-probe', seq }))
+  } catch (err) {
+    self.postMessage({ type: 'error', failure: 'transport', error: withContext(err) })
+    return
+  }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let pyodide: any
+  stage = 'loading Pyodide'
   try {
     pyodide = await ensurePyodide()
   } catch (err) {
     // This worker is recycled after an error, so let the next run try again
     // rather than be handed the same failed load.
     pyodidePromise = null
-    self.postMessage({ type: 'error', error: 'Failed to load Pyodide in the worker. ' + String(err) })
+    self.postMessage({ type: 'error', failure: 'load', error: withContext('Failed to load Pyodide in the worker. ' + String(err)) })
     return
   }
+  stage = 'preparing the run'
   // A recycled worker whose Pyodide has since died would otherwise throw from
   // the first globals.set below, outside any try, and never answer at all.
   if (!isPyodideUsable(pyodide)) {
@@ -1434,13 +1478,6 @@ self.onmessage = async function (e: MessageEvent) {
   const plotlyBootstrap = String(e.data.plotlyBootstrap ?? '')
   const micropipInstall = String(e.data.micropipInstall ?? '')
   const extraPackages = (e.data.extraPackages ?? []) as string[]
-  // stdctx key state is a separate SharedArrayBuffer so the tightly packed
-  // trace SAB layout above stays untouched.
-  const stdctxKeys: Uint8Array | null = e.data.stdctxKeyBuffer
-    ? new Uint8Array(e.data.stdctxKeyBuffer as SharedArrayBuffer)
-    : null
-  // Private buffer used only to park the worker for stdctx's time.sleep().
-  const stdctxSleepView = new Int32Array(new SharedArrayBuffer(4))
   const traceTableEnabled = Boolean(e.data.traceTableEnabled ?? e.data.pauseOnFirstLine)
   const traceTableSessionId = String(e.data.traceTableSessionId ?? `trace-${Date.now()}-${Math.random().toString(36).slice(2)}`)
   const requestedTraceTableEventLimit = Number(e.data.traceTableEventLimit ?? TRACE_TABLE_EVENT_LIMIT)
@@ -1453,8 +1490,8 @@ self.onmessage = async function (e: MessageEvent) {
   let traceTableTransportError: string | null = null
   const pendingTraceOutput: string[] = []
 
-  // This callback never blocks the Python worker. Debugger pauses continue to
-  // use js_trace_callback + SharedArrayBuffer; trace-table history is delivered
+  // This callback never blocks the Python worker. Debugger pauses block in
+  // js_trace_callback (see workerSync.ts); trace-table history is delivered
   // separately in modest batches so Continue/Step Over still records all lines.
   pyodide.globals.set('js_trace_table_batch', (payloadStr: string) => {
     try {
@@ -1482,7 +1519,7 @@ self.onmessage = async function (e: MessageEvent) {
     }
   })
 
-  pyodide.globals.set('js_trace_stop_requested', () => Atomics.load(int32View, 751) === 1)
+  pyodide.globals.set('js_trace_stop_requested', () => sync.stopRequested())
   pyodide.globals.set('js_trace_table_take_output', () => {
     const output = pendingTraceOutput.splice(0)
     return JSON.stringify(output)
@@ -1516,8 +1553,7 @@ self.onmessage = async function (e: MessageEvent) {
     // inside the JS bridge so no bare `except`/BaseException handler in user
     // Python can intercept the fallback sentinel and continue untraced. The
     // main thread handles `done` and terminates this worker.
-    const terminalWait = new Int32Array(new SharedArrayBuffer(4))
-    for (;;) Atomics.wait(terminalWait, 0, 0)
+    sync.park()
   })
 
   pyodide.globals.set('js_trace_callback', (line: number, func: string, cls: string, stateStr: string, watchValsStr: string, isBreakpoint: boolean) => {
@@ -1527,53 +1563,23 @@ self.onmessage = async function (e: MessageEvent) {
     }
     let watchValues: Record<string, unknown> = {}
     try { if (watchValsStr && watchValsStr !== '{}') watchValues = JSON.parse(watchValsStr) } catch { /* ignore */ }
-    Atomics.store(int32View, 0, 1)
-    self.postMessage({ type: 'trace', line, func, cls, state: stateStr, turtleSvg, watchValues, isBreakpoint })
-    Atomics.wait(int32View, 0, 1)
-    if (traceTableEnabled && Atomics.load(int32View, 751) === 1) return 5
-    const cmd = Atomics.load(int32View, 1)
-    // Rebuild the breakpoint map: enabled line numbers (int32[500]=count,
-    // int32[501..]) plus a conditions JSON blob (int32[600]=byteLen, uint8[2404..]).
-    // A Map (not a plain object) makes pyodide.toPy produce int keys.
-    const bpCount = Atomics.load(int32View, 500)
-    const bpMap = new Map<number, string>()
-    for (let i = 0; i < bpCount && i < 99; i++) bpMap.set(Atomics.load(int32View, 501 + i), '')
-    try {
-      const condLen = Atomics.load(int32View, 600)
-      if (condLen > 0) {
-        // .slice() (not .subarray()) copies into a non-shared ArrayBuffer;
-        // TextDecoder.decode() rejects SharedArrayBuffer-backed views.
-        const condBytes = uint8View.slice(2404, 2404 + Math.min(condLen, 592))
-        const condMap = JSON.parse(new TextDecoder().decode(condBytes)) as Record<string, string>
-        for (const k in condMap) bpMap.set(Number(k), condMap[k])
-      }
-    } catch { /* ignore malformed conditions */ }
-    pyodide.globals.set('current_breakpoints', pyodide.toPy(bpMap))
-    // Read updated watch expressions from SAB. int32[751] is reserved for the
-    // cooperative stop flag, so JSON starts at byte 3008.
-    try {
-      const watchLen = Atomics.load(int32View, 750)
-      if (watchLen >= 0) {
-        // .slice() copies out of the SharedArrayBuffer (TextDecoder can't decode a shared view).
-        const watchBytes = uint8View.slice(3008, 3008 + Math.min(watchLen, 1088))
-        const exprs: string[] = watchLen === 0 ? [] : JSON.parse(new TextDecoder().decode(watchBytes))
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        pyodide.globals.set('watch_expressions', (pyodide as any).toPy(exprs))
-      }
-    } catch { /* ignore */ }
-    return cmd
+    const answer = sync.waitCommand(seq => {
+      self.postMessage({ type: 'trace', line, func, cls, state: stateStr, turtleSvg, watchValues, isBreakpoint, seq })
+    })
+    if (traceTableEnabled && answer.stop) return 5
+    // Enabled breakpoints, line to condition ('' = unconditional). A Map (not a
+    // plain object) makes pyodide.toPy produce int keys.
+    pyodide.globals.set('current_breakpoints', pyodide.toPy(answer.breakpoints))
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    if (answer.watches) pyodide.globals.set('watch_expressions', (pyodide as any).toPy(answer.watches))
+    return answer.cmd
   })
 
   // ── stdctx bridge ────────────────────────────────────────────────────────
   pyodide.globals.set('js_stdctx_send', (commandsJson: string) => {
     self.postMessage({ type: 'stdctx_draw', commands: String(commandsJson) })
   })
-  pyodide.globals.set('js_stdctx_check_key', (keyCode: number) => {
-    if (!stdctxKeys) return false
-    const code = Number(keyCode)
-    if (!Number.isInteger(code) || code < 0 || code >= stdctxKeys.length) return false
-    return Atomics.load(stdctxKeys, code) > 0
-  })
+  pyodide.globals.set('js_stdctx_check_key', (keyCode: number) => sync.keyDown(Number(keyCode)))
   pyodide.globals.set('js_stdaud_send', (commandJson: string) => {
     self.postMessage({ type: 'stdaud', command: String(commandJson) })
   })
@@ -1590,22 +1596,15 @@ self.onmessage = async function (e: MessageEvent) {
   pyodide.globals.set('js_stdctx_sleep', (seconds: number) => {
     const ms = Number(seconds) * 1000
     if (!Number.isFinite(ms) || ms <= 0) return
-    // Nothing ever notifies this buffer, so the wait always runs to timeout.
     // Blocking here (rather than spinning) leaves the main thread free to
     // paint the draw batches already queued by postMessage.
-    Atomics.wait(stdctxSleepView, 0, 0, ms)
+    sync.sleep(ms)
   })
 
   pyodide.globals.set('js_input_callback', (promptText: string) => {
-    Atomics.store(int32View, 0, 2)
-    self.postMessage({ type: 'input', prompt: promptText })
-    Atomics.wait(int32View, 0, 2)
-    if (traceTableEnabled && Atomics.load(int32View, 751) === 1) return ''
-    const len = Math.max(0, Math.min(Atomics.load(int32View, 2), 1988))
-    const decoder = new TextDecoder()
-    const copiedBytes = new Uint8Array(len)
-    copiedBytes.set(uint8View.subarray(12, 12 + len))
-    return decoder.decode(copiedBytes)
+    const answer = sync.waitInput(seq => self.postMessage({ type: 'input', prompt: promptText, seq }))
+    if (traceTableEnabled && answer.stop) return ''
+    return answer.text
   })
 
   pyodide.globals.set('js_send_state', (line: number, func: string, cls: string, stateStr: string, watchValsStr: string) => {
@@ -1676,6 +1675,7 @@ self.onmessage = async function (e: MessageEvent) {
     // Silence the import scan, then report each distinct warning once against
     // simulation.py, which is the name the student can actually act on.
     await pyodide.runPythonAsync('import warnings; warnings.simplefilter("ignore", SyntaxWarning)')
+    stage = 'installing packages'
     await pyodide.loadPackagesFromImports(userCode)
     // The open file is not the whole program. A module it imports may need
     // numpy just as much, and Pyodide installs only what it is shown.
@@ -1716,10 +1716,15 @@ self.onmessage = async function (e: MessageEvent) {
     pyodide.globals.set('trace_table_enabled', traceTableEnabled)
     pyodide.globals.set('trace_table_event_limit', traceTableEventLimit)
     pyodide.globals.set('user_code_str', userCode)
+    stage = 'preparing the run'
     await pyodide.runPythonAsync(SETUP_CODE)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     pyodide.globals.set('watch_expressions', (pyodide as any).toPy((e.data.watches ?? []) as string[]))
     traceStdoutCapture = traceTableEnabled ? text => pendingTraceOutput.push(text) : null
+    // The worker, its Pyodide and its transport have all been shown to work in
+    // this browser: whatever fails from here is the program's.
+    stage = 'running the program'
+    self.postMessage({ type: 'started' })
     await pyodide.runPythonAsync(
       'code_obj = compile(user_code_str, "simulation.py", "exec")\n' +
       runProgramPython('exec(code_obj, user_namespace, user_namespace)'),
@@ -1744,6 +1749,14 @@ self.onmessage = async function (e: MessageEvent) {
     if (fatalReported) return
     if (isPyodideFatalError(err) || !isPyodideUsable(pyodide)) {
       reportFatal(String(err))
+      return
+    }
+    // The page went quiet mid-run (the service worker lost, say), or waiting
+    // on it threw: the run is over, but it is the transport that failed, not
+    // the program. The failure usually arrives here wrapped in a Python
+    // exception, which is why it was noted where it happened.
+    if (syncFailure || err instanceof SyncChannelError) {
+      self.postMessage({ type: 'error', failure: 'transport', error: withContext(syncFailure ?? err) })
       return
     }
     // Flush ordinary runtime/stop failures, but never retry a transport batch

@@ -12,12 +12,13 @@ interface Props {
   isPygameLocked: boolean
   /** Which import forces the main thread, for the explanation. */
   lockedLibrary?: string
-  hasSab: boolean
+  /** False once this tab has no way of running the trace worker (utils/runtimeFallback.ts). */
+  traceWorkerAvailable: boolean
 }
 
 /** Reached from the settings menu's "Execution: …" row; holds the detail that row leaves out. */
 export const ExecutionModeDialog = ({
-  isOpen, onClose, runtimePreference, selectedRuntime, onSelectRuntime, isPygameLocked, lockedLibrary = 'pygame', hasSab,
+  isOpen, onClose, runtimePreference, selectedRuntime, onSelectRuntime, isPygameLocked, lockedLibrary = 'pygame', traceWorkerAvailable,
 }: Props) => {
   useEffect(() => {
     if (!isOpen) return
@@ -55,8 +56,8 @@ export const ExecutionModeDialog = ({
             const helperText =
               isDisabled
                 ? 'Disabled while this code imports pygame.'
-                : key === 'trace-worker' && !hasSab
-                  ? 'Not available in this tab: the page is not cross-origin isolated.'
+                : key === 'trace-worker' && !traceWorkerAvailable
+                  ? 'Not available in this tab, so programs run on the main thread.'
                   : key === 'main-thread'
                     ? `${mainThreadInputSummary(browserSupportsJspi())} Step tracing and live inspection are limited.`
                     : description

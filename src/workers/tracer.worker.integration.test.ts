@@ -700,7 +700,9 @@ describe.skipIf(!pythonAvailable)('tracer worker embedded Python recorder', () =
     const bridge = workerSource.slice(bridgeStart, bridgeEnd)
     const acknowledgement = bridge.indexOf("type: 'trace-table-limit-reached'")
     const completion = bridge.indexOf("type: 'done'")
-    const terminalWait = bridge.indexOf('Atomics.wait(terminalWait, 0, 0)')
+    // Parking is the transport's job now (workerSync.ts: shared memory, or a
+    // held request), and both park in a loop that never returns.
+    const terminalWait = bridge.indexOf('sync.park()')
 
     expect(bridgeStart).toBeGreaterThanOrEqual(0)
     expect(bridge).toContain('collectUpdatedFiles()')
