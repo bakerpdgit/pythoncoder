@@ -2,6 +2,7 @@ import { createRoot } from 'react-dom/client'
 import './styles/index.css'
 import App from './App'
 import { DialogProvider } from './components/dialogs/DialogProvider'
+import { applyIsolationSwitch } from './utils/isolationSwitch'
 
 // Monaco cancels pending language-service operations whenever the editor model
 // changes (e.g. on filesystem switch). Those cancellations surface as unhandled
@@ -23,8 +24,12 @@ window.addEventListener('error', (event) => {
   }
 }, { capture: true })
 
-createRoot(document.getElementById('root')!).render(
-  <DialogProvider>
-    <App />
-  </DialogProvider>
-)
+// `?isolation=on|off` sets a cookie and reloads without it; there is nothing
+// to render on the way.
+if (!applyIsolationSwitch()) {
+  createRoot(document.getElementById('root')!).render(
+    <DialogProvider>
+      <App />
+    </DialogProvider>
+  )
+}

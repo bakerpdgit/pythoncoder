@@ -1,15 +1,17 @@
-// Cloudflare Pages middleware: per-browser cross-origin isolation headers.
+// Cloudflare Pages middleware: the cross-origin isolation headers that depend
+// on the request.
 //
-// WebKit (Safari, and every browser on iPad/iPhone) cannot honour COEP
-// `credentialless`, so it needs `require-corp` to become cross-origin isolated
-// — see scripts/isolationPolicy.mjs for the whole story. `public/_headers` is
-// static and cannot tell browsers apart, so the two responses that decide
-// isolation are routed through here instead (public/_routes.json):
+// Everyone gets COEP `credentialless` — which is also what `public/_headers`
+// says, statically. The exception is a browser carrying the `coder_isolation`
+// cookie, which has asked to be sent `require-corp` instead (see
+// scripts/isolationPolicy.mjs for why that is opt-in, and why it exists at
+// all). `_headers` cannot read a cookie, so the two responses that decide
+// isolation are routed through here (public/_routes.json):
 //
 //   - the page itself (`/`, `/index.html`) — its COEP decides whether the
-//     page is isolated at all;
-//   - the worker scripts (`/assets/workers/*`) — WebKit refuses to start a
-//     dedicated worker whose script's COEP does not match the page's.
+//     page is isolated;
+//   - the worker scripts (`/assets/workers/*`) — a `require-corp` page cannot
+//     start a dedicated worker whose script's COEP does not match its own.
 //
 // Everything else stays a plain static asset with the `_headers` defaults, so
 // Functions are invoked once per page load and once per worker, not per asset.
@@ -37,10 +39,14 @@ export async function onRequest(context: MiddlewareContext): Promise<Response> {
   if (pathname.startsWith('/api/')) return response
 
   const headers = new Headers(response.headers)
-  const policy: Record<string, string> = isolationHeadersFor(context.request.headers.get('User-Agent'))
+  const policy: Record<string, string> = isolationHeadersFor(context.request.headers.get('Cookie'))
   for (const [name, value] of Object.entries(policy)) headers.set(name, value)
-  const vary = headers.get('Vary')
-  if (!vary || !/\buser-agent\b/i.test(vary)) headers.set('Vary', vary ? `${vary}, User-Agent` : 'User-Agent')
+  // A worker script is cached for a year: it must not be handed, with one
+  // cookie's policy on it, to a page that was served under the other.
+  const vary = (headers.get('Vary') ?? '').split(',').map(part => part.trim())
+    .filter(part => part && !/^user-agent$/i.test(part))
+  if (!vary.some(part => /^cookie$/i.test(part))) vary.push('Cookie')
+  headers.set('Vary', vary.join(', '))
   headers.set('Cache-Control', pathname.startsWith('/assets/') ? IMMUTABLE : NO_CACHE)
 
   return new Response(response.body, {

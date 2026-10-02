@@ -56,6 +56,11 @@ describe('decideFallback', () => {
       expect(decideFallback('xhr', failure, context).rerunOn).toBe('main-thread')
     }
   })
+  it('keeps the rung when the browser would not start the worker, and starts it from a copy', () => {
+    // The worker never ran, so nothing about how it waits has been learnt.
+    expect(decideFallback('sab', 'boot', context)).toEqual({ plan: 'sab', rerunOn: 'sab', boot: 'blob' })
+    expect(decideFallback('xhr', 'boot', context)).toEqual({ plan: 'xhr', rerunOn: 'xhr', boot: 'blob' })
+  })
   it('gives the worker one more chance before giving up on it: a dropped connection looks the same', () => {
     expect(decideFallback('sab', 'load', { ...context, workerFailures: 0 }).plan).toBe('sab')
     expect(decideFallback('sab', 'load', { ...context, workerFailures: 1 }).plan).toBe('none')
@@ -81,6 +86,13 @@ describe('fallbackNote', () => {
     const settled = fallbackNote('sab', { plan: 'none', rerunOn: 'main-thread' }, 'Failed to load Pyodide in the worker.')
     expect(settled).toMatch(/keep running there in this tab/)
   })
+  it('says the worker was started from a copy, and what the browser was sent', () => {
+    const note = fallbackNote('xhr', { plan: 'xhr', rerunOn: 'xhr', boot: 'blob' },
+      'Worker failed to start: unknown worker error [the worker script answers HTTP 200, application/javascript, embedder policy none; page isolated: no]')
+    expect(note).toMatch(/started from a copy/)
+    expect(note).not.toMatch(/switched to/)
+    expect(note).toContain('embedder policy none')
+  })
   it('never leaves the reason blank', () => {
     expect(fallbackNote('xhr', { plan: 'none', rerunOn: 'main-thread' }, '  ')).toContain('What went wrong: unknown error')
   })
@@ -97,18 +109,25 @@ describe('remembering the rung', () => {
   beforeEach(() => sessionStorage.clear())
 
   it('keeps it for the tab, with why', () => {
-    rememberWorkerPlan({ plan: 'xhr', reason: 'no answer' })
-    expect(recallWorkerPlan()).toEqual({ plan: 'xhr', reason: 'no answer' })
+    rememberWorkerPlan({ plan: 'xhr', reason: 'no answer' }, 'build-1')
+    expect(recallWorkerPlan('build-1')).toEqual({ plan: 'xhr', reason: 'no answer' })
   })
   it('forgets it when asked to try again', () => {
-    rememberWorkerPlan({ plan: 'none', reason: 'x' })
-    rememberWorkerPlan(null)
-    expect(recallWorkerPlan()).toBeNull()
+    rememberWorkerPlan({ plan: 'none', reason: 'x' }, 'build-1')
+    rememberWorkerPlan(null, 'build-1')
+    expect(recallWorkerPlan('build-1')).toBeNull()
+  })
+  it('does not carry it into a newer build: the reload that brings the fix must not keep the fallback', () => {
+    rememberWorkerPlan({ plan: 'none', reason: 'Worker failed to start' }, 'build-1')
+    expect(recallWorkerPlan('build-2')).toBeNull()
+    // Nor does something remembered before builds were recorded at all.
+    sessionStorage.setItem('coder_worker_plan', JSON.stringify({ plan: 'none', reason: 'old' }))
+    expect(recallWorkerPlan('build-2')).toBeNull()
   })
   it('treats anything unreadable as nothing remembered', () => {
     sessionStorage.setItem('coder_worker_plan', '{not json')
-    expect(recallWorkerPlan()).toBeNull()
-    sessionStorage.setItem('coder_worker_plan', JSON.stringify({ plan: 'warp' }))
-    expect(recallWorkerPlan()).toBeNull()
+    expect(recallWorkerPlan('build-1')).toBeNull()
+    sessionStorage.setItem('coder_worker_plan', JSON.stringify({ plan: 'warp', version: 'build-1' }))
+    expect(recallWorkerPlan('build-1')).toBeNull()
   })
 })

@@ -1432,6 +1432,15 @@ self.onmessage = async function (e: MessageEvent) {
   }
 }
 
+// A message that cannot be read is delivered as `messageerror` and nothing
+// else — which, for the `init` carrying a SharedArrayBuffer to a worker that
+// is not allowed one, meant a run that never started and never said why.
+self.onmessageerror = () => {
+  activeTransport = 'shared memory'
+  stage = 'reading the page\'s first message'
+  self.postMessage({ type: 'error', failure: 'transport', error: withContext('A message from the page could not be read by the worker.') })
+}
+
 async function runProgram(e: MessageEvent) {
   // Before anything else, prove the page can be heard. Whether shared memory
   // (or the service worker) really works in this browser is only knowable by
@@ -1443,7 +1452,7 @@ async function runProgram(e: MessageEvent) {
   stage = 'checking the link to the page'
   try {
     sync = watchSync(e.data.transport === 'xhr'
-      ? createXhrSync(String(e.data.syncSession), self.location.origin)
+      ? createXhrSync(String(e.data.syncSession), String(e.data.syncOrigin || self.location.origin))
       : createSabSync(e.data.sab as SharedArrayBuffer, (e.data.stdctxKeyBuffer as SharedArrayBuffer | null) ?? null),
     error => { syncFailure ??= error })
     sync.probe(seq => self.postMessage({ type: 'sync-probe', seq }))

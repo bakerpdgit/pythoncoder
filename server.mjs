@@ -23,7 +23,8 @@ const mimeTypes = {
   ".webp": "image/webp",
 };
 
-// COEP differs by browser engine — see scripts/isolationPolicy.mjs.
+// COEP is `credentialless`, or `require-corp` for a browser that has asked for
+// it by cookie — see scripts/isolationPolicy.mjs.
 function setIsolationHeaders(req, res) {
   applyIsolationHeaders(req, res);
 }
@@ -107,7 +108,7 @@ const server = createServer((req, res) => {
   }
 
   if (req.url === "/__isolation__") {
-    const headers = isolationHeadersFor(req.headers["user-agent"]);
+    const headers = isolationHeadersFor(req.headers.cookie);
     return sendJson(res, 200, {
       coop: headers["Cross-Origin-Opener-Policy"],
       coep: headers["Cross-Origin-Embedder-Policy"],

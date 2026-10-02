@@ -49,7 +49,9 @@ Three layers, all of which should pass before a change is called done:
   ends with `quit()`. `input.spec.ts` covers `input()` in every runtime (worker,
   main thread with JSPI, the `window.prompt` fallback, turtle, pygame, stdctx,
   fixed inputs, every input mode, Stop while waiting); `isolation.spec.ts` checks
-  each engine is sent the COEP it can honour. `tkinter.spec.ts` drives tkinter
+  that everyone is sent `credentialless` (so WebKit is *not* isolated), that the
+  runner is offered either way, and that `?isolation=on` / `off` switch
+  `require-corp` on and off. `tkinter.spec.ts` drives tkinter
   programs (a form and message box, canvas keys, ttk, a GUI in an imported
   module, an `update()` game loop, `tkraise` pages, two `Tk()`s in a row, the
   no-JSPI fallback) and runs every page of the shipped Tkinter book.
@@ -66,7 +68,9 @@ Three layers, all of which should pass before a change is called done:
   step down between them: a page stripped of its isolation headers still
   debugging, Trace stepping / Stop / `time.sleep` over the service worker,
   shared memory that silently does not work falling back to the service
-  worker, and no service worker either falling back to the main thread. A
+  worker, no service worker either falling back to the main thread, and a
+  browser that refuses to start workers by address still getting both the
+  debugger and Submit from copies (the only e2e coverage Submit has). A
   program that only draws leaves its console folded, so specs read its
   transcript through the Copy button rather than the rows. `tkinter.spec.ts` sets the
   editor through Monaco's API rather than `insertText`, which re-indents every
@@ -79,8 +83,14 @@ Three layers, all of which should pass before a change is called done:
   webkit`): `isolation.spec.ts`, `input.spec.ts` and `transport.spec.ts` only. Playwright's WebKit build
   ships SharedArrayBuffer switched off (microsoft/playwright#28513), so the config
   passes `JSC_useSharedArrayBuffer=true`, and every test that needs SAB or JSPI
-  skips itself with the reason when the build lacks it. The header test does not
-  depend on either and is the real guard. CI runs this as its own job.
+  skips itself with the reason when the build lacks it. WebKit is not isolated
+  by default, so nearly everything here runs the worker over the service worker
+  — which is what Safari students get. The one test that wants shared memory
+  sets the `coder_isolation` cookie first. CI runs this as its own job.
+- `E2E_BASE_URL=http://localhost:3100 npx playwright test …` points the suite
+  at another server — the production build under `npm start`, whose workers
+  are classic scripts where the dev server's are modules. Worth doing for
+  anything that touches how a worker starts.
 - **`npm run test:all`** — typecheck, then vitest and the Chromium e2e run.
 
 `.github/workflows/ci.yml` runs the typecheck, vitest, the build, the Chromium
@@ -150,6 +160,8 @@ src/
     traceSyncProtocol.ts      # what the page and the trace worker say to each other, either way
     traceChannel.ts           # the page's end of that, and the service worker's registration
     runtimeFallback.ts        # shared memory → service worker → main thread: when to step down
+    workerBoot.ts             # starting a worker from a blob copy when its address is refused
+    isolationSwitch.ts        # ?isolation=on|off: the cookie that asks the server for require-corp
     editorDraft.ts            # per-filesystem backup of the editor's unsaved changes
     testMatcher.ts            # Challenge test evaluation
     download.ts               # File download helpers
@@ -197,67 +209,96 @@ src/
 - **`@monaco-editor/react`** — Monaco Editor React wrapper
 - **Pyodide v0.29.3** — Python runtime in the browser via WebAssembly (loaded from CDN in the worker)
 
-### Cross-Origin Isolation requirement
+### Cross-origin isolation: Chromium and Firefox have it, WebKit deliberately does not
 
 `SharedArrayBuffer` (the trace worker's first choice for waiting on the page;
 see *Two ways for the worker to wait* for what happens without it) requires the
-page to be cross-origin isolated:
+page to be cross-origin isolated. Every response carries:
 
 - `Cross-Origin-Opener-Policy: same-origin`
-- `Cross-Origin-Embedder-Policy:` **`credentialless` for Chromium and Firefox,
-  `require-corp` for WebKit**
+- `Cross-Origin-Embedder-Policy: credentialless`
 - `Origin-Agent-Cluster: ?1`
 
-**Why two COEP values.** WebKit — Safari on Mac, and *every* browser on an iPad
-or iPhone (Chrome, Edge and Firefox on iOS are WebKit underneath) — has never
-implemented `credentialless`. It reads it as no policy at all, so under a single
-`credentialless` header those students were never isolated: the trace worker was
-disabled and they were pushed onto the main thread with pop-up input. WebKit does
-honour `require-corp`. `scripts/isolationPolicy.mjs` (`isWebKitUserAgent`,
-`isolationHeadersFor`, `applyIsolationHeaders`) picks the value from the
-User-Agent, adds `Vary: User-Agent`, and is the only place the choice is made.
-Misdetection is never worse than before: Chromium sent `require-corp` is still
-isolated, WebKit sent `credentialless` is where it always was.
+Chromium and Firefox honour `credentialless` and are isolated. **WebKit — Safari
+on Mac, and *every* browser on an iPad or iPhone (Chrome, Edge and Firefox on
+iOS are WebKit underneath) — has never implemented it, reads it as no policy,
+and so is not isolated. That is now on purpose.**
+
+**What happened when WebKit was isolated.** For a week WebKit was sent
+`require-corp` instead, chosen by User-Agent, which it does honour. On every
+real Safari it met (two Macs and an iPad) the page then *was* isolated and could
+not start a single worker: `new Worker(...)` fired a bare `error` event with no
+message, for the trace worker and — presumably — the test runner alike, so
+students lost Debug and were left on the main thread with pop-up input. The
+worker script was arriving with a matching `require-corp` (checked against the
+live site as Safari: plain, compressed, revalidated, from an iPad UA), which is
+the one thing WebKit is known to demand of it. **The cause is still unknown.**
+It does not reproduce in WebKitGTK or in Playwright's WebKit, on the dev server
+or the production build; both of those need SharedArrayBuffer forced on by a
+JavaScriptCore option, so neither arrives at isolation the way Safari does.
+
+So the arrangement that is known to work is the one in use: a WebKit page that
+is not isolated starts workers like any other site, and the trace worker waits
+on a service worker there, which needs no isolation and is how Python Sponge
+ran on Safari.
+
+**`?isolation=on`** is how the isolated arrangement is still reached, on one
+device and on purpose: `utils/isolationSwitch.ts` (called from `main.tsx`,
+before anything renders) sets the `coder_isolation` cookie and reloads without
+the parameter; from then on that browser is sent `require-corp`, page and
+worker scripts alike. **`?isolation=off`** clears it. It exists so the Safari
+failure can be investigated — with the diagnostics below — without putting any
+student back in it. A cookie rather than the query string because the worker
+scripts have to be served to match the page, and they are requested without it.
+
+`scripts/isolationPolicy.mjs` (`embedderPolicyFor`, `isolationHeadersFor`,
+`applyIsolationHeaders`) reads the cookie, adds `Vary: Cookie`, and is the only
+place the choice is made. `isWebKitUserAgent` survives there for the page's own
+explanations (`utils/isolationStatus.ts`); the headers no longer depend on it.
 
 Where it is applied:
 - `vite.config.ts` — `isolationHeadersPlugin`, a middleware on every dev/preview
   response (it cannot go in the static `server.headers`).
 - `server.mjs` — production Node server, every response.
-- **Cloudflare Pages** — `public/_headers` is static, so it keeps the
-  `credentialless` default for ordinary assets, and `functions/_middleware.ts`
-  sets the per-browser headers on the two kinds of response that decide
-  isolation. `public/_routes.json` routes only those through the Function, so
-  it runs once per page load and once per worker rather than per asset:
+- **Cloudflare Pages** — `public/_headers` is static and says `credentialless`,
+  which is right for everything unless the cookie is present. It cannot read a
+  cookie, so `functions/_middleware.ts` sets the headers on the two kinds of
+  response that decide isolation, and `public/_routes.json` routes only those
+  through the Function, so it runs once per page load and once per worker
+  rather than per asset:
   - `/` and `/index.html` — the page's COEP decides whether it is isolated;
-  - `/assets/workers/*` — **WebKit refuses to start a dedicated worker whose
-    script lacks the page's COEP** ("Worker failed to start", verified in
-    WebKitGTK). That is why `vite.config.ts` sends worker bundles to
-    `assets/workers/` (`worker.rollupOptions.output`).
+  - `/assets/workers/*` — a `require-corp` page cannot start a dedicated worker
+    whose script's COEP does not match its own (verified in WebKitGTK). That is
+    why `vite.config.ts` sends worker bundles to `assets/workers/`
+    (`worker.rollupOptions.output`), and why those responses vary on the
+    cookie: they are cached for a year.
   Cloudflare does not apply `_headers` to a response that passed through a
   Function, so the middleware repeats the cache headers for those routes.
-  `wrangler pages dev dist` runs it locally.
+  `pagesMiddleware.test.ts` runs the function itself; `wrangler pages dev dist`
+  runs it locally. The live site is `pythoncoder.pages.dev` — `curl -A` with a
+  Safari user agent against it is how the headers were checked.
 
-What `require-corp` costs, WebKit only: a cross-origin resource loaded *without*
-CORS must send `Cross-Origin-Resource-Policy`. jsDelivr (Pyodide and its
-packages, Monaco) and raw.githubusercontent.com send
+What `require-corp` costs, where it is switched on: a cross-origin resource
+loaded *without* CORS must send `Cross-Origin-Resource-Policy`. jsDelivr
+(Pyodide and its packages, Monaco) and raw.githubusercontent.com send
 `cross-origin-resource-policy: cross-origin` and `access-control-allow-origin: *`
 (checked September 2026). Checked in WebKitGTK:
 - **plotly figures are unaffected**: plotly's own `<script>` tag carries
   `crossorigin="anonymous"` and an SRI hash, so it is a CORS load. Do not rewrite
   its URL — the SRI hash is for cdn.plot.ly's exact bytes.
-- **The HTML preview keeps `credentialless` in every browser**
-  (`public/vfs-preview-sw.js`). WebKit treats it as no policy yet still frames it
-  inside the isolated page, so a student's page can use images from any server.
-  Giving the frame `require-corp` blocked every image whose server sends no CORP.
+- **The HTML preview keeps `credentialless` whatever the page has**
+  (`public/vfs-preview-sw.js`), so a student's page can use images from any
+  server. Giving the frame `require-corp` blocked every image whose server sends
+  no CORP.
 - A guide or page `<img>` straight from a site that sends neither CORP nor CORS
-  is blocked in Safari (it loads in Chromium).
+  is blocked under `require-corp` (it loads under `credentialless`).
 
 The banner shown when the trace worker cannot run at all says *why* in plain
 words. A tab that tried and failed quotes what went wrong
 (`workerUnavailableMessage`); one that never could — no shared memory *and* no
 service worker — gets `utils/isolationStatus.ts`: framed by another page, not
-https, isolated but no SharedArrayBuffer, Safari missing its header, or headers
-missing generally.
+https, isolated but no SharedArrayBuffer, a WebKit tab with no service worker
+(a private window, usually), or headers missing generally.
 
 ### How the tracer works
 
@@ -271,17 +312,16 @@ missing generally.
 
 - A tab used to be judged once, at load, by `crossOriginIsolated`: isolated
   meant the trace worker was offered, not isolated meant a banner and the main
-  thread. That check says the worker *should* work. Safari on a Mac and an iPad
-  passed it (after the `require-corp` change) and then failed **every** run
-  with an error in the console, leaving students to find the Execution setting.
-  **Why Safari fails is not yet known.** It does not reproduce in WebKitGTK or
-  in Playwright's WebKit: both isolate, and both run the worker — including
-  with the JavaScript stack squeezed to what a Mac worker thread is believed
-  to get (`JSC_maxPerThreadStackUsage`; it takes under ~130KB of usable stack
-  before Pyodide fails to load with a `RangeError`). Those builds also have
-  SharedArrayBuffer forced on by a JavaScriptCore option, so they never
-  exercise the way Safari itself enables it. The first run on a real Safari
-  now reports the cause (below); until that has been read, do not assume one.
+  thread. That check says the worker *should* work. Safari, isolated by the
+  `require-corp` experiment (previous section), passed it and then failed
+  **every** run, leaving students to find the Execution setting.
+- **The first version of this fallback did not help Safari**, and it is worth
+  knowing why: both transports live *inside* the worker, and Safari's failure
+  was that the worker would not start at all. The tab went shared memory →
+  service worker → main thread and reported `Worker failed to start: unknown
+  worker error`. What fixed Safari was no longer isolating it; what this
+  section adds on top is a worker that can be started a second way (*A worker
+  the browser will not start*, below).
 - So there are now three rungs (`utils/runtimeFallback.ts`), and **a run
   proves its rung**:
   1. **`sab`** — the trace worker, waiting on shared memory;
@@ -290,9 +330,9 @@ missing generally.
      holds open until the page posts the answer. This is what Python Sponge
      did (`oldpythongsponge/public/pysw.js`). It needs no isolation at all;
   3. **`none`** — the main thread, without stepping or the inspector.
-- **A tab that is not isolated starts on `xhr`, not on a banner.** A school
-  filter stripping the headers, or an embedding page, no longer costs the
-  student the debugger.
+- **A tab that is not isolated starts on `xhr`, not on a banner.** That is
+  every WebKit tab, and also a school filter stripping the headers or an
+  embedding page: none of them costs the student the debugger.
 - **The handshake.** The first thing a run's worker does, before Pyodide or
   any Python, is `sync.probe`: announce (`sync-probe`), block, and expect the
   page's answer within `PROBE_TIMEOUT_MS`. It has to be then — a program that
@@ -320,9 +360,13 @@ missing generally.
   `[while <stage>; waiting by …; isolated: …; SharedArrayBuffer: …]`
   (`withContext`). On a browser nobody can attach a debugger to, the Copy
   button on that note is the diagnosis.
-- The rung is remembered per tab (`sessionStorage`), so a tab does not fail
-  the same way on every run. The banner for `none` quotes the reason and
-  offers **Try again**. With `none`, `selectedRuntime` is the main thread by
+- The rung is remembered per tab (`sessionStorage`) **and per build**, so a
+  tab does not fail the same way on every run — but a tab reloaded onto a newer
+  version starts from the top again. Without the version, a tab that had
+  settled on the main thread stayed there through the very release that fixed
+  what sent it there (the "new version, reload" prompt reloads in place, and
+  sessionStorage survives a reload). The banner for `none` quotes the reason
+  and offers **Try again**. With `none`, `selectedRuntime` is the main thread by
   itself — nobody has to find the setting.
 - **`?transport=sab|xhr|none`** puts a tab on one rung, which is how one is
   tried on a particular browser (and how the e2e spec reaches `xhr` in a
@@ -361,6 +405,44 @@ missing generally.
 - A stepping round trip over the service worker measured ~4ms in Chromium and
   ~70ms in Playwright's WebKit. A plain Run or Debug with no breakpoints makes
   no round trips at all.
+- **`page.route` cannot see a request once a service worker controls the
+  page** (Playwright, WebKit at least), and a WebKit page registers one as it
+  loads. A WebKit test that serves a book through `page.route` therefore has to
+  keep the page off the `xhr` rung (`?transport=none`); the real site is
+  unaffected, since the service worker passes every other request straight on.
+
+### A worker the browser will not start
+
+- `new Worker(<address>)` asks the browser to fetch the script *as a worker*,
+  and a browser can refuse that fetch — the script's embedder policy against
+  the page's, its MIME type, a filter in between — and says only that it
+  failed: a bare `error` event, no message. That is what Safari did.
+- `utils/workerBoot.ts` starts the worker a second way: the page fetches the
+  same script as ordinary data and the worker is made from a `blob:` copy. A
+  blob has no response headers to object to, and a blob worker takes its
+  policies and its service worker from the page that made it. In the dev
+  server, whose workers are modules importing other modules by address, the
+  blob is a one-line `import` of the real script instead.
+- It applies to **both** workers — the trace worker and the tester behind
+  Submit (`startAppWorker` in `App.tsx`). Submit had no fallback of any kind.
+- A worker counts as "would not start" only if it failed **before saying
+  anything** and was started the ordinary way (`failedToBoot`): each worker's
+  boot is recorded, and each is noted as heard from on its first message. Every
+  other `onerror` is a `start` failure and goes down the ladder as before.
+- The warm-up worker usually finds out first, at page load, so the switch has
+  happened before the student presses anything and nothing is printed. A run
+  that finds out itself gets the failure kind `boot`: same rung, started from a
+  copy, with a note — and `What went wrong` carries what the page's own fetch
+  of the script saw (`describeWorkerScript`: status, type, embedder policy)
+  and whether the page is isolated. That is the diagnosis the bare event
+  withheld. Submit retries itself the same way without the student pressing it
+  again.
+- A worker started from a copy lives at a `blob:` address, so the page sends
+  its own origin in `init` (`syncOrigin`) rather than the worker reading
+  `self.location`.
+- The worker also listens for `messageerror`: an `init` carrying a
+  SharedArrayBuffer to a worker that may not have one is delivered as that and
+  nothing else, which would be a run that never started and never said why.
 
 ### One Pyodide per session, not per run
 
@@ -487,8 +569,9 @@ missing generally.
   `?book=<url>` (a `book.json` or a book ZIP), `?challenge=<id>`, `?showFirst`,
   `?simple` (read `?book=` as a *simple learning book*), `?mode=trace|run|debug`,
   and `?filesystem=<url>`. `buildShareLink` (`utils/bookSource.ts`) is the only
-  place that composes them. (`?transport=` is a diagnostic, not a student link:
-  see *Two ways for the worker to wait*.)
+  place that composes them. (`?transport=` and `?isolation=` are diagnostics,
+  not student links: see *Two ways for the worker to wait* and the isolation
+  section.)
 - `?challenge=` resolves through `findBookTargetById` (`utils/bookLoader.ts`),
   which walks the whole tree depth-first: an **activity** id enters that
   activity, a **sub-book** id opens that section's contents. Ids are not

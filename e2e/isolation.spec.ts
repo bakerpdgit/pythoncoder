@@ -1,29 +1,50 @@
 import { test, expect } from '@playwright/test'
 
 /**
- * Cross-origin isolation is what lets the trace worker run (SharedArrayBuffer),
- * and WebKit cannot honour the COEP value everyone else gets
- * (scripts/isolationPolicy.mjs). Without the per-browser header, Safari and
- * every iPad browser silently fell back to the main thread.
+ * Cross-origin isolation gives the trace worker shared memory to wait on, and
+ * it is no longer what decides whether the worker is offered at all.
+ *
+ * Everyone is sent COEP `credentialless`. Chromium honours it and is isolated;
+ * WebKit reads it as no policy and is not — on purpose, because every real
+ * Safari sent `require-corp` became isolated and could then not start a single
+ * worker (scripts/isolationPolicy.mjs). A page that is not isolated runs the
+ * worker over a service worker instead.
  */
 
-test('the page is sent the embedder policy this browser can honour', async ({ page, browserName }) => {
+const UNAVAILABLE = "The step-by-step runner isn't available in this tab."
+
+test('everyone is sent credentialless, and nobody require-corp unasked', async ({ page }) => {
   const response = await page.goto('/')
-  const coep = response?.headers()['cross-origin-embedder-policy']
-  expect(coep).toBe(browserName === 'webkit' ? 'require-corp' : 'credentialless')
+  expect(response?.headers()['cross-origin-embedder-policy']).toBe('credentialless')
   expect(response?.headers()['cross-origin-opener-policy']).toBe('same-origin')
 })
 
-test('the page is cross-origin isolated, so the trace worker is offered', async ({ page, browserName }) => {
+test('the step-by-step runner is offered whether or not the page is isolated', async ({ page, browserName }) => {
   await page.goto('/')
   const isolated = await page.evaluate(() => window.crossOriginIsolated === true)
-  const shared = await page.evaluate(() => typeof SharedArrayBuffer === 'function')
-  // Playwright's WebKit build may lack isolation altogether (see
-  // microsoft/playwright#28513), in which case the header test above is the
-  // guard. Real Safari, and WebKitGTK, do isolate with require-corp.
-  test.skip(browserName === 'webkit' && !isolated, 'this WebKit build does not implement cross-origin isolation')
-  expect(isolated).toBe(true)
-  test.skip(!shared, 'this browser build has SharedArrayBuffer switched off even when isolated')
+  // WebKit must NOT be isolated by these headers: that is the arrangement in
+  // which Safari could start no worker.
+  expect(isolated).toBe(browserName !== 'webkit')
   await expect(page.getByRole('button', { name: /^(Run|Debug|Trace)$/ }).first()).toBeEnabled()
-  await expect(page.getByText("The step-by-step runner isn't available in this tab.")).toHaveCount(0)
+  await expect(page.getByText(UNAVAILABLE)).toHaveCount(0)
+})
+
+test('?isolation=on asks for require-corp from then on, and ?isolation=off stops asking', async ({ page }) => {
+  // The switch sets a cookie and reloads without itself, so the first
+  // navigation is replaced before it has finished loading.
+  const settle = async (address: string) => {
+    await page.goto(address, { waitUntil: 'commit' })
+    await page.waitForURL(url => !url.searchParams.has('isolation'))
+    await page.waitForLoadState('load')
+    return page.reload()
+  }
+
+  const isolatedResponse = await settle('/?isolation=on&transport=xhr')
+  expect(isolatedResponse?.headers()['cross-origin-embedder-policy']).toBe('require-corp')
+  expect(isolatedResponse?.headers()['vary']).toMatch(/cookie/i)
+  // The rest of the address survives the switch.
+  expect(new URL(page.url()).searchParams.get('transport')).toBe('xhr')
+
+  const relaxedResponse = await settle('/?isolation=off')
+  expect(relaxedResponse?.headers()['cross-origin-embedder-policy']).toBe('credentialless')
 })

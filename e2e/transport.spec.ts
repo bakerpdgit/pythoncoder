@@ -136,9 +136,13 @@ test.describe('waiting on the service worker', () => {
   })
 })
 
-test('shared memory that does not work steps the tab down to the service worker', async ({ page }) => {
+test('shared memory that does not work steps the tab down to the service worker', async ({ page, context, browserName, baseURL }) => {
   test.setTimeout(180_000)
   const problems = watchForErrors(page)
+  // WebKit is only isolated when it asks to be (scripts/isolationPolicy.mjs).
+  if (browserName === 'webkit') {
+    await context.addCookies([{ name: 'coder_isolation', value: 'require-corp', url: baseURL! }])
+  }
   // The page believes it has shared memory, and nothing it writes arrives:
   // isolated, SharedArrayBuffer present, and a worker that is never answered.
   // (Silencing notify alone is not enough. The page usually answers before
@@ -166,6 +170,83 @@ test('shared memory that does not work steps the tab down to the service worker'
   expect(second).toContain('made it')
   expect(second).not.toContain('did not work using')
   expect(problems).toEqual([])
+})
+
+/**
+ * What Safari did on an isolated page: `new Worker(<address>)` fired a bare
+ * `error` event and nothing else, for the trace worker and the test runner
+ * alike. Here the app's workers, asked for by address, are sent to an address
+ * that has no script — the same bare event — while a worker started from a
+ * blob: copy is left alone (utils/workerBoot.ts).
+ */
+test.describe('a browser that will not start a worker from its address', () => {
+  // The refused worker loads are the point; the browser reports each as an error.
+  // (WebKit runs the dev server's stand-in page as a script and reports its first character.)
+  const expected = (text: string) => /no-such-worker|MIME type|Failed to load resource|module script|Unexpected token '<'/i.test(text)
+
+  test.beforeEach(async ({ page }) => {
+    await page.addInitScript(() => {
+      const RealWorker = window.Worker
+      window.Worker = class extends RealWorker {
+        constructor(url: string | URL, options?: WorkerOptions) {
+          super(/(tracer|tester)\.worker/.test(String(url)) ? '/no-such-worker.js' : url, options)
+        }
+      }
+    })
+  })
+
+  test('still gets the step-by-step runner, started from a copy', async ({ page }) => {
+    const problems = watchForErrors(page)
+    await page.goto('/')
+    await setProgram(page, QUIZ)
+    await run(page)
+
+    await expect(consolePanel(page)).toContainText('Name?', { timeout: 90_000 })
+    await answer(page, 'Ada')
+    await expect(consolePanel(page)).toContainText('Age?')
+    await answer(page, '7')
+    // The worker's own ending: this did not fall back to the main thread.
+    await expect(consolePanel(page)).toContainText('[DEBUG FINISHED]')
+    expect(await consoleTranscript(page)).toMatch(/Name\? Ada\s+Hello Ada\s+Age\? 7\s+Next year you will be 8/)
+    await expect(page.getByText(UNAVAILABLE)).toHaveCount(0)
+    expect(problems.filter(text => !expected(text))).toEqual([])
+  })
+
+  test('still gets Submit, whose test runner is a worker too', async ({ page, browserName }) => {
+    const origin = 'https://books.example.test/tested/'
+    const files: Record<string, string> = {
+      'book.json': JSON.stringify({
+        name: 'Tested book',
+        id: 'tested-book',
+        children: [{
+          id: 'greet',
+          name: 'Greet',
+          guide: 'guide.md',
+          py: 'greet.py',
+          tests: [{ in: 'Joe', out: '.*Hello Joe' }, { in: 'Alice', out: '.*Hello Alice' }],
+        }],
+      }),
+      'guide.md': '# Greet\n\nSay hello.\n',
+      'greet.py': 'name = input("Name? ")\nprint("Hello " + name)\n',
+    }
+    await page.route(/^https:\/\/books\.example\.test\/tested\//, async route => {
+      const body = files[route.request().url().slice(origin.length)]
+      if (body === undefined) await route.fulfill({ status: 404, body: 'Not Found' })
+      else await route.fulfill({ status: 200, contentType: 'text/plain; charset=utf-8', headers: { 'Access-Control-Allow-Origin': '*' }, body })
+    })
+    const problems = watchForErrors(page, { ignoreRequestsTo: [/books\.example\.test/, /\/api\/proxy/] })
+    // The book is served by `page.route`, which cannot see a request once a
+    // service worker controls the page — and a WebKit page, not being
+    // isolated, registers one as it loads. Submit does not use the trace
+    // worker's rung at all, so in WebKit this test goes without one.
+    const rung = browserName === 'webkit' ? '&transport=none' : ''
+    await page.goto(`/?book=${encodeURIComponent(`${origin}book.json`)}&challenge=greet${rung}`)
+    await expect(page.getByText('greet.py', { exact: true }).first()).toBeVisible()
+
+    await page.getByRole('button', { name: 'Submit' }).click()
+    await expect(page.getByText('All passed')).toBeVisible({ timeout: 120_000 })
+    expect(problems.filter(text => !expected(text))).toEqual([])
+  })
 })
 
 test.describe('with no service worker either', () => {

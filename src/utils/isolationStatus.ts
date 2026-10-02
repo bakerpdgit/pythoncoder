@@ -35,7 +35,7 @@ export function isolationProblemMessage(problem: IsolationProblem, isLocalhost: 
     case 'no-shared-memory':
       return 'This browser does not offer the shared memory (SharedArrayBuffer) the step-by-step runner uses, even though the page is set up for it. Updating the browser usually fixes this.'
     case 'webkit':
-      return 'Safari, and every browser on an iPad or iPhone, needs the site to send a "require-corp" isolation header. It did not arrive — reload the page, and if this keeps appearing, a school web filter may be removing it.'
+      return 'Safari, and every browser on an iPad or iPhone, runs the step-by-step runner through a service worker, and this tab does not offer one. A private window is the usual reason: open the page in an ordinary one.'
     case 'headers':
       return isLocalhost
         ? 'The page was served without cross-origin isolation headers. Run it with `npm run dev`, or `npm start` on the built output.'

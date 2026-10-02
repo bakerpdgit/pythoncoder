@@ -137,7 +137,9 @@ export function createXhrChannel(): TraceChannel {
 
   return {
     transport: 'xhr',
-    initFields: () => ({ transport: 'xhr', syncSession: session }),
+    // The origin is sent rather than read from the worker's own location,
+    // which is a blob: address when the worker was started from a copy.
+    initFields: () => ({ transport: 'xhr', syncSession: session, syncOrigin: window.location.origin }),
     workerWaiting(kind, seq) { waiting = { kind, seq } },
     isWaiting: kind => waiting?.kind === kind,
     answerProbe() {

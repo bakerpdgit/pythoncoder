@@ -11,9 +11,9 @@ import { applyIsolationHeaders } from './scripts/isolationPolicy.mjs'
 
 const devPort = Number(process.env.PORT) || 3000
 
-// The isolation headers depend on the browser (WebKit cannot honour COEP
-// `credentialless`; see scripts/isolationPolicy.mjs), so they cannot go in the
-// static `server.headers`. This middleware sets them on every response.
+// The isolation headers depend on the request (a browser can ask, by cookie,
+// for COEP `require-corp`; see scripts/isolationPolicy.mjs), so they cannot go
+// in the static `server.headers`. This middleware sets them on every response.
 function isolationHeadersPlugin(): Plugin {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const mw = (server: { middlewares: { use: (fn: (req: any, res: any, next: () => void) => void) => void } }) => {

@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, useMemo, useCallback, useDeferredValue, startTransition, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import TracerWorker from './workers/tracer.worker.ts?worker'
 import TesterWorker from './workers/tester.worker.ts?worker'
+import tracerWorkerUrl from './workers/tracer.worker.ts?worker&url'
+import testerWorkerUrl from './workers/tester.worker.ts?worker&url'
 import Editor, { type Monaco, loader } from '@monaco-editor/react'
 
 // In dev, use the locally-installed monaco-editor instead of CDN to avoid the
@@ -102,7 +104,8 @@ import type {
 } from './types/traceTable'
 import { TRACE_TABLE_EVENT_LIMIT } from './types/traceTable'
 import { normalizeTestInputs } from './utils/testInputs'
-import { startVersionPolling } from './utils/versionCheck'
+import { getBootVersion, startVersionPolling } from './utils/versionCheck'
+import { describeWorkerScript, prepareBlobBoot, startWorker, type WorkerBoot, type WorkerScript } from './utils/workerBoot'
 import { githubRepositoryBookUrl } from './utils/bookSource'
 import { isRuntimeSourceLocked, RuntimeStartGuard } from './utils/runtimeStartGuard'
 import { PYODIDE_RUNTIME_RESET_CODE } from './utils/pyodideReset'
@@ -197,6 +200,10 @@ const buildBreakpointDecorations = (map: Map<number, Breakpoint>): MonacoEditor.
     }
   })
 
+// The app's two workers, as Vite builds them and by address (utils/workerBoot.ts).
+const TRACER_SCRIPT: WorkerScript = { create: () => new TracerWorker(), url: tracerWorkerUrl }
+const TESTER_SCRIPT: WorkerScript = { create: () => new TesterWorker(), url: testerWorkerUrl }
+
 /**
  * The rung this tab starts on (utils/runtimeFallback.ts): shared memory where
  * the page is isolated, a service worker where it is not, and whatever an
@@ -204,7 +211,7 @@ const buildBreakpointDecorations = (map: Map<number, Breakpoint>): MonacoEditor.
  * which is how a single rung is tried on a particular browser.
  */
 function detectWorkerPlan(): RememberedPlan {
-  const remembered = recallWorkerPlan()
+  const remembered = recallWorkerPlan(getBootVersion())
   const plan = initialWorkerPlan({
     hasSharedMemory: typeof SharedArrayBuffer !== 'undefined' && window.crossOriginIsolated === true,
     serviceWorkerSupported: serviceWorkerSyncSupported(),
@@ -427,6 +434,15 @@ export default function App() {
   const workerFallbackRef = useRef<(failed: TraceTransport, failure: WorkerFailure, reason: string, mode: WorkerRunMode) => void>(() => {})
   const workerFailuresRef = useRef(0)
   const workerProvenRef = useRef(false)
+  // How this tab starts its workers (utils/workerBoot.ts): as built, until the
+  // browser refuses one, and from blob copies after that. Which way each
+  // worker was started, and whether it has ever been heard from, is what
+  // tells "the browser would not start it" from every other failure.
+  const workerBootRef = useRef<WorkerBoot>('direct')
+  const blobBootRef = useRef<Promise<string | null> | null>(null)
+  const blobBootFailedRef = useRef(false)
+  const workerStartsRef = useRef(new WeakMap<Worker, WorkerBoot>())
+  const workersHeardRef = useRef(new WeakSet<Worker>())
   // Read after an `await`, where the render closure's copies would be stale.
   const isConsolePresentationModeRef = useRef(isConsolePresentationMode)
   isConsolePresentationModeRef.current = isConsolePresentationMode
@@ -563,6 +579,30 @@ export default function App() {
   const turtleSvgHistoryRef = useRef<string[]>([])
   const turtleScrubLockedRef = useRef(false)
 
+  /** Start one of the app's workers, the way this tab has found works. */
+  const startAppWorker = (script: WorkerScript): Worker => {
+    const boot = workerBootRef.current
+    const worker = startWorker(script, boot)
+    workerStartsRef.current.set(worker, boot)
+    return worker
+  }
+
+  /** Did this worker fail without a word, started the ordinary way — the one failure a copy might cure? */
+  const failedToBoot = (worker: Worker): boolean =>
+    !workersHeardRef.current.has(worker)
+    && workerStartsRef.current.get(worker) === 'direct'
+    && !blobBootFailedRef.current
+
+  /** Start workers from copies from now on. Resolves to null, or to why that cannot be done. */
+  const switchToBlobBoot = (): Promise<string | null> => {
+    blobBootRef.current ??= prepareBlobBoot([TRACER_SCRIPT, TESTER_SCRIPT], import.meta.env.DEV).then(problem => {
+      if (problem) blobBootFailedRef.current = true
+      else workerBootRef.current = 'blob'
+      return problem
+    })
+    return blobBootRef.current
+  }
+
   /**
    * Park a worker whose Pyodide is loaded and idle, ready for the next run.
    *
@@ -581,9 +621,16 @@ export default function App() {
       prewarmedTraceWorkerRef.current = null
     }
     worker.onmessage = (event: MessageEvent) => {
+      workersHeardRef.current.add(worker)
       if (event.data?.type === 'warm-error') discardWarmWorker()
     }
-    worker.onerror = discardWarmWorker
+    worker.onerror = () => {
+      const neverStarted = failedToBoot(worker)
+      discardWarmWorker()
+      // Found out while warming up, before the student has pressed anything:
+      // the worker they do get is one started from a copy.
+      if (neverStarted) void switchToBlobBoot().then(problem => { if (!problem) prepareTraceWorker() })
+    }
     return true
   }
 
@@ -597,14 +644,14 @@ export default function App() {
       })
       return
     }
-    const worker = new TracerWorker()
+    const worker = startAppWorker(TRACER_SCRIPT)
     if (!holdIdleTraceWorker(worker)) { worker.terminate(); return }
     worker.postMessage({ type: 'prewarm' })
   }
 
   const prepareTesterWorker = () => {
     if (!activeBookChallengeRef.current?.tests?.length || testerWorkerRef.current || prewarmedTesterWorkerRef.current) return
-    const worker = new TesterWorker()
+    const worker = startAppWorker(TESTER_SCRIPT)
     prewarmedTesterWorkerRef.current = worker
     const discardWarmWorker = () => {
       if (prewarmedTesterWorkerRef.current !== worker) return
@@ -612,9 +659,14 @@ export default function App() {
       prewarmedTesterWorkerRef.current = null
     }
     worker.onmessage = (event: MessageEvent) => {
+      workersHeardRef.current.add(worker)
       if (event.data?.type === 'warm-error') discardWarmWorker()
     }
-    worker.onerror = discardWarmWorker
+    worker.onerror = () => {
+      const neverStarted = failedToBoot(worker)
+      discardWarmWorker()
+      if (neverStarted) void switchToBlobBoot().then(problem => { if (!problem) prepareTesterWorker() })
+    }
     worker.postMessage({ type: 'prewarm' })
   }
 
@@ -3186,7 +3238,7 @@ export default function App() {
   // Run a set of tests against code+files in a throwaway tester worker.
   const runTestsInWorker = (code: string, files: Array<{ path: string; content: ArrayBuffer }>, tests: BookTestCase[]): Promise<TesterRunOutput[]> =>
     new Promise(resolve => {
-      const worker = new TesterWorker()
+      const worker = startAppWorker(TESTER_SCRIPT)
       worker.onmessage = (e: MessageEvent) => {
         const d = e.data
         if (d.type === 'done') { worker.terminate(); resolve(d.results as TesterRunOutput[]) }
@@ -3465,7 +3517,7 @@ export default function App() {
 
   const runCaptureOutput = (code: string, files: Array<{ path: string; content: ArrayBuffer }>, inputs: Array<string | number>): Promise<string> =>
     new Promise(resolve => {
-      const worker = new TesterWorker()
+      const worker = startAppWorker(TESTER_SCRIPT)
       worker.onmessage = (e: MessageEvent) => {
         const d = e.data
         if (d.type === 'done') { worker.terminate(); resolve(String(d.results?.[0]?.output ?? '')) }
@@ -3544,7 +3596,7 @@ export default function App() {
     setTestRunnerStatus('Preparing test runner…')
 
     const runOutputs: TesterRunOutput[] = []
-    const worker = prewarmedTesterWorkerRef.current ?? new TesterWorker()
+    const worker = prewarmedTesterWorkerRef.current ?? startAppWorker(TESTER_SCRIPT)
     prewarmedTesterWorkerRef.current = null
     testerWorkerRef.current = worker
 
@@ -3555,6 +3607,7 @@ export default function App() {
     }
 
     worker.onmessage = (e: MessageEvent) => {
+      workersHeardRef.current.add(worker)
       if (testerWorkerRef.current !== worker) return
       const data = e.data
       if (data.type === 'status') {
@@ -3598,9 +3651,7 @@ export default function App() {
       }
     }
 
-    worker.onerror = (event: ErrorEvent) => {
-      if (testerWorkerRef.current !== worker) return
-      const errorMsg = `Test runner failed to start: ${event.message || 'Unknown worker error'}`
+    const failToStart = (errorMsg: string) => {
       setTestResult({
         allPassed: false,
         results: capturedTests.map((tc, i) => ({
@@ -3616,6 +3667,21 @@ export default function App() {
       })
       setIsTestRunning(false)
       releaseWorker()
+    }
+
+    worker.onerror = (event: ErrorEvent) => {
+      if (testerWorkerRef.current !== worker) return
+      const errorMsg = `Test runner failed to start: ${event.message || 'Unknown worker error'}`
+      if (!failedToBoot(worker)) { failToStart(errorMsg); return }
+      // The browser would not start the test runner from its address: once
+      // more from a copy, without the student having to press Submit again.
+      void switchToBlobBoot().then(problem => {
+        if (testerWorkerRef.current !== worker) return
+        if (problem) { failToStart(`${errorMsg}. ${problem}`); return }
+        setIsTestRunning(false)
+        releaseWorker()
+        void handleSubmit()
+      })
     }
 
     worker.postMessage({ type: 'run_tests', code: capturedCode, files: vfsFiles, tests: capturedTests })
@@ -3819,7 +3885,7 @@ export default function App() {
   const applyWorkerPlan = (plan: WorkerPlan, reason: string) => {
     workerPlanRef.current = plan
     setWorkerPlan({ plan, reason })
-    rememberWorkerPlan({ plan, reason })
+    rememberWorkerPlan({ plan, reason }, getBootVersion())
     // A parked worker belongs to the rung it was made for: one created before
     // the service worker took control of the page never hears from it.
     prewarmedTraceWorkerRef.current?.terminate()
@@ -3828,7 +3894,7 @@ export default function App() {
 
   /** The banner's "Try again": forget the fallback and start from the best rung. */
   const retryTraceWorker = () => {
-    rememberWorkerPlan(null)
+    rememberWorkerPlan(null, getBootVersion())
     workerFailuresRef.current = 0
     const fresh = detectWorkerPlan()
     workerPlanRef.current = fresh.plan
@@ -3845,15 +3911,26 @@ export default function App() {
   const scheduleWorkerFallback = (failed: TraceTransport, failure: WorkerFailure, reason: string, mode: WorkerRunMode) => {
     const token = ++crashRecoveryTokenRef.current
     const deadline = Date.now() + 5000
-    const attempt = () => {
+    const attempt = (kind: WorkerFailure, why: string) => {
       if (token !== crashRecoveryTokenRef.current) return
       if (isRunningRef.current || workerRef.current) {
-        if (Date.now() < deadline) window.setTimeout(attempt, 50)
+        if (Date.now() < deadline) window.setTimeout(() => attempt(kind, why), 50)
         return
       }
-      workerFallbackRef.current(failed, failure, reason, mode)
+      workerFallbackRef.current(failed, kind, why, mode)
     }
-    window.setTimeout(attempt, 0)
+    if (failure !== 'boot') {
+      window.setTimeout(() => attempt(failure, reason), 0)
+      return
+    }
+    // The browser would not start the worker and would not say why. Asking for
+    // the same script as the page is both the diagnosis — its status, type and
+    // policy are in the note — and the cure, since the copy it yields is what
+    // the worker is started from next.
+    void Promise.all([describeWorkerScript(TRACER_SCRIPT.url), switchToBlobBoot()]).then(([seen, problem]) => {
+      const detail = `${reason} [${seen}; page isolated: ${window.crossOriginIsolated ? 'yes' : 'no'}]`
+      attempt(problem ? 'start' : 'boot', problem ? `${detail} ${problem}` : detail)
+    })
   }
   // Re-pointed every render, so the fallback sees committed state.
   workerFallbackRef.current = (failed, failure, reason, mode) => {
@@ -4018,7 +4095,7 @@ export default function App() {
       // Claim the background-warmed worker when available. If the user clicked
       // before warm-up completed, the queued init message simply shares the same
       // Pyodide-loading promise inside the worker.
-      worker = prewarmedTraceWorkerRef.current ?? new TracerWorker()
+      worker = prewarmedTraceWorkerRef.current ?? startAppWorker(TRACER_SCRIPT)
       prewarmedTraceWorkerRef.current = null
       workerRef.current = worker
       startGuard.finish(startClaim)
@@ -4079,6 +4156,7 @@ export default function App() {
     }
 
     worker.onmessage = (e: MessageEvent) => {
+      workersHeardRef.current.add(worker)
       if (workerRef.current !== worker) return
       const data = e.data
       // What the worker is about to block on, noted before anything answers it.
@@ -4254,8 +4332,12 @@ export default function App() {
       restoreRunPresentationMode()
       workerRunModeRef.current = 'debug'
       workerStartModeRef.current = 'debug'
+      // Silent, and started the ordinary way: worth starting from a copy
+      // before anything about the rung is concluded.
+      const failure: WorkerFailure = failedToBoot(worker) ? 'boot' : 'start'
+      const startedFromCopy = workerStartsRef.current.get(worker) === 'blob' ? ' (started from a copy)' : ''
       releaseWorker()
-      scheduleWorkerFallback(transport, 'start', `Worker failed to start: ${event.message || 'unknown worker error'}`, choice)
+      scheduleWorkerFallback(transport, failure, `Worker failed to start${startedFromCopy}: ${event.message || 'unknown worker error'}`, choice)
     }
 
     const svgTurtleBootstrap = hasTurtleForMode && effectiveTurtleMode(capturedCode) === 'basthon-svg' ? SVG_TURTLE_WORKER_SETUP : ''

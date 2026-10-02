@@ -60,9 +60,9 @@ const hasJspi = (page: Page) => page.evaluate(() => typeof (WebAssembly as unkno
 
 test('the trace worker shows each line printed before the question that follows it', async ({ page }) => {
   const problems = watchForErrors(page)
+  // No longer conditional on shared memory: a page that is not isolated (every
+  // WebKit one, now) runs the same worker over a service worker.
   await page.goto('/')
-  test.skip(!(await page.evaluate(() => window.crossOriginIsolated && typeof SharedArrayBuffer === 'function')),
-    'this browser build has no SharedArrayBuffer, so the trace worker cannot run')
 
   await setProgram(page, QUIZ)
   await run(page)

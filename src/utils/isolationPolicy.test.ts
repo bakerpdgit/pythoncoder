@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  applyIsolationHeaders, embedderPolicyFor, isolationHeadersFor, isWebKitUserAgent,
+  applyIsolationHeaders, embedderPolicyFor, isolationHeadersFor, isWebKitUserAgent, wantsStrictIsolation,
 } from '../../scripts/isolationPolicy.mjs'
 
 // Real user-agent strings, one per browser a student might plausibly use.
@@ -42,16 +42,26 @@ describe('isWebKitUserAgent', () => {
 })
 
 describe('embedderPolicyFor / isolationHeadersFor', () => {
-  it('gives WebKit require-corp, the only COEP it can honour', () => {
-    expect(embedderPolicyFor(WEBKIT['Safari on iPhone'])).toBe('require-corp')
+  it('sends everyone credentialless — which leaves WebKit not isolated, on purpose', () => {
+    // WebKit reads the value as no policy. Sent require-corp instead, every
+    // real Safari became isolated and could no longer start a worker.
+    expect(embedderPolicyFor(undefined)).toBe('credentialless')
+    expect(embedderPolicyFor('')).toBe('credentialless')
+    expect(embedderPolicyFor('theme=dark; other=1')).toBe('credentialless')
   })
-  it('keeps credentialless for everyone else', () => {
-    expect(embedderPolicyFor(NOT_WEBKIT['Chrome on Windows'])).toBe('credentialless')
-    expect(embedderPolicyFor(NOT_WEBKIT['Firefox on Windows'])).toBe('credentialless')
+  it('sends require-corp only to a browser that asked for it with the cookie', () => {
+    expect(embedderPolicyFor('coder_isolation=require-corp')).toBe('require-corp')
+    expect(embedderPolicyFor('theme=dark; coder_isolation=require-corp; other=1')).toBe('require-corp')
+  })
+  it('is not fooled by a cookie that merely looks like it', () => {
+    expect(wantsStrictIsolation('coder_isolation=off')).toBe(false)
+    expect(wantsStrictIsolation('coder_isolation=require-corp-ish')).toBe(false)
+    expect(wantsStrictIsolation('not_coder_isolation=require-corp')).toBe(false)
+    expect(wantsStrictIsolation('x=coder_isolation=require-corp')).toBe(false)
   })
   it('always sends the rest of what isolation needs', () => {
-    for (const ua of [...Object.values(WEBKIT), ...Object.values(NOT_WEBKIT)]) {
-      const headers = isolationHeadersFor(ua)
+    for (const cookie of [undefined, 'coder_isolation=require-corp']) {
+      const headers = isolationHeadersFor(cookie)
       expect(headers['Cross-Origin-Opener-Policy']).toBe('same-origin')
       expect(headers['Origin-Agent-Cluster']).toBe('?1')
     }
@@ -68,17 +78,24 @@ describe('applyIsolationHeaders', () => {
     }
   }
 
-  it('sets the per-browser policy and varies the response on the user agent', () => {
+  it('does not treat a Safari user agent specially any more', () => {
     const res = fakeResponse()
     applyIsolationHeaders({ headers: { 'user-agent': WEBKIT['Chrome on iPad'] } }, res as never)
+    expect(res.headers.get('Cross-Origin-Embedder-Policy')).toBe('credentialless')
+  })
+
+  it('reads the cookie, and varies the response on it', () => {
+    const res = fakeResponse()
+    applyIsolationHeaders({ headers: { cookie: 'coder_isolation=require-corp' } }, res as never)
     expect(res.headers.get('Cross-Origin-Embedder-Policy')).toBe('require-corp')
-    expect(res.headers.get('Vary')).toBe('User-Agent')
+    // A worker script is cached for a year and must match the page that starts it.
+    expect(res.headers.get('Vary')).toBe('Cookie')
   })
 
   it('adds to an existing Vary rather than replacing it, and only once', () => {
     const res = fakeResponse({ Vary: 'Origin' })
     applyIsolationHeaders({ headers: {} }, res as never)
     applyIsolationHeaders({ headers: {} }, res as never)
-    expect(res.headers.get('Vary')).toBe('Origin, User-Agent')
+    expect(res.headers.get('Vary')).toBe('Origin, Cookie')
   })
 })

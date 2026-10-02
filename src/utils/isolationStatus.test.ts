@@ -27,7 +27,10 @@ describe('isolationProblemMessage', () => {
     expect(isolationProblemMessage('headers', true)).toMatch(/npm run dev/)
     expect(isolationProblemMessage('headers', false)).not.toMatch(/npm/)
   })
-  it('explains the Safari case in plain words', () => {
+  it('explains the Safari case in plain words: no service worker, most likely a private window', () => {
     expect(isolationProblemMessage('webkit', false)).toMatch(/iPad/)
+    expect(isolationProblemMessage('webkit', false)).toMatch(/private window/)
+    // It no longer blames a header that is deliberately not sent.
+    expect(isolationProblemMessage('webkit', false)).not.toMatch(/require-corp/)
   })
 })

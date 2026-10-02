@@ -29,11 +29,15 @@ export type WorkerPlan = TraceTransport | 'none'
  * How a worker run failed, as far as the runtime (not the program) goes:
  *  - `transport` — the worker could not hear the page (the handshake failed);
  *  - `load`      — Pyodide would not load in the worker;
- *  - `start`     — the worker itself would not start, or failed outside Python;
+ *  - `boot`      — the browser would not start the worker from its address at
+ *                  all, and starting it from a copy has not been tried
+ *                  (utils/workerBoot.ts);
+ *  - `start`     — the worker would not start either way, or failed outside
+ *                  Python;
  *  - `crash`     — Pyodide died, and died again after being reset, in a tab
  *                  where no worker run has ever got as far as the program.
  */
-export type WorkerFailure = 'transport' | 'load' | 'start' | 'crash'
+export type WorkerFailure = 'transport' | 'load' | 'boot' | 'start' | 'crash'
 
 export interface FallbackContext {
   /** Could this tab use the held-request transport at all? */
@@ -50,6 +54,8 @@ export interface FallbackDecision {
   plan: WorkerPlan
   /** Where the program that just failed is run again. */
   rerunOn: TraceTransport | 'main-thread'
+  /** Set when the re-run is on the same rung, with the worker started from a copy. */
+  boot?: 'blob'
 }
 
 export function initialWorkerPlan(tab: {
@@ -69,6 +75,9 @@ export function initialWorkerPlan(tab: {
 }
 
 export function decideFallback(current: TraceTransport, failure: WorkerFailure, context: FallbackContext): FallbackDecision {
+  // Nothing about the rung is in doubt yet: the worker never ran. Same rung,
+  // started the other way.
+  if (failure === 'boot') return { plan: current, rerunOn: current, boot: 'blob' }
   // Shared memory failed, or something failed while it was in use, and the
   // other transport shares nothing with it: worth one run. That goes for a
   // worker that crashed or threw as much as for a failed handshake — on a
@@ -96,6 +105,10 @@ const TRANSPORT_NAMES: Record<TraceTransport, string> = {
 /** Printed at the top of the re-run. `reason` is the worker's own account of the failure. */
 export function fallbackNote(failed: TraceTransport, decision: FallbackDecision, reason: string): string {
   const why = `[INFO] What went wrong: ${reason.trim().replace(/\s*\n\s*/g, ' ') || 'unknown error'}`
+  if (decision.boot === 'blob') {
+    return '[INFO] This browser would not start the step-by-step runner\'s worker from its own address, '
+      + `so it was started from a copy instead and your program run again. Nothing else is different.\n${why}`
+  }
   if (decision.rerunOn !== 'main-thread') {
     return `[INFO] The step-by-step runner did not work using ${TRANSPORT_NAMES[failed]} in this browser, `
       + `so it has switched to ${TRANSPORT_NAMES[decision.rerunOn]} and started your program again. Stepping and input() work the same.\n${why}`
@@ -118,17 +131,23 @@ const STORAGE_KEY = 'coder_worker_plan'
 
 export interface RememberedPlan { plan: WorkerPlan; reason: string }
 
-/** Per tab session: a reload in a new tab tries the best rung again. */
-export function rememberWorkerPlan(remembered: RememberedPlan | null): void {
+/**
+ * Per tab session, and per build of the app: a new tab tries the best rung
+ * again, and so does a tab reloaded onto a newer version. Without the version
+ * a tab that had settled on the main thread stayed there through the very
+ * release that fixed what sent it there — sessionStorage survives a reload.
+ */
+export function rememberWorkerPlan(remembered: RememberedPlan | null, version: string): void {
   try {
-    if (remembered) sessionStorage.setItem(STORAGE_KEY, JSON.stringify(remembered))
+    if (remembered) sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ ...remembered, version }))
     else sessionStorage.removeItem(STORAGE_KEY)
   } catch { /* storage refused: the fallback simply happens again next load */ }
 }
 
-export function recallWorkerPlan(): RememberedPlan | null {
+export function recallWorkerPlan(version: string): RememberedPlan | null {
   try {
-    const parsed = JSON.parse(sessionStorage.getItem(STORAGE_KEY) ?? 'null') as Partial<RememberedPlan> | null
+    const parsed = JSON.parse(sessionStorage.getItem(STORAGE_KEY) ?? 'null') as (Partial<RememberedPlan> & { version?: string }) | null
+    if (parsed?.version !== version) return null
     if (parsed && (parsed.plan === 'sab' || parsed.plan === 'xhr' || parsed.plan === 'none')) {
       return { plan: parsed.plan, reason: String(parsed.reason ?? '') }
     }
