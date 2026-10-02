@@ -7,13 +7,17 @@ import { runProgramPython } from './programExit'
 // statement the wrapper is given.
 const pythonAvailable = spawnSync('python', ['--version']).status === 0
 
+// Python on Windows ends every printed line with "\r\n"; what is being checked
+// here is what the program wrote, not how that platform spells a newline.
+const unixNewlines = (text: string) => text.replace(/\r\n/g, '\n')
+
 function run(student: string) {
   const script = `user_code = ${JSON.stringify(student)}\n` +
     'code_obj = compile(user_code, "simulation.py", "exec")\n' +
     runProgramPython('exec(code_obj, {"__name__": "__main__"})') +
     'print("[host carried on]")\n'
   const result = spawnSync('python', ['-c', script], { encoding: 'utf8' })
-  return { status: result.status, stdout: result.stdout, stderr: result.stderr }
+  return { status: result.status, stdout: unixNewlines(result.stdout), stderr: unixNewlines(result.stderr) }
 }
 
 describe.skipIf(!pythonAvailable)('runProgramPython', () => {

@@ -57,6 +57,10 @@ describe('mainThreadInputSummary', () => {
 // pop-up otherwise.
 const python = ['python3', 'python'].find(cmd => spawnSync(cmd, ['--version']).status === 0)
 
+// Python on Windows ends every printed line with "\r\n"; what is being checked
+// here is what the bootstrap wrote, not how that platform spells a newline.
+const unixNewlines = (text: string) => text.replace(/\r\n/g, '\n')
+
 function runBootstrap(options: { ffi: 'jspi' | 'no-jspi' | 'missing'; stop?: boolean; program: string }) {
   const fakeFfi = options.ffi === 'missing' ? '' : `
 import sys, types
@@ -91,7 +95,7 @@ except SystemExit:
     print("[SystemExit]")
 `
   const result = spawnSync(python!, ['-c', script], { encoding: 'utf8' })
-  return { status: result.status, stdout: result.stdout, stderr: result.stderr }
+  return { status: result.status, stdout: unixNewlines(result.stdout), stderr: unixNewlines(result.stderr) }
 }
 
 describe.skipIf(!python)('MAIN_THREAD_INPUT_BOOTSTRAP', () => {
