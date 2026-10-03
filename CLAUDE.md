@@ -63,7 +63,8 @@ Three layers, all of which should pass before a change is called done:
   a drawing, keys and clicks, `textinput`, Stop in an endless loop, the replay
   slider, the service-worker rung — and on the main thread (with and without
   JSPI), and checks each Settings choice lands on its own surface. `workflow.spec.ts` covers the keyboard shortcuts (font size, F5 / Ctrl+F5 /
-  Ctrl+Shift+F5, F11), Stay on run view, New file opening in the editor, and
+  Ctrl+Shift+F5, F11), Stay on run view, a reload mid-Run or on a held run
+  view coming back to the editor, New file opening in the editor, and
   the tab group. `display.spec.ts` covers the Display pane across runs: emptied
   at every run's start, the console folding for a drawing and opening on the
   first print, and input() borrowing the Console tab until the next drawing.
@@ -994,6 +995,12 @@ https, isolated but no SharedArrayBuffer, a WebKit tab with no service worker
   closure: a run can now start before React has re-rendered with the restored
   panels, and a stale closure would snapshot the presentation layout and never
   give the screen back.
+- **A run's layout is never saved as the student's.** Layout prefs are written
+  on every change, so a reload mid-run (or on a held run view) used to come
+  back to the output-only run layout with no editor. While the snapshot
+  exists, `layoutPanelsToPersist` (`utils/storage.ts`) saves its panels
+  instead — with output on, as the restore gives them back — and the persist
+  effect depends on `isRunLayout` so entering or leaving the run re-saves.
 - Debug and trace deliberately keep the normal layout, so `showTurtleSvg`,
   `beginStdctxRun` and `beginMainThreadCanvasRun` each force `visiblePanels.output`
   true and select their surface. Without that, a debug run draws into a hidden

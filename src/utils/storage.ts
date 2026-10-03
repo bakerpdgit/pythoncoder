@@ -341,6 +341,16 @@ export const getStoredLayoutPrefs = (): LayoutPrefs => {
   }
 }
 
+/**
+ * The panels a reload should come back to. While a Run has the screen — or a
+ * finished one is held there by Stay on run view — `visiblePanels` is the run's
+ * output-only layout, and the student's own is the snapshot the run will give
+ * back, so that is what is saved, exactly as `restoreRunPresentationMode` puts
+ * it back. Saving the run's layout opened the next visit with no editor.
+ */
+export const layoutPanelsToPersist = (visiblePanels: PanelVisibility, runSnapshot: PanelVisibility | null): PanelVisibility =>
+  runSnapshot ? { ...runSnapshot, output: true } : visiblePanels
+
 export const persistLayoutPrefs = (prefs: LayoutPrefs): void => {
   try { localStorage.setItem(LAYOUT_PREFS_KEY, JSON.stringify(prefs)) } catch { /* ignore */ }
 }

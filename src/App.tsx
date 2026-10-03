@@ -18,7 +18,7 @@ import {
 } from './utils/codeAnalysis'
 import { programPythonFiles } from './utils/importGraph'
 import { runProgramPython } from './utils/programExit'
-import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides, getStoredSettings, persistSettings, getStoredBookNavState, persistBookNavState, getStoredFixedInputs, persistFixedInputs, getStoredEditorFontSize, persistEditorFontSize, getStoredConsoleFontSize, persistConsoleFontSize, getStoredDisplayZoom, persistDisplayZoom, getStoredWatches, persistWatches, getStoredNamedLayouts, persistNamedLayouts, getStoredCompletions, persistCompletion, clearCompletionsForBook, getStoredParsonsState, persistParsonsState, clearParsonsState, clearParsonsStateForBook, getStoredLayoutPrefs, persistLayoutPrefs, defaultPanelsForView, MINIMAL_VISIBLE_PANELS, DEFAULT_DISPLAY_SPLIT, DEFAULT_PRESENTATION_DISPLAY_SPLIT, DISPLAY_SPLIT_MIN, DISPLAY_SPLIT_MAX } from './utils/storage'
+import { getStoredTheme, getStoredNoteOverrides, persistNoteOverrides, getStoredSettings, persistSettings, getStoredBookNavState, persistBookNavState, getStoredFixedInputs, persistFixedInputs, getStoredEditorFontSize, persistEditorFontSize, getStoredConsoleFontSize, persistConsoleFontSize, getStoredDisplayZoom, persistDisplayZoom, getStoredWatches, persistWatches, getStoredNamedLayouts, persistNamedLayouts, getStoredCompletions, persistCompletion, clearCompletionsForBook, getStoredParsonsState, persistParsonsState, clearParsonsState, clearParsonsStateForBook, getStoredLayoutPrefs, persistLayoutPrefs, layoutPanelsToPersist, defaultPanelsForView, MINIMAL_VISIBLE_PANELS, DEFAULT_DISPLAY_SPLIT, DEFAULT_PRESENTATION_DISPLAY_SPLIT, DISPLAY_SPLIT_MIN, DISPLAY_SPLIT_MAX } from './utils/storage'
 import { triggerDownload, getBaseFileStem } from './utils/download'
 import { buildCommentExport, buildDocstringExport, replaceExistingDocstring, getDefinitionNote, getDefaultDefinitionNote, sanitizeNoteText } from './utils/export'
 import { loadMainThreadPyodide, resetMainThreadPyodide, PYGAME_MAIN_THREAD_BOOTSTRAP, TURTLE_CANVAS_BOOTSTRAP, TURTLE_SVG_BOOTSTRAP, SVG_TURTLE_WORKER_SETUP, STDCTX_MAIN_THREAD_BOOTSTRAP } from './utils/mainThread'
@@ -1006,7 +1006,16 @@ export default function App() {
   useEffect(() => { tkRendererRef.current?.setZoom(displayZoom === 'fit' ? 'fit' : displayZoom / 100) }, [displayZoom])
   useEffect(() => { persistWatches(watches); watchesRef.current = watches }, [watches])
   useEffect(() => { persistNamedLayouts(savedLayouts) }, [savedLayouts])
-  useEffect(() => { persistLayoutPrefs({ viewMode, visiblePanels, leftSidebarCollapsed, rightSidebarCollapsed, displaySplit, presentationDisplaySplit, editorCollapsed, consoleCollapsed, tabGroup }) }, [viewMode, visiblePanels, leftSidebarCollapsed, rightSidebarCollapsed, displaySplit, presentationDisplaySplit, editorCollapsed, consoleCollapsed, tabGroup])
+  // A run's layout is never saved: a reload mid-run (or on a held run view)
+  // comes back to the student's own panels, which the run's snapshot holds.
+  // `isRunLayout` is a dependency so that entering or leaving it re-saves even
+  // when the panels object itself did not change.
+  useEffect(() => {
+    persistLayoutPrefs({
+      viewMode, visiblePanels: layoutPanelsToPersist(visiblePanels, runLayoutSnapshotRef.current?.visiblePanels ?? null),
+      leftSidebarCollapsed, rightSidebarCollapsed, displaySplit, presentationDisplaySplit, editorCollapsed, consoleCollapsed, tabGroup,
+    })
+  }, [viewMode, visiblePanels, isRunLayout, leftSidebarCollapsed, rightSidebarCollapsed, displaySplit, presentationDisplaySplit, editorCollapsed, consoleCollapsed, tabGroup])
 
   // Something arriving in the right sidebar must be visible, or the student sees
   // nothing happen: opening a book, or turning on Teacher Tools or Structure,

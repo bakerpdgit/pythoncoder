@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test'
-import { consolePanel, setProgram, watchForErrors } from './helpers'
+import { consolePanel, setProgram, setProgramViaApi, watchForErrors } from './helpers'
 
 /**
  * The keyboard and layout conveniences students asked for: the function-key
@@ -98,6 +98,51 @@ test('Stay on run view keeps a finished run on screen until a layout is chosen',
   await bar.getByRole('button', { name: 'Previous' }).click()
   await expect(bar).toBeHidden()
   await expect(editor(page)).toBeVisible()
+  expect(problems).toEqual([])
+})
+
+/** The panels a reload will come back to. */
+const savedPanels = (page: Page) => page.evaluate(() =>
+  JSON.parse(localStorage.getItem('pythoncoder-layout-prefs') ?? '{}').visiblePanels as Record<string, boolean> | undefined)
+
+test('a reload in the middle of a Run comes back to the editor, not the run view', async ({ page }) => {
+  const problems = watchForErrors(page)
+  await page.goto('/')
+  await setProgramViaApi(page, [
+    'import time',
+    'i = 0',
+    'while True:',
+    '    print("tick", i)',
+    '    i += 1',
+    '    time.sleep(0.2)',
+  ].join('\n'))
+  await page.keyboard.press('Control+F5')
+  await expect(consolePanel(page)).toContainText('tick')
+  // The run has the screen...
+  await expect(editor(page)).toBeHidden()
+  // ...but what is saved is the layout the run will give back.
+  expect(await savedPanels(page)).toMatchObject({ code: true, output: true })
+
+  await page.reload()
+  await expect(editor(page)).toBeVisible()
+  await expect(editor(page)).toContainText('while True:')
+  expect(problems).toEqual([])
+})
+
+test('a reload on a held run view comes back to the editor too', async ({ page }) => {
+  const problems = watchForErrors(page)
+  await page.goto('/')
+  await setProgram(page, 'print("held")')
+  await page.getByRole('button', { name: /^Choose run mode/ }).click()
+  await page.getByLabel('Stay on run view when the program ends').check()
+  await page.keyboard.press('Control+F5')
+  await expect(page.getByRole('region', { name: 'Return to editor view' })).toBeVisible()
+  await expect(editor(page)).toBeHidden()
+  expect(await savedPanels(page)).toMatchObject({ code: true, output: true })
+
+  await page.reload()
+  await expect(editor(page)).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Return to editor view' })).toHaveCount(0)
   expect(problems).toEqual([])
 })
 
