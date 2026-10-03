@@ -31,10 +31,10 @@ so; the turtle commands it uses are all still PLS ones.
 
 ## PLS commands not exercised in code
 
-- `turtle.mode("standard" / "logo")` — this browser turtle is always in standard
-  mode, so calling it would do nothing. Explained in the page 1 guide.
-- `turtle.screensize(width, height)` — the window and the drawing canvas are the
-  same size here, so it has nothing to do. Explained in the page 9 guide.
+- `turtle.mode("standard" / "logo")` — explained, and suggested as an experiment,
+  in the page 1 guide.
+- `turtle.screensize(width, height)` — the drawing has no scroll bars here, so
+  it has little to do. Explained in the page 9 guide.
 - `<turtle>.reset()` — used in page 10's clear-and-start-again key, and
   mentioned in page 8's guide.
 
@@ -57,12 +57,24 @@ links** in the Teacher Tools panel.
 
 ## A note on turtle mode
 
-The app has two turtle renderers (Settings → Turtle mode). Pages 1-9 work in
-both. Page 10 needs the **canvas** renderer, because the SVG renderer's
-`onkey()` and `listen()` are no-ops with no event loop behind them.
+Settings → Turtle graphics offers three turtles. The default, **Python turtle**,
+is CPython's own `turtle` module running unchanged, so every page behaves as it
+does in IDLE: the turtle moves at the speed `speed()` sets, fills sit under
+their outlines, unknown colour names are errors, and page 10's keys work.
 
-The app now spots this for itself: a turtle program that registers key handlers
-runs on the canvas renderer whatever the setting says, and notes in the console
-that it has done so. That also means page 10 always runs on the main thread, so
-Debug and Trace are unavailable for it — the same rule that already applies to
-any turtle program in canvas mode.
+The two older turtles are still there for programs written for them:
+
+- **Canvas (legacy)** animates once per loop rather than per move and draws no
+  turtle; page 10's keys work in it too.
+- **SVG (legacy)** can be stepped through in Debug and Trace, with a slider to
+  replay the drawing, but does not animate. It has no keyboard events, so a
+  program that registers key handlers (page 10) runs with the Python turtle
+  instead.
+
+Page 6's guide describes the Python turtle: both legacy turtles paint a fill
+*over* its outline.
+
+The Python turtle works in **Debug**, **Trace** and **Run**: stepping through a
+drawing shows what each line has drawn, and page 10's key handlers can be
+stepped into too. A slider under the Display header replays any drawing one
+turtle command at a time.

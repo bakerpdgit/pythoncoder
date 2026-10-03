@@ -11,9 +11,10 @@
 import {
   PROBE_TIMEOUT_MS,
   SAB_CONDITIONS_MAX, SAB_CONDITIONS_START, SAB_INDEX_BREAKPOINT_COUNT, SAB_INDEX_COMMAND,
-  SAB_INDEX_CONDITIONS_LENGTH, SAB_INDEX_INPUT_LENGTH, SAB_INDEX_STATE, SAB_INDEX_STOP,
-  SAB_INDEX_WATCHES_LENGTH, SAB_INPUT_END, SAB_INPUT_START, SAB_MAX_BREAKPOINTS,
-  SAB_STATE_INPUT, SAB_STATE_PROBE, SAB_STATE_TRACE, SAB_WATCHES_MAX, SAB_WATCHES_START,
+  SAB_INDEX_CONDITIONS_LENGTH, SAB_INDEX_INPUT_LENGTH, SAB_INDEX_REPLY_LENGTH, SAB_INDEX_STATE, SAB_INDEX_STOP,
+  SAB_INDEX_TK_APPLIED, SAB_INDEX_TK_EVENTS,
+  SAB_INDEX_WATCHES_LENGTH, SAB_INPUT_END, SAB_INPUT_START, SAB_MAX_BREAKPOINTS, SAB_REPLY_END, SAB_REPLY_START,
+  SAB_STATE_INPUT, SAB_STATE_PROBE, SAB_STATE_REPLY, SAB_STATE_TRACE, SAB_WATCHES_MAX, SAB_WATCHES_START,
   SYNC_MARK_HEADER, breakpointMap, parseSyncState, syncUrl,
   type SyncState, type TraceTransport,
 } from '../utils/traceSyncProtocol'
@@ -57,7 +58,28 @@ export interface WorkerSync {
   sleep(ms: number): void
   /** Never returns: the page terminates a parked worker. */
   park(): void
+
+  // The tkinter host: a turtle or tkinter program drawing from this worker.
+
+  /** Ask the page something and block until it answers. Null when the run is being stopped instead. */
+  request(announce: (seq: number) => void): string | null
+  /** Has the page queued tkinter events since the worker last collected them? */
+  tkEventsPending(): boolean
+  /** The worker is collecting the queued events. `count` is the page's own tally, when it sent one. */
+  tkEventsTaken(count?: number): void
+  /**
+   * Wait `ms`. An interruptible wait (mainloop with nothing to do) ends as
+   * soon as the student does something; any wait ends when a stop is asked for.
+   */
+  tkSleep(ms: number, interruptible: boolean): void
+  /** Hold the worker while the page is more than a few batches of drawing behind it. */
+  tkThrottle(posted: number): void
 }
+
+/** How many batches of drawing the page may fall behind before the worker waits for it. */
+export const TK_MAX_BEHIND = 4
+/** How long the worker waits for a page that has fallen behind before carrying on anyway. */
+const TK_THROTTLE_LIMIT_MS = 2000
 
 /**
  * The same channel, reporting the first thing that goes wrong in it.
@@ -85,6 +107,11 @@ export function watchSync(sync: WorkerSync, onFailure: (error: unknown) => void)
     keyDown: watched(sync.keyDown),
     sleep: watched(sync.sleep),
     park: watched(sync.park),
+    request: watched(sync.request),
+    tkEventsPending: watched(sync.tkEventsPending),
+    tkEventsTaken: watched(sync.tkEventsTaken),
+    tkSleep: watched(sync.tkSleep),
+    tkThrottle: watched(sync.tkThrottle),
   }
 }
 
@@ -96,6 +123,9 @@ export function createSabSync(sab: SharedArrayBuffer, keyBuffer: SharedArrayBuff
   const keys = keyBuffer ? new Uint8Array(keyBuffer) : null
   // Private buffers nothing ever notifies, used only to park this thread.
   const sleepView = new Int32Array(new SharedArrayBuffer(4))
+  // The page's tally of tkinter events when the worker last collected them.
+  let tkSeen = 0
+  const stopped = () => Atomics.load(int32, SAB_INDEX_STOP) === 1
 
   // TextDecoder refuses a SharedArrayBuffer-backed view, hence the copies.
   const readJson = (start: number, length: number): unknown =>
@@ -164,6 +194,42 @@ export function createSabSync(sab: SharedArrayBuffer, keyBuffer: SharedArrayBuff
     park() {
       for (;;) Atomics.wait(sleepView, 0, 0)
     },
+    request(announce) {
+      // A length the page never writes: still -1 on waking means a stop woke it.
+      Atomics.store(int32, SAB_INDEX_REPLY_LENGTH, -1)
+      Atomics.store(int32, SAB_INDEX_STATE, SAB_STATE_REPLY)
+      announce(0)
+      Atomics.wait(int32, SAB_INDEX_STATE, SAB_STATE_REPLY)
+      const length = Atomics.load(int32, SAB_INDEX_REPLY_LENGTH)
+      if (length < 0) return null
+      return new TextDecoder().decode(uint8.slice(SAB_REPLY_START, SAB_REPLY_START + Math.min(length, SAB_REPLY_END - SAB_REPLY_START)))
+    },
+    tkEventsPending: () => Atomics.load(int32, SAB_INDEX_TK_EVENTS) !== tkSeen,
+    // -1: more is still queued than one reply held, so ask again whatever the tally says.
+    tkEventsTaken(count) { tkSeen = count === -1 ? -1 : Atomics.load(int32, SAB_INDEX_TK_EVENTS) },
+    tkSleep(ms, interruptible) {
+      const end = performance.now() + ms
+      for (;;) {
+        if (stopped()) return
+        if (interruptible && Atomics.load(int32, SAB_INDEX_TK_EVENTS) !== tkSeen) return
+        const remaining = end - performance.now()
+        if (remaining <= 0) return
+        // In slices, so a stop is noticed while a long delay is still running.
+        const slice = Math.min(remaining, 100)
+        if (interruptible) Atomics.wait(int32, SAB_INDEX_TK_EVENTS, tkSeen, slice)
+        else Atomics.wait(sleepView, 0, 0, slice)
+      }
+    },
+    tkThrottle(posted) {
+      const deadline = performance.now() + TK_THROTTLE_LIMIT_MS
+      for (;;) {
+        const applied = Atomics.load(int32, SAB_INDEX_TK_APPLIED)
+        if (posted - applied <= TK_MAX_BEHIND || stopped()) return
+        const remaining = deadline - performance.now()
+        if (remaining <= 0) return
+        Atomics.wait(int32, SAB_INDEX_TK_APPLIED, applied, Math.min(remaining, 50))
+      }
+    },
   }
 }
 
@@ -174,6 +240,12 @@ const STOP_POLL_MS = 200
 const KEY_POLL_MS = 25
 /** One sleep request is kept well inside how long the service worker will hold it. */
 const SLEEP_SLICE_MS = 15000
+/**
+ * A fixed delay this short is spun out here rather than held by the service
+ * worker: turtle waits 10ms per animation step, and a held request costs
+ * several milliseconds in Chromium and far more in WebKit.
+ */
+const XHR_SPIN_MS = 30
 const MAX_CONSECUTIVE_FAILURES = 5
 
 function spin(ms: number): void {
@@ -183,7 +255,8 @@ function spin(ms: number): void {
 
 export function createXhrSync(session: string, origin: string): WorkerSync {
   let seq = 0
-  let state: SyncState = { stop: false, keys: [] }
+  let state: SyncState = { stop: false, keys: [], tk: 0, applied: 0 }
+  let tkSeen = 0
   let held = new Set<number>()
   let stateAt = -Infinity
 
@@ -290,6 +363,50 @@ export function createXhrSync(session: string, origin: string): WorkerSync {
     park() {
       for (;;) {
         try { wait(() => undefined) } catch { spin(500) }
+      }
+    },
+    request(announce) {
+      const answer = (wait(announce) ?? {}) as { reply?: unknown; stop?: unknown }
+      if (answer.stop === true) { state = { ...state, stop: true }; stateAt = performance.now() }
+      if (answer.stop === true || answer.reply === null || answer.reply === undefined) return null
+      return String(answer.reply)
+    },
+    tkEventsPending() {
+      refresh(KEY_POLL_MS)
+      return state.tk !== tkSeen
+    },
+    tkEventsTaken(count) { tkSeen = typeof count === 'number' ? count : state.tk },
+    tkSleep(ms, interruptible) {
+      const end = performance.now() + ms
+      for (;;) {
+        refresh(interruptible ? KEY_POLL_MS : STOP_POLL_MS)
+        if (state.stop) return
+        if (interruptible && state.tk !== tkSeen) return
+        const remaining = end - performance.now()
+        if (remaining <= 0) return
+        if (!interruptible && remaining <= XHR_SPIN_MS) {
+          spin(remaining)
+          return
+        }
+        try {
+          // An interruptible sleep asks to be let go as soon as the page has
+          // queued an event (`wake`); a service worker too old to know the
+          // parameter just holds it for the time asked, which is short.
+          const params: Record<string, string | number> = { s: session, ms: Math.ceil(Math.min(remaining, SLEEP_SLICE_MS)) }
+          if (interruptible) { params.wake = 1; params.tk = tkSeen }
+          adopt(JSON.parse(request(syncUrl(origin, 'sleep', params)).body))
+        } catch {
+          spin(Math.min(remaining, 50))
+        }
+      }
+    },
+    tkThrottle(posted) {
+      const deadline = performance.now() + TK_THROTTLE_LIMIT_MS
+      for (;;) {
+        refresh(KEY_POLL_MS)
+        if (posted - state.applied <= TK_MAX_BEHIND || state.stop) return
+        if (performance.now() >= deadline) return
+        spin(10)
       }
     },
   }

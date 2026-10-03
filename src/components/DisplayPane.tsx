@@ -31,9 +31,14 @@ interface DisplayPaneProps {
   resolveStdctxImageUri: (uri: string) => string | Promise<string>
   /** Charts this run has produced, oldest first. */
   plotFigures: PlotFigure[]
-  /** Basthon SVG turtle: the frame to show, plus the scrubber's own state. */
+  /** Basthon SVG turtle: the frame to show. */
   turtleSvg: string
-  turtleHistory: string[]
+  /**
+   * The replay slider: how many steps it has, and the surface it belongs to —
+   * the SVG turtle's frames, or the Python turtle's steps (in its tkinter window).
+   */
+  scrubCount: number
+  scrubberSurface: DisplaySurface
   showScrubber: boolean
   scrubStep: number
   scrubPlaying: boolean
@@ -77,7 +82,8 @@ export function DisplayPane({
   resolveStdctxImageUri,
   plotFigures,
   turtleSvg,
-  turtleHistory,
+  scrubCount,
+  scrubberSurface,
   showScrubber,
   scrubStep,
   scrubPlaying,
@@ -133,9 +139,9 @@ export function DisplayPane({
         </div>
       </div>
 
-      {activeSurface === 'turtle' && showScrubber && (
+      {activeSurface === scrubberSurface && showScrubber && (
         <TurtleScrubber
-          history={turtleHistory}
+          count={scrubCount}
           step={scrubStep}
           isPlaying={scrubPlaying}
           speed={scrubSpeed}

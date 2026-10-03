@@ -24,7 +24,13 @@ export type DisplayZoom = 'fit' | number
 export type PlotFigure =
   | { kind: 'image'; uri: string }
   | { kind: 'html'; html: string }
-export type TurtleMode = 'pyo-js-turtle' | 'basthon-svg'
+/**
+ * Which turtle a program gets. 'cpython' is CPython's own turtle.py, drawn by
+ * Coder's tkinter (the default); the other two are the older hand-written
+ * turtles, kept as choices: a canvas one on the main thread and an SVG one
+ * that can be debugged but does not animate.
+ */
+export type TurtleMode = 'cpython' | 'pyo-js-turtle' | 'basthon-svg'
 export type InputMode = 'inline-console' | 'input-bar' | 'popup-dialog'
 export type ViewMode = 'minimal' | 'developer'
 

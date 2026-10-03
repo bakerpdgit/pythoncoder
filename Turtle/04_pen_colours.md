@@ -17,8 +17,8 @@ Edexcel's PLS suggests starting with these:
 > blue, black, green, yellow, orange, red, pink, purple, indigo, olive, lime,
 > navy, orchid, salmon, peru, sienna, white, cyan, silver, gold
 
-There are hundreds more. A name the library does not recognise is simply ignored
-rather than reported, so check your spelling if a stripe comes out black.
+There are hundreds more. A name the library does not recognise stops the program with
+`bad color string`, so check your spelling if you see that.
 
 ## Speed
 

@@ -25,7 +25,7 @@ const SYNC_PREFIX = '/__coder_sync__/'
 const HOLD_MS = 20000
 const SESSION_IDLE_MS = 10 * 60 * 1000
 
-/** id -> { replies: Map<seq, body>, waiters: Map<seq, resolve>, state, touched } */
+/** id -> { replies: Map<seq, body>, waiters: Map<seq, resolve>, sleepers: Set<{ tk, release }>, state, touched } */
 const sessions = new Map()
 
 self.addEventListener('install', event => {
@@ -62,7 +62,7 @@ function sessionFor(id) {
   const isNew = !session
   if (!session) {
     forgetIdleSessions()
-    session = { replies: new Map(), waiters: new Map(), state: { stop: false, keys: [] }, touched: 0 }
+    session = { replies: new Map(), waiters: new Map(), sleepers: new Set(), state: { stop: false, keys: [], tk: 0, applied: 0 }, touched: 0 }
     sessions.set(id, session)
   }
   session.touched = Date.now()
@@ -92,7 +92,16 @@ self.addEventListener('message', event => {
   }
   const { session } = sessionFor(data.session)
   if (data.type === 'coder-sync-state') {
-    session.state = { stop: Boolean(data.state?.stop), keys: Array.isArray(data.state?.keys) ? data.state.keys : [] }
+    session.state = {
+      stop: Boolean(data.state?.stop),
+      keys: Array.isArray(data.state?.keys) ? data.state.keys : [],
+      tk: Number(data.state?.tk) || 0,
+      applied: Number(data.state?.applied) || 0,
+    }
+    // A tkinter mainloop sleeping until the student does something.
+    for (const sleeper of session.sleepers) {
+      if (session.state.stop || session.state.tk !== sleeper.tk) sleeper.release()
+    }
   } else if (data.type === 'coder-sync-reply') {
     const release = session.waiters.get(data.seq)
     if (release) {
@@ -127,6 +136,28 @@ self.addEventListener('fetch', event => {
     event.respondWith(json(session.state))
   } else if (op === 'sleep') {
     const ms = Math.max(0, Math.min(Number(url.searchParams.get('ms')) || 0, HOLD_MS))
+    if (url.searchParams.get('wake') === '1') {
+      // Let go early as soon as the page has queued a tkinter event the worker
+      // has not seen (its tally `tk`), or a stop has been asked for.
+      const tk = Number(url.searchParams.get('tk')) || 0
+      if (session.state.stop || session.state.tk !== tk) {
+        event.respondWith(json(session.state))
+        return
+      }
+      event.respondWith(new Promise(resolve => {
+        const sleeper = {
+          tk,
+          release: () => {
+            if (!session.sleepers.delete(sleeper)) return
+            clearTimeout(timer)
+            resolve(json(session.state))
+          },
+        }
+        const timer = setTimeout(sleeper.release, ms)
+        session.sleepers.add(sleeper)
+      }))
+      return
+    }
     event.respondWith(new Promise(resolve => setTimeout(() => resolve(json(session.state)), ms)))
   } else if (op === 'wait') {
     const seq = Number(url.searchParams.get('q'))

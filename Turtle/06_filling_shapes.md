@@ -18,26 +18,16 @@ leo.end_fill()
 Nothing appears until `end_fill()` runs. Until then the library is simply
 remembering every point the turtle visits, so that it knows what outline to fill.
 
-## The fill covers the outline
+## The outline stays on top
 
-Run the program and compare the two shapes. Both were drawn with a thick pen,
-but only the triangle has a visible black edge — the cyan square's navy outline
-has disappeared underneath its own fill.
+Run the program and look at the edges. Both shapes were drawn with a thick pen,
+and both keep it: the fill goes *underneath* the lines the turtle drew while
+`begin_fill()` was on, so the gold triangle keeps its black edge and the cyan
+square its navy one.
 
-That is because `end_fill()` paints the shape *over* everything already drawn
-there, including the outline the turtle just laid down. The fix is to draw the
-shape a second time after the fill is finished:
-
-```python
-leo.end_fill()
-
-for side in range(3):     # the same three sides again, over the top
-    leo.forward(190)
-    leo.left(120)
-```
-
-The turtle is back where it started with the same heading, so repeating the
-loop retraces the outline exactly.
+`fillcolor()` and `pencolor()` are separate settings, so a shape can have an
+edge in one colour and an inside in another. If you want no visible edge at
+all, set the pen colour to the same as the fill colour.
 
 ## The shape does not have to be closed
 

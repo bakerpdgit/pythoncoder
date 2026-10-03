@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { TesterRunOutput } from '../types'
-import { evaluateTestCase } from './testMatcher'
+import { evaluateTestCase, svgEquivalent } from './testMatcher'
 
 function runOut(output: string): TesterRunOutput {
   return { output, error: null, statementResults: {}, fileContents: {} }
@@ -58,5 +58,23 @@ describe('evaluateTestCase — basic "out" strings', () => {
     expect(result.output).toBe('7 * 4 = 29\n')
     expect(result.reqResults).toHaveLength(1)
     expect(result.reqResults[0].pattern).toBe('7 * 4 = 28')
+  })
+})
+
+describe('svgEquivalent — turtle drawings', () => {
+  const line = (x2: string, colour = '#000000') =>
+    `<svg viewBox="-10.0 -10.0 120.0 20.0">\n<line x1="0.0" y1="0.0" x2="${x2}" y2="0.0" stroke="${colour}" stroke-width="1.0"/>\n</svg>`
+
+  it('takes numbers a rounding step apart as the same', () => {
+    expect(svgEquivalent(line('100.0'), line('100.0'))).toBe(true)
+    expect(svgEquivalent(line('100.0'), line('99.9'))).toBe(true)
+    expect(svgEquivalent(line('100.0'), line('100.5'))).toBe(false)
+  })
+
+  it('never takes a different colour, element or count of numbers as the same', () => {
+    expect(svgEquivalent(line('100.0'), line('100.0', '#ff0000'))).toBe(false)
+    expect(svgEquivalent(line('100.0', '#ff0000'), line('100.0', '#ff0001'))).toBe(false)
+    expect(svgEquivalent(line('100.0'), line('100.0').replace('<line', '<circle'))).toBe(false)
+    expect(svgEquivalent(line('100.0'), line('100.0').replace('</svg>', '<line x1="1.0"/>\n</svg>'))).toBe(false)
   })
 })

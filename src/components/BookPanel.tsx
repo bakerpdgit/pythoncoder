@@ -12,6 +12,7 @@ import { TestResultsBar } from './TestResultsBar'
 import { useDialogs } from './dialogs/DialogProvider'
 import TesterWorker from '../workers/tester.worker.ts?worker'
 import { normalizeTestInputs } from '../utils/testInputs'
+import { loadCoderTkFiles } from '../utils/tkinter'
 
 interface Props {
   navState: BookNavState
@@ -508,6 +509,8 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
         const solutionCode = new TextDecoder().decode(entry.content)
 
         const allFiles = await getAllFiles(fs.id)
+        // Drawn with the real turtle, headless, as the student's own run is.
+        const tkFiles = await loadCoderTkFiles({ turtle: true })
         if (cancelled) return
 
         const worker = new TesterWorker()
@@ -532,6 +535,7 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
           solutionCode,
           inputs: firstInputs,
           files: allFiles.map(f => ({ path: f.path, content: f.content })),
+          tkFiles,
         })
       } catch {
         if (!cancelled) setPreviewLoading(false)

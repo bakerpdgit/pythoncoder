@@ -26,7 +26,8 @@ later on.
 A new turtle starts in the middle of the window facing **east** (to the right),
 and angles are measured counterclockwise. Edexcel calls this *standard* mode.
 (The PLS also lists `turtle.mode("logo")`, which starts the turtle facing north
-with clockwise angles; this browser turtle is always in standard mode.)
+and measures angles clockwise. Put it straight after `import turtle` and see
+how the square changes.)
 
 ## Why four repeats?
 

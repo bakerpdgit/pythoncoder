@@ -70,6 +70,61 @@ export async function setProgram(page: Page, source: string): Promise<void> {
 }
 
 /**
+ * Replace the editor's text through Monaco's own API, for programs whose
+ * indented blocks typing or inserting would re-indent (Monaco indents every
+ * line after a colon a second time).
+ */
+export async function setProgramViaApi(page: Page, source: string): Promise<void> {
+  await expect(page.locator('.monaco-editor').first()).toBeVisible()
+  // Set again until it shows: the editor can be replaced just after it first
+  // appears (a WebKit page's service worker taking control as it loads), and
+  // text set on the editor that went is lost with it.
+  await expect(async () => {
+    await setEditorText(page, source)
+    await expect(page.locator('.monaco-editor .view-lines').first()).toContainText(source.split('\n')[0], { timeout: 3_000 })
+  }).toPass({ timeout: 60_000 })
+}
+
+async function setEditorText(page: Page, source: string): Promise<void> {
+  await page.evaluate(async (code: string) => {
+    const w = window as any
+    let editors: any[] = []
+    if (typeof w.require === 'function') {
+      const monaco = await new Promise<any>(resolve => w.require(['vs/editor/editor.main'], resolve))
+      editors = (monaco ?? w.monaco)?.editor?.getEditors?.() ?? []
+    }
+    if (!editors.length) {
+      // In dev the editor may be the locally installed monaco-editor instead.
+      const url = performance.getEntriesByType('resource').map(e => e.name)
+        .find(n => /\/node_modules\/\.vite\/deps\/monaco-editor\.js/.test(n))
+      if (url) editors = (await import(/* @vite-ignore */ url)).editor.getEditors()
+    }
+    editors[0].getModel().setValue(code)
+  }, source)
+}
+
+/**
+ * Everything the console holds, read through its Copy button: a finished run
+ * can leave the console too short to show every row, and xterm only paints
+ * the rows it has room for. What the button hands the clipboard is caught on
+ * its way, rather than read back, which needs permissions WebKit's Playwright
+ * build does not offer.
+ */
+export async function consoleCopy(page: Page): Promise<string> {
+  await page.evaluate(() => {
+    const w = window as unknown as { __copiedConsole?: string }
+    delete w.__copiedConsole
+    navigator.clipboard.writeText = async (text: string) => { w.__copiedConsole = text }
+  })
+  await page.getByRole('button', { name: /^(Copy console output|Copied)$/ }).click({ timeout: 2_000 })
+  const copied = await page.waitForFunction(() => (window as unknown as { __copiedConsole?: string }).__copiedConsole, null, { timeout: 2_000 })
+  return String(await copied.jsonValue())
+}
+
+/** Whether this browser can suspend WebAssembly (JSPI), which main-thread pauses need. */
+export const hasJspi = (page: Page) => page.evaluate(() => typeof (WebAssembly as unknown as Record<string, unknown>).Suspending === 'function')
+
+/**
  * What the code editor's model holds and how it indents, read through Monaco's
  * own API rather than the rendered lines (which drop leading whitespace into
  * separate spans and virtualise anything off screen).

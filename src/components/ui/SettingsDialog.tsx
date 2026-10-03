@@ -10,14 +10,19 @@ interface Props {
 
 const TURTLE_OPTIONS: { value: TurtleMode; label: string; desc: string }[] = [
   {
+    value: 'cpython',
+    label: 'Python turtle (default)',
+    desc: 'CPython\'s own turtle module, exactly as in IDLE: the turtle moves at the speed set by speed(), and onkey(), onclick(), ontimer(), textinput() and the rest all work. Works in Debug, Trace and Run — the drawing is on screen as you step — with a slider to replay it.',
+  },
+  {
     value: 'pyo-js-turtle',
-    label: 'Canvas (pyo-js-turtle)',
-    desc: 'Renders to an HTML5 canvas with animation. Runs on the main thread. Best for interactive programs using screen.onkeypress() and screen.mainloop().',
+    label: 'Canvas (legacy)',
+    desc: 'The earlier canvas turtle. Runs on the main thread; animates once per loop rather than per move, and draws no turtle. Kept for programs written for it.',
   },
   {
     value: 'basthon-svg',
-    label: 'SVG (Raspberry Pi / Basthon)',
-    desc: 'Records drawing commands as SVG. Works in Debug, Trace, and Run modes. Step-by-step tracing shows the drawing build up live. No interactive keyboard support.',
+    label: 'SVG (legacy, debuggable)',
+    desc: 'Records drawing commands as SVG. Works in Debug, Trace and Run, with a slider to step back through the drawing, but does not animate (speed() has no effect) and has no keyboard or mouse events. A program that uses key handlers runs with the Python turtle instead.',
   },
 ]
 
@@ -132,37 +137,18 @@ export const SettingsDialog = ({ isOpen, settings, onClose, onSettingsChange }: 
             <p className="mb-3 text-xs text-slate-400 leading-relaxed">
               When your code contains <code className="rounded bg-slate-700 px-1 text-emerald-300">import turtle</code>, choose how it is executed.
             </p>
-            <div className="flex flex-col gap-2">
-              {TURTLE_OPTIONS.map(opt => {
-                const active = settings.turtleMode === opt.value
-                return (
-                  <button
-                    key={opt.value}
-                    type="button"
-                    onClick={() => onSettingsChange({ ...settings, turtleMode: opt.value })}
-                    className={`rounded-lg border px-4 py-3 text-left transition-colors ${
-                      active
-                        ? 'border-emerald-500 bg-emerald-900/20'
-                        : 'border-slate-600 bg-slate-900/40 hover:border-slate-500'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className={`h-3 w-3 rounded-full border-2 flex-shrink-0 ${
-                        active ? 'border-emerald-400 bg-emerald-400' : 'border-slate-500 bg-transparent'
-                      }`} />
-                      <span className={`text-sm font-semibold ${active ? 'text-emerald-300' : 'text-slate-200'}`}>
-                        {opt.label}
-                      </span>
-                    </div>
-                    <p className="mt-1.5 pl-5 text-xs text-slate-400 leading-relaxed">{opt.desc}</p>
-                  </button>
-                )
-              })}
-            </div>
-            <p className="mt-3 text-[11px] text-slate-500 leading-relaxed">
-              In Canvas mode, <code className="rounded bg-slate-700 px-1 text-sky-300">screen.mainloop()</code> runs
-              an async event loop automatically — no code changes needed. Animation speed follows{' '}
-              <code className="rounded bg-slate-700 px-1 text-sky-300">turtle.speed()</code>.
+            <select
+              value={settings.turtleMode}
+              onChange={e => onSettingsChange({ ...settings, turtleMode: e.target.value as TurtleMode })}
+              aria-label="Turtle graphics"
+              className="w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-slate-200 focus:border-emerald-500 focus:outline-none"
+            >
+              {TURTLE_OPTIONS.map(opt => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+            <p className="mt-2 text-xs text-slate-400 leading-relaxed">
+              {TURTLE_OPTIONS.find(opt => opt.value === settings.turtleMode)?.desc}
             </p>
           </div>
         </div>

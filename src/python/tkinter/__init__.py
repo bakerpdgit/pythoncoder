@@ -39,6 +39,7 @@ import zlib as _zlib
 import struct as _struct
 
 from tkinter.constants import *
+from tkinter._colors import COLORS as _NAMED_COLORS
 
 TkVersion = 8.6
 TclVersion = 8.6
@@ -73,9 +74,29 @@ except ImportError:
 _real_sleep = getattr(_time, '_coder_real_sleep', _time.sleep)
 
 
+def _host_mode():
+    """How Python can wait for the page, if it can at all.
+
+    'sync'  a worker: the host blocks this thread itself while the page runs
+    'jspi'  the page's own thread, suspended on a promise through JSPI
+    None    no page (native Python, the tester), or the page's thread without
+            JSPI — where waiting would only freeze the tab it is waiting on
+
+    A host that says it is 'sync' wins over JSPI: a worker may well be able to
+    run_sync, but its host answers synchronously and returns no promise.
+    """
+    if _host is None:
+        return None
+    if getattr(_host, 'mode', None) == 'sync':
+        return 'sync'
+    if _can_run_sync is not None and bool(_can_run_sync()):
+        return 'jspi'
+    return None
+
+
 def _can_block():
-    """Whether Python can pause here and let the page run (JSPI)."""
-    return _host is not None and _can_run_sync is not None and bool(_can_run_sync())
+    """Whether Python can pause here and let the page run."""
+    return _host_mode() is not None
 
 
 def _check_stop():
@@ -83,13 +104,36 @@ def _check_stop():
         raise SystemExit()
 
 
-def _pause(seconds):
-    """Give the page its thread back for `seconds`, so it can paint and queue events."""
+# When the page's thread was last given back. update() is called once per
+# animation step, and yielding on every one would cap a fast program at what
+# setTimeout allows; the page only paints once a frame anyway.
+_last_yield = [0.0]
+_YIELD_EVERY = 0.016
+
+
+def _pause(seconds, interruptible=False):
+    """Give the page its thread back for `seconds`, so it can paint and queue events.
+
+    Only mainloop() and the wait_* calls are `interruptible`: they come back
+    as soon as the student does something. A plain delay — after(ms) with no
+    function, time.sleep(), turtle's animation — lasts as long as it says, as
+    in Tk, so pressing keys cannot speed a program up.
+
+    With no way to wait (mode None) a delay is skipped: the drawing appears
+    at the end rather than freezing the tab for as long as it would have taken.
+    """
     _app.flush()
-    if _can_block():
-        _run_sync(_host.sleep(max(0, int(seconds * 1000))))
-    elif seconds > 0:
-        _real_sleep(seconds)
+    mode = _host_mode()
+    ms = max(0, int(seconds * 1000))
+    if mode == 'jspi':
+        now = _time.monotonic()
+        if ms > 0 or now - _last_yield[0] >= _YIELD_EVERY:
+            _run_sync(_host.sleep(ms, interruptible))
+            _last_yield[0] = _time.monotonic()
+    elif mode == 'sync' and ms > 0:
+        # A worker never needs to give the page its thread back: only real
+        # delays block. (update() pauses for 0 once per animation step.)
+        _host.sleep_sync(ms, interruptible)
     _check_stop()
 
 
@@ -265,13 +309,31 @@ _SYSTEM_COLORS = {
     'systemappworkspace': '#ababab', 'systembackground': '#000000',
     'systemgraytext': '#6d6d6d', 'systemtransparent': 'transparent',
 }
-# X11 names Tk knows that CSS does not (or spells differently).
-_X11_COLORS = {
-    'lightgoldenrod': '#eedd82', 'lightslateblue': '#8470ff', 'violetred': '#d02090',
-    'navyblue': '#000080', 'darkgrey': '#a9a9a9', 'lightgrey': '#d3d3d3',
-    'mediumforestgreen': '#6b8e23', 'x11gray': '#bebebe',
-}
-_SHADE = {'1': 100, '2': 93, '3': 80, '4': 55}
+_HEX_DIGITS = frozenset('0123456789abcdefABCDEF')
+
+
+def _rgb8(value):
+    """A Tk colour as (r, g, b) bytes, or a TclError worded as Tk words it.
+
+    Answered here rather than by the page: turtle checks every colour it is
+    given through winfo_rgb, and a worker would otherwise pay a round trip each
+    time. Tk keeps the top eight bits of each component of a long hex colour.
+    """
+    s = str(value)
+    if s.startswith('#'):
+        digits = s[1:]
+        if len(digits) not in (3, 6, 9, 12) or not set(digits) <= _HEX_DIGITS:
+            raise TclError('invalid color name "%s"' % s)
+        n = len(digits) // 3
+        parts = [digits[i * n:(i + 1) * n] for i in range(3)]
+        return tuple(int(p * 2, 16) if n == 1 else int(p[:2], 16) for p in parts)
+    if s != s.strip():
+        raise TclError('unknown color name "%s"' % s)
+    key = s.lower().replace(' ', '')
+    hexed = _SYSTEM_COLORS.get(key) or _NAMED_COLORS.get(key)
+    if not hexed or not hexed.startswith('#'):
+        raise TclError('unknown color name "%s"' % s)
+    return (int(hexed[1:3], 16), int(hexed[3:5], 16), int(hexed[5:7], 16))
 
 
 def _color(value):
@@ -281,27 +343,14 @@ def _color(value):
     s = str(value).strip()
     if s == '':
         return ''
-    if s.startswith('#'):
-        h = s[1:]
-        if len(h) == 9:
-            return '#' + h[0:2] + h[3:5] + h[6:8]
-        if len(h) == 12:
-            return '#' + h[0:2] + h[4:6] + h[8:10]
-        return s
-    k = s.lower().replace(' ', '')
-    if k in _SYSTEM_COLORS:
-        return _SYSTEM_COLORS[k]
-    m = _re.fullmatch(r'gr[ae]y(\d{1,3})', k)
-    if m:
-        level = max(0, min(100, int(m.group(1))))
-        v = int(round(level * 255 / 100))
-        return '#%02x%02x%02x' % (v, v, v)
-    m = _re.fullmatch(r'([a-z]+)([1-4])', k)
-    if m:
-        base = _X11_COLORS.get(m.group(1), m.group(1))
-        pct = _SHADE[m.group(2)]
-        return base if pct == 100 else 'color-mix(in srgb, %s %d%%, black)' % (base, pct)
-    return _X11_COLORS.get(k, k)
+    key = s.lower().replace(' ', '')
+    if key in _SYSTEM_COLORS:
+        return _SYSTEM_COLORS[key]
+    try:
+        return '#%02x%02x%02x' % _rgb8(s)
+    except TclError:
+        # Not a colour Tk knows: let the page make what it can of it.
+        return key
 
 
 # ── Fonts ───────────────────────────────────────────────────────────────────
@@ -862,6 +911,15 @@ _WANT_FOR_TYPE = {
     'Enter': 'cross', 'Leave': 'cross', 'KeyPress': 'key', 'KeyRelease': 'keyup',
     'FocusIn': 'focus', 'FocusOut': 'focus', 'MouseWheel': 'wheel', 'Configure': 'configure',
 }
+# What a binding can want that is not the student doing something.
+_PASSIVE_WANTS = frozenset({'configure'})
+# Operations after which a widget may have a new size.
+_LAYOUT_OPS = frozenset({'create', 'config', 'destroy', 'manage', 'unmanage', 'order',
+                         'gridconf', 'propagate'})
+# Operations that change what a canvas shows (a canvas's own config counts too:
+# see Canvas._sync).
+_CANVAS_DRAW_OPS = frozenset({'cvitem', 'cvcoords', 'cvdelete', 'cvorder', 'cvraise', 'cvlower',
+                              'cvview'})
 
 
 class _BindingTable:
@@ -967,6 +1025,13 @@ class _App:
         self.ttk_maps = {}
         self.ttk_theme = 'vista'
         self.notices = set()
+        # Set by the turtle bootstrap: see wants_events().
+        self.idle_exit = False
+        # Something that can change a widget's size has gone to the page since
+        # update() last delivered <Configure> (see sync_configure).
+        self.layout_dirty = False
+        # Canvases whose drawing has changed since their last history mark.
+        self.canvas_changed = {}
 
     # ids and registries
     def new_id(self):
@@ -987,6 +1052,24 @@ class _App:
     # talking to the page
     def op(self, *args):
         self.ops.append(list(args))
+        if args[0] in _LAYOUT_OPS:
+            self.layout_dirty = True
+        elif args[0] in _CANVAS_DRAW_OPS:
+            self.canvas_changed[args[1]] = True
+
+    def history_mark(self, canvas):
+        """Tell the page that `canvas` now shows a finished step (Coder's replay slider).
+
+        Changes still waiting to be sent are sent first, so the mark follows
+        everything it marks. A canvas that has not changed since its last mark
+        gets none, so a turtle command that only reads something costs nothing.
+        """
+        if canvas._destroyed:
+            return
+        if self.dirty.pop(canvas._id, None) is not None:
+            canvas._sync()
+        if self.canvas_changed.pop(canvas._id, False):
+            self.ops.append(['mark', canvas._id])
 
     def mark(self, widget):
         if not widget._destroyed:
@@ -1113,6 +1196,10 @@ class _App:
         self.mainloop_called = True
         if not self.roots:
             return
+        if self.idle_exit and not self.wants_events():
+            # Nothing could ever happen in this loop (see wants_events).
+            self.flush()
+            return
         if not _can_block():
             # The page cannot run while Python waits here, so this returns and
             # the bootstrap keeps the window alive once the program has ended.
@@ -1127,7 +1214,9 @@ class _App:
                 self.pump()
                 if not self.roots or self.quit_flag:
                     break
-                _pause(self.next_delay())
+                if self.idle_exit and not self.wants_events():
+                    break
+                _pause(self.next_delay(), interruptible=True)
         finally:
             self.loop_depth -= 1
             # quit() ends the innermost mainloop only.
@@ -1144,12 +1233,68 @@ class _App:
             self.pump()
             if done():
                 break
-            _pause(self.next_delay())
+            _pause(self.next_delay(), interruptible=True)
 
     def autofocus(self):
         for root in self.roots:
             self.op('autofocus', root._id)
             break
+
+    def sync_configure(self):
+        """Deliver <Configure> to widgets whose size changed, as Tk's update() does.
+
+        The page reports resizes too, but asynchronously, so a program that
+        sets a geometry and calls update() would otherwise read its window's
+        new size before hearing about it — turtle does exactly that to centre
+        its drawing. Only asks the page anything when a size could have changed
+        and someone is listening.
+        """
+        if not self.layout_dirty or _host is None:
+            return
+        self.layout_dirty = False
+        listening = [w for w in self.widgets.values()
+                     if not w._destroyed and self._binds_configure(w)]
+        for widget in listening:
+            if widget._destroyed:
+                continue
+            g = widget._geom()
+            ev = {'t': 'configure', 'w': widget._id, 'width': int(g['w']), 'height': int(g['h'])}
+            self.deliver(self.handle, ev)
+
+    def _binds_configure(self, widget):
+        for tag in widget.bindtags():
+            table = self.bindings.get(tag)
+            if table is not None and 'configure' in table.wants():
+                return True
+        return False
+
+    def wants_events(self):
+        """Could anything the student does, or any timer, still run Python?
+
+        Timers count, and bindings to input — keys, the mouse, focus — on a
+        widget, a class, or a canvas item. Bindings to <Configure> and the like
+        do not: turtle binds one to keep its drawing centred, and a window
+        being resized is not the student asking the program for anything.
+        Widget commands count, except a scrollbar's, which the page never draws.
+
+        Only consulted when `idle_exit` is set (the turtle bootstrap sets it):
+        then done() / mainloop() return, and the run finishes, as soon as a
+        drawing is complete instead of waiting for the window to be closed.
+        """
+        if self.idle or any(aid in self.timer_funcs for _, _, aid in self.timers):
+            return True
+        tables = list(self.bindings.values())
+        for widget in self.widgets.values():
+            tables.extend(getattr(widget, '_item_bindings', {}).values())
+            if widget._destroyed or isinstance(widget, Scrollbar):
+                continue
+            for name in ('command', 'validatecommand', 'postcommand'):
+                if name in widget._spec and widget._opts.get(name) not in (None, ''):
+                    return True
+        for table in tables:
+            if table.wants() - _PASSIVE_WANTS:
+                return True
+        return False
 
     def has_visible_window(self):
         for widget in self.widgets.values():
@@ -1234,10 +1379,14 @@ class _App:
                 self.focus = None
             widget._on_focus_change(k == 'in')
         elif kind == 'configure':
+            size = (int(ev.get('width', 0)), int(ev.get('height', 0)))
+            # Heard about already, from update() or from the page.
+            if getattr(widget, '_configured_size', None) == size:
+                return
+            widget._configured_size = size
             etype = 'Configure'
             e.type = EventType.Configure
-            e.width = int(ev.get('width', 0))
-            e.height = int(ev.get('height', 0))
+            e.width, e.height = size
             e.x, e.y = 0, 0
         else:
             return
@@ -1620,6 +1769,7 @@ class Misc:
 
     def update(self):
         _pause(0)
+        _app.sync_configure()
         _app.pump()
 
     def update_idletasks(self):
@@ -2000,12 +2150,7 @@ class Misc:
         return _app.pointer
 
     def winfo_rgb(self, color):
-        q = _app.query(q='rgb', c=_color(color))
-        if q is None:
-            return (0, 0, 0)
-        if q == 'bad':
-            raise TclError('unknown color name "%s"' % color)
-        return tuple(int(v) * 257 for v in q)
+        return tuple(v * 257 for v in _rgb8(color))
 
     def winfo_fpixels(self, number):
         return _fpx(number)
@@ -2146,11 +2291,7 @@ def _coder_sleep_ms(ms):
         seconds = max(0.0, float(ms)) / 1000.0
     except (TypeError, ValueError):
         raise TclError('bad argument "%s": must be cancel, idle, info, or an integer' % ms)
-    if _can_block():
-        _pause(seconds)
-    else:
-        _app.flush()
-        _real_sleep(seconds)
+    _pause(seconds)
 
 
 # ── Window manager commands ─────────────────────────────────────────────────
@@ -4315,6 +4456,54 @@ def _dash(value):
     return [float(v) for v in s.split()]
 
 
+def _page_coords(coords):
+    """Coordinates as the page needs them: a hundredth of a pixel is plenty,
+    and a turtle drawing sends thousands of them."""
+    return [round(v, 2) for v in coords]
+
+
+def _cmod(a, b):
+    """C's %: the remainder takes the sign of the dividend."""
+    return int(_math.fmod(a, b))
+
+
+def _snap_origin(origin, increment, inset):
+    """Round a canvas origin to whole scroll increments, as tkCanvas.c does."""
+    if origin >= 0:
+        origin += increment // 2
+        return origin - _cmod(origin + inset, increment)
+    origin = -origin + increment // 2
+    return -(origin - _cmod(origin - inset, increment))
+
+
+def _confine(origin, inset, size, lo, hi, increment):
+    """Keep as much of the scroll region in view as fits (Tk's -confine)."""
+    left = origin + inset - lo
+    right = hi - (origin + size - inset)
+    if left < 0 < right:
+        delta = -left if right > -left else right
+        if increment > 0:
+            delta -= _cmod(delta, increment)
+        origin += delta
+    elif right < 0 < left:
+        delta = -right if left > -right else left
+        if increment > 0:
+            delta -= _cmod(delta, increment)
+        origin -= delta
+    return origin
+
+
+def _grid_align(coord, spacing):
+    if spacing is None or spacing == '':
+        return coord
+    spacing = _fpx(spacing)
+    if spacing <= 0:
+        return coord
+    if coord < 0:
+        return -int(-coord / spacing + 0.5) * spacing
+    return int(coord / spacing + 0.5) * spacing
+
+
 class Canvas(Widget):
     _spec = {
         'background': 'SystemButtonFace', 'borderwidth': 0, 'closeenough': 1, 'confine': 1,
@@ -4337,6 +4526,13 @@ class Canvas(Widget):
         self._item_bindings = {}
         self._current = None
         self._dirty_items = {}
+        # The widget's own options changed (not just its items): see _sync.
+        self._config_dirty = False
+        # The canvas x/y shown at the window's top-left corner (Tk's xOrigin),
+        # and the scroll region as (x1, y1, x2, y2), or None.
+        self._xorigin = 0
+        self._yorigin = 0
+        self._region = None
 
     def _props(self):
         p = _box_props(self, {})
@@ -4352,9 +4548,39 @@ class Canvas(Widget):
 
     __getitem__ = cget
 
+    def _changed(self):
+        self._config_dirty = True
+        _app.mark(self)
+
     def _sync(self):
-        _app.op('config', self._id, self._props())
+        # Items are touched every animation frame; the widget's options are
+        # resent only when they changed.
+        if self._config_dirty:
+            self._config_dirty = False
+            _app.op('config', self._id, self._props())
+            _app.canvas_changed[self._id] = True
         self._flush_items()
+
+    def _set_option(self, name, value, initial=False):
+        if name == 'scrollregion':
+            self._region = self._parse_region(value)
+        Misc._set_option(self, name, value, initial)
+
+    def _configure(self, kw, initial=False):
+        Misc._configure(self, kw, initial)
+        names = {_optname(k) for k in kw}
+        if not initial and names & {'scrollregion', 'confine', 'borderwidth', 'highlightthickness',
+                                    'xscrollincrement', 'yscrollincrement', 'width', 'height'}:
+            self._set_origin(self._xorigin, self._yorigin)
+
+    @staticmethod
+    def _parse_region(value):
+        if value is None or value == '' or value == ():
+            return None
+        parts = _splitlist(value) if isinstance(value, str) else tuple(value)
+        if len(parts) != 4:
+            raise TclError('bad scrollRegion "%s"' % ' '.join(str(p) for p in parts))
+        return tuple(_px(p) for p in parts)
 
     def _flush_items(self):
         dirty, self._dirty_items = self._dirty_items, {}
@@ -4363,9 +4589,9 @@ class Canvas(Widget):
             if item is None:
                 continue
             if kind == 'coords':
-                _app.op('cvcoords', self._id, iid, item['coords'])
+                _app.op('cvcoords', self._id, iid, _page_coords(item['coords']))
             else:
-                _app.op('cvitem', self._id, iid, item['type'], item['coords'], self._item_props(item))
+                _app.op('cvitem', self._id, iid, item['type'], _page_coords(item['coords']), self._item_props(item))
 
     def _touch(self, iid, kind='full'):
         if self._dirty_items.get(iid) != 'full':
@@ -4464,7 +4690,7 @@ class Canvas(Widget):
             win = opts.get('window')
             if isinstance(win, Misc):
                 win._manager = 'canvas'
-        _app.op('cvitem', self._id, iid, itemtype, coords, self._item_props(item))
+        _app.op('cvitem', self._id, iid, itemtype, _page_coords(coords), self._item_props(item))
         return iid
 
     def _normalise_tags(self, tags):
@@ -4682,6 +4908,9 @@ class Canvas(Widget):
                            % ('4' if item['type'] in ('rectangle', 'oval', 'arc') else 'at least %d' % _MIN_COORDS[item['type']],
                               len(coords)))
         for i in self._find(tagOrId)[:1]:
+            # Turtle redraws its shape where it already is after most commands.
+            if self._items[i]['coords'] == coords:
+                continue
             self._items[i]['coords'] = coords
             self._touch(i, 'coords')
         return None
@@ -4725,10 +4954,14 @@ class Canvas(Widget):
             return {k: (k, '', '', '', v) for k, v in o.items() if not k.startswith('_')}
         for iid in items:
             item = self._items[iid]
+            before = dict(item['opts'])
             self._apply_item_options(item['type'], item['opts'], opts)
             if 'tags' in {_optname(k) for k in opts}:
                 item['tags'] = list(self._normalise_tags(item['opts']['tags']))
-            self._touch(iid, 'full')
+            # Turtle restates an item's colour and width with every move;
+            # only a real change needs the item redrawn from scratch.
+            if item['opts'] != before:
+                self._touch(iid, 'full')
         return None
 
     itemconfig = itemconfigure
@@ -4797,34 +5030,44 @@ class Canvas(Widget):
 
     def delete(self, *args):
         gone = []
+        seen = set()
         for tag in args:
-            gone.extend(i for i in self._find(tag) if i not in gone)
+            for i in self._find(tag):
+                if i not in seen:
+                    seen.add(i)
+                    gone.append(i)
         for iid in gone:
             item = self._items.pop(iid, None)
             if item is None:
                 continue
-            self._order.remove(iid)
             self._dirty_items.pop(iid, None)
             if self._current == iid:
                 self._current = None
             if item['type'] == 'window' and isinstance(item['opts'].get('window'), Misc):
                 item['opts']['window']._manager = None
         if gone:
+            # One pass, not a list.remove per item: turtle's clear() deletes
+            # every line of a drawing at once.
+            self._order = [i for i in self._order if i not in seen]
             _app.op('cvdelete', self._id, gone)
 
+    # Stacking. Turtle raises the turtle's own shape after every animation
+    # step, so only the items that moved are sent, never the whole order.
     def tag_raise(self, tagOrId, aboveThis=None):
         items = self._find(tagOrId)
         if not items:
             return
-        for iid in items:
-            self._order.remove(iid)
+        if aboveThis is None and self._order[-len(items):] == items:
+            return
+        moving = set(items)
+        rest = [i for i in self._order if i not in moving]
         if aboveThis is None:
-            self._order.extend(items)
+            pos = len(rest)
         else:
-            ref = [r for r in self._find(aboveThis) if r in self._order]
-            pos = max(self._order.index(r) for r in ref) + 1 if ref else len(self._order)
-            self._order[pos:pos] = items
-        _app.op('cvorder', self._id, list(self._order))
+            ref = [r for r in self._find(aboveThis) if r not in moving]
+            pos = max(rest.index(r) for r in ref) + 1 if ref else len(rest)
+        self._order = rest[:pos] + items + rest[pos:]
+        _app.op('cvraise', self._id, items, rest[pos - 1] if pos > 0 else None)
 
     lift = tkraise = tag_raise
 
@@ -4832,15 +5075,17 @@ class Canvas(Widget):
         items = self._find(tagOrId)
         if not items:
             return
-        for iid in items:
-            self._order.remove(iid)
+        if belowThis is None and self._order[:len(items)] == items:
+            return
+        moving = set(items)
+        rest = [i for i in self._order if i not in moving]
         if belowThis is None:
-            self._order[0:0] = items
+            pos = 0
         else:
-            ref = [r for r in self._find(belowThis) if r in self._order]
-            pos = min(self._order.index(r) for r in ref) if ref else 0
-            self._order[pos:pos] = items
-        _app.op('cvorder', self._id, list(self._order))
+            ref = [r for r in self._find(belowThis) if r not in moving]
+            pos = min(rest.index(r) for r in ref) if ref else 0
+        self._order = rest[:pos] + items + rest[pos:]
+        _app.op('cvlower', self._id, items, rest[pos] if pos < len(rest) else None)
 
     lower = tag_lower
 
@@ -4907,29 +5152,116 @@ class Canvas(Widget):
             _app.deliver(self._item_dispatch, iid, etype, None, set(), 1, e)
         self._current = new
 
+    # The view: which part of the canvas the window shows. Window pixel (x, y)
+    # shows canvas point (x + xOrigin, y + yOrigin), with the window's corner
+    # under its border, as in Tk. The arithmetic below is tkCanvas.c's, so a
+    # program that scrolls — turtle centres (0, 0) this way — lands where Tk
+    # would put it.
+
+    def _inset(self):
+        return _px(self._o('borderwidth')) + _px(self._o('highlightthickness'))
+
+    def _view_size(self):
+        g = self._geom()
+        return int(g['w']), int(g['h'])
+
+    def _set_origin(self, x, y):
+        x, y = int(x), int(y)
+        inset = self._inset()
+        xinc = _px(self._o('xscrollincrement'))
+        yinc = _px(self._o('yscrollincrement'))
+        if xinc > 0:
+            x = _snap_origin(x, xinc, inset)
+        if yinc > 0:
+            y = _snap_origin(y, yinc, inset)
+        if self._region is not None and _getboolean(self._o('confine')):
+            width, height = self._view_size()
+            x1, y1, x2, y2 = self._region
+            x = _confine(x, inset, width, x1, x2, xinc)
+            y = _confine(y, inset, height, y1, y2, yinc)
+        if (x, y) == (self._xorigin, self._yorigin):
+            return
+        self._xorigin, self._yorigin = x, y
+        _app.op('cvview', self._id, x, y)
+        self._scrolled()
+
+    def _scrolled(self):
+        for axis in ('x', 'y'):
+            command = self._o(axis + 'scrollcommand')
+            if callable(command):
+                _app.deliver(command, *self._fractions(axis))
+
+    def _fractions(self, axis):
+        width, height = self._view_size()
+        inset = self._inset()
+        x1, y1, x2, y2 = self._region or (0, 0, 0, 0)
+        if axis == 'x':
+            screen1, screen2, lo, hi = self._xorigin + inset, self._xorigin + width - inset, x1, x2
+        else:
+            screen1, screen2, lo, hi = self._yorigin + inset, self._yorigin + height - inset, y1, y2
+        span = hi - lo
+        if span <= 0:
+            return (0.0, 1.0)
+        f1 = max(0.0, (screen1 - lo) / span)
+        f2 = min(1.0, (screen2 - lo) / span)
+        return (f1, max(f1, f2))
+
+    def _view(self, axis, args):
+        if not args:
+            return self._fractions(axis)
+        how = str(args[0])
+        inset = self._inset()
+        origin = self._xorigin if axis == 'x' else self._yorigin
+        x1, y1, x2, y2 = self._region or (0, 0, 0, 0)
+        lo, hi = (x1, x2) if axis == 'x' else (y1, y2)
+        if how == 'moveto':
+            if len(args) != 2:
+                raise TclError('wrong # args: should be ".c %sview moveto fraction"' % axis)
+            new = lo - inset + int(getdouble(args[1]) * (hi - lo) + 0.5)
+        elif how == 'scroll':
+            if len(args) != 3:
+                raise TclError('wrong # args: should be ".c %sview scroll number pages|units"' % axis)
+            count = getint(args[1])
+            what = str(args[2])
+            increment = _px(self._o(axis + 'scrollincrement'))
+            size = self._view_size()[0 if axis == 'x' else 1]
+            if what.startswith('page'):
+                new = int(origin + count * 0.9 * (size - 2 * inset))
+            elif what.startswith('unit'):
+                new = origin + count * increment if increment > 0 else int(origin + count * 0.1 * (size - 2 * inset))
+            else:
+                raise TclError('bad argument "%s": must be pages or units' % what)
+        else:
+            raise TclError('unknown option "%s": must be moveto or scroll' % how)
+        if axis == 'x':
+            self._set_origin(new, self._yorigin)
+        else:
+            self._set_origin(self._xorigin, new)
+        return None
+
     def canvasx(self, screenx, gridspacing=None):
-        return float(screenx)
+        return _grid_align(float(_px(screenx) + self._xorigin), gridspacing)
 
     def canvasy(self, screeny, gridspacing=None):
-        return float(screeny)
+        return _grid_align(float(_px(screeny) + self._yorigin), gridspacing)
 
     def xview(self, *args):
-        return (0.0, 1.0)
+        return self._view('x', args)
 
     def yview(self, *args):
-        return (0.0, 1.0)
+        return self._view('y', args)
 
     def xview_moveto(self, fraction):
-        pass
+        self._view('x', ('moveto', fraction))
 
     def yview_moveto(self, fraction):
-        pass
+        self._view('y', ('moveto', fraction))
 
     def xview_scroll(self, number, what):
-        pass
+        self._view('x', ('scroll', number, what))
 
     def yview_scroll(self, number, what):
-        pass
+        self._view('y', ('scroll', number, what))
 
     def scan_mark(self, x, y):
         pass
@@ -5395,28 +5727,10 @@ def _encode_png(width, height, rgba):
             + chunk(b'IDAT', _zlib.compress(bytes(raw), 6)) + chunk(b'IEND', b''))
 
 
-_NAMED_RGB = {
-    'black': (0, 0, 0), 'white': (255, 255, 255), 'red': (255, 0, 0), 'green': (0, 128, 0),
-    'blue': (0, 0, 255), 'yellow': (255, 255, 0), 'cyan': (0, 255, 255), 'magenta': (255, 0, 255),
-    'orange': (255, 165, 0), 'purple': (128, 0, 128), 'grey': (128, 128, 128), 'gray': (128, 128, 128),
-    'pink': (255, 192, 203), 'brown': (165, 42, 42), 'lime': (0, 255, 0), 'navy': (0, 0, 128),
-}
-
-
 def _rgb_of(color):
     if isinstance(color, (tuple, list)) and len(color) >= 3:
         return tuple(int(c) for c in color[:3])
-    css = _color(color) or ''
-    if css.startswith('#') and len(css) == 7:
-        return (int(css[1:3], 16), int(css[3:5], 16), int(css[5:7], 16))
-    if css.startswith('#') and len(css) == 4:
-        return tuple(int(c * 2, 16) for c in css[1:4])
-    if css in _NAMED_RGB:
-        return _NAMED_RGB[css]
-    q = _app.query(q='rgb', c=css)
-    if isinstance(q, list):
-        return tuple(int(v) for v in q)
-    raise TclError('unknown color name "%s"' % color)
+    return _rgb8(str(color).strip())
 
 
 class Image:
@@ -5695,16 +6009,88 @@ def _coder_dialog(spec, headless=None):
     if _host is None:
         return headless
     payload = _json.dumps(spec)
-    if _can_block():
+    mode = _host_mode()
+    if mode == 'jspi':
         raw = _run_sync(_host.dialog(payload))
         _check_stop()
     else:
+        # A worker's host blocks until the student answers; the page's own
+        # thread without JSPI falls back to the browser's blocking dialogs.
         raw = _host.dialog_sync(payload)
+        if mode == 'sync':
+            _check_stop()
     raw = None if raw is None else str(raw)
     return _json.loads(raw) if raw else None
 
 
 # The Coder bootstrap calls these; they are not part of tkinter's API.
+
+# Methods that wait for the student rather than draw: a command they run (a key
+# handler moving the turtle) is a step of its own, so they are not one.
+_TURTLE_UNWATCHED = frozenset({'mainloop', 'done', 'exitonclick', 'textinput', 'numinput', 'bye'})
+
+
+def _coder_watch_turtle(turtle):
+    """Mark one step of Coder's replay slider per finished turtle command.
+
+    Every public method of a turtle and of the screen is wrapped, outside
+    turtle.py itself: when the outermost one returns, the canvas it drew on is
+    marked (`_App.history_mark`), and the page keeps what the canvas showed
+    then. `circle()` is one step, though it calls `forward()` inside; the
+    animation's in-between frames are none. With `tracer(0)` nothing reaches
+    the screen until update(), so only update() is a step.
+    """
+    import inspect as _inspect
+    import types as _types
+    depth = [0]
+
+    def mark(owner, name):
+        screen = owner if isinstance(owner, turtle.TurtleScreen) else getattr(owner, 'screen', None)
+        if screen is None:
+            return
+        if getattr(screen, '_tracing', 1) == 0 and name != 'update':
+            return
+        cv = getattr(screen, 'cv', None)
+        canvas = getattr(cv, '_canvas', cv)
+        if isinstance(canvas, Canvas):
+            _app.history_mark(canvas)
+
+    def watch(name, fn):
+        def watched(self, *args, **kwargs):
+            depth[0] += 1
+            try:
+                return fn(self, *args, **kwargs)
+            finally:
+                depth[0] -= 1
+                if depth[0] == 0:
+                    mark(self, name)
+        watched.__name__ = fn.__name__
+        watched.__qualname__ = fn.__qualname__
+        watched.__doc__ = fn.__doc__
+        watched.__wrapped__ = fn
+        watched._coder_watched = True
+        return watched
+
+    # The bases' methods through the classes that inherit them; the screen
+    # class turtle.Screen() makes adds a few of its own. Making a turtle or the
+    # screen is one step too — the turtle appearing — however many public
+    # methods its constructor calls on the way.
+    for cls, inherited in ((turtle.RawTurtle, True), (turtle.TurtleScreen, True),
+                           (getattr(turtle, '_Screen', None), False), (getattr(turtle, 'Turtle', None), False)):
+        if cls is None:
+            continue
+        names = dir(cls) if inherited else list(vars(cls))
+        for name in names:
+            if name == '__init__' and name in vars(cls):
+                setattr(cls, name, watch(name, vars(cls)[name]))
+                continue
+            if name.startswith('_') or name in _TURTLE_UNWATCHED:
+                continue
+            fn = _inspect.getattr_static(cls, name, None)
+            if not isinstance(fn, _types.FunctionType) or getattr(fn, '_coder_watched', False):
+                continue
+            setattr(cls, name, watch(name, fn))
+
 
 async def _coder_keepalive():
     """After the program ends: keep a window that is still open working."""
@@ -5717,12 +6103,45 @@ async def _coder_keepalive():
         return
     if not app.mainloop_called and not app.has_visible_window():
         return
+    if app.idle_exit and not app.wants_events():
+        return
     app.quit_flag = False
     if not app.mainloop_called:
         app.autofocus()
     while app.roots and not app.quit_flag:
         app.pump()
+        if app.idle_exit and not app.wants_events():
+            break
         await asyncio.sleep(app.next_delay())
+    app.flush()
+
+
+def _coder_keepalive_sync():
+    """After the program ends, in a worker: keep a window that is still open working.
+
+    The worker's host can block, so mainloop() was a real loop all along; this
+    covers a program that never called it — a window left open, a turtle with
+    key handlers and no done() — as IDLE's own event loop would. It runs under
+    the debugger, so the handlers can be stepped through.
+    """
+    app = _app
+    app.flush()
+    if _host_mode() != 'sync':
+        return
+    if app.mainloop_called and not app.mainloop_deferred:
+        return
+    if not app.mainloop_called and not app.has_visible_window():
+        return
+    if app.idle_exit and not app.wants_events():
+        return
+    app.quit_flag = False
+    if not app.mainloop_called:
+        app.autofocus()
+    while app.roots and not app.quit_flag:
+        app.pump()
+        if app.idle_exit and not app.wants_events():
+            break
+        _pause(app.next_delay(), interruptible=True)
     app.flush()
 
 

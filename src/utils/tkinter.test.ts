@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process'
 import { describe, expect, it } from 'vitest'
-import { TKINTER_MAIN_THREAD_BOOTSTRAP, TKINTER_SHIM_FILES, codeUsesTkinter, detectTkinter } from './tkinter'
+import { TKINTER_MAIN_THREAD_BOOTSTRAP, codeUsesTkinter, detectTkinter } from './tkinter'
+import { TKINTER_SHIM_FILES } from './tkinterSources'
 
 const pythonAvailable = spawnSync('python', ['--version']).status === 0
 const file = (path: string, text: string) => ({ path, content: new TextEncoder().encode(text).buffer as ArrayBuffer })

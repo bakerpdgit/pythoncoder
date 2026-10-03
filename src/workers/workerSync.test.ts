@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { SyncChannelError, createSabSync, createXhrSync, watchSync } from './workerSync'
+import { SyncChannelError, TK_MAX_BEHIND, createSabSync, createXhrSync, watchSync } from './workerSync'
 import { createSabChannel, createXhrChannel } from '../utils/traceChannel'
 import { SYNC_MARK_HEADER, type SyncPageMessage } from '../utils/traceSyncProtocol'
 
@@ -79,6 +79,50 @@ describe('shared memory', () => {
     expect(() => sync.probe(() => channel.answerProbe())).not.toThrow()
     vi.spyOn(Atomics, 'wait').mockReturnValue('timed-out')
     expect(() => pair().sync.probe(() => undefined)).toThrow(SyncChannelError)
+  })
+
+  it('answers the tkinter host\'s questions, and a stop answers instead with nothing', () => {
+    const { channel, sync } = pair()
+    expect(channel.sendReply('too early')).toBe(false)
+    expect(sync.request(() => {
+      expect(channel.isWaiting('reply')).toBe(true)
+      expect(channel.sendReply('{"w": 683, "h": "¡576!"}')).toBe(true)
+    })).toBe('{"w": 683, "h": "¡576!"}')
+    // Longer than the reply region: cut short rather than spilled over.
+    expect(sync.request(() => { channel.sendReply('x'.repeat(10_000)) })?.length).toBe(channel.replyLimit)
+    expect(sync.request(() => { channel.requestStop() })).toBeNull()
+  })
+
+  it('knows when tkinter events are waiting, and only an interruptible sleep ends early for them', () => {
+    const { channel, sync } = pair()
+    expect(sync.tkEventsPending()).toBe(false)
+    channel.tkEventsQueued()
+    expect(sync.tkEventsPending()).toBe(true)
+    sync.tkEventsTaken()
+    expect(sync.tkEventsPending()).toBe(false)
+    sync.tkEventsTaken(-1)
+    expect(sync.tkEventsPending()).toBe(true)
+    sync.tkEventsTaken()
+
+    channel.tkEventsQueued()
+    let started = performance.now()
+    sync.tkSleep(5_000, true)
+    expect(performance.now() - started).toBeLessThan(1_000)
+    started = performance.now()
+    sync.tkSleep(30, false)
+    expect(performance.now() - started).toBeGreaterThanOrEqual(25)
+  })
+
+  it('holds the worker only while the page is more than a few batches of drawing behind', () => {
+    const { channel, sync } = pair()
+    channel.tkApplied(6)
+    const wait = vi.spyOn(Atomics, 'wait')
+    sync.tkThrottle(TK_MAX_BEHIND + 6)
+    expect(wait).not.toHaveBeenCalled()
+    // Behind: the worker waits until the page reports the batch applied.
+    wait.mockImplementation(() => { channel.tkApplied(20); return 'ok' })
+    sync.tkThrottle(20)
+    expect(wait).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -239,6 +283,47 @@ describe('held requests', () => {
     const { channel, sync } = pair()
     script.push('fail')
     expect(sync.waitInput(answering(channel, 'input', () => { channel.sendInput('x') })).text).toBe('x')
+  })
+
+  it('answers the tkinter host\'s questions, with no limit on size, and a stop with nothing', () => {
+    fakeServiceWorker()
+    const { channel, sync } = pair()
+    const big = 'y'.repeat(20_000)
+    expect(sync.request(answering(channel, 'reply' as 'input', () => { expect(channel.sendReply(big)).toBe(true) }))).toBe(big)
+    expect(sync.request(answering(channel, 'reply' as 'input', () => { channel.requestStop() }))).toBeNull()
+  })
+
+  it('learns of queued tkinter events and applied drawing from the state it polls', async () => {
+    const { requests } = fakeServiceWorker()
+    const clock = fakeClock()
+    const { channel, sync } = pair()
+    channel.tkEventsQueued()
+    channel.tkApplied(7)
+    // Pushed to the service worker once per turn of the page's event loop.
+    await Promise.resolve()
+    expect(sync.tkEventsPending()).toBe(true)
+    sync.tkEventsTaken(1)
+    clock.advance(30)
+    expect(sync.tkEventsPending()).toBe(false)
+    // An interruptible sleep with an event already waiting does not sleep at all.
+    channel.tkEventsQueued()
+    await Promise.resolve()
+    clock.advance(30)
+    requests.length = 0
+    sync.tkSleep(10_000, true)
+    expect(requests).toEqual(['poll'])
+    // The page is 7 batches in: a worker at 11 is within reach, so no waiting.
+    clock.advance(30)
+    sync.tkThrottle(TK_MAX_BEHIND + 7)
+  })
+
+  it('spins out a short fixed delay instead of holding a request for it', () => {
+    const { requests } = fakeServiceWorker()
+    fakeClock().tick(5)
+    const { sync } = pair()
+    requests.length = 0
+    sync.tkSleep(20, false)
+    expect(requests.filter(op => op === 'sleep')).toEqual([])
   })
 
   it('gives a restarted service worker the answer again', () => {

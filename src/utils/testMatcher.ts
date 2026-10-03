@@ -74,6 +74,28 @@ function normalizeSvg(svg: string): string {
   return svg.replace(/\s+/g, ' ').trim()
 }
 
+const SVG_NUMBER = /-?\d+(?:\.\d+)?/g
+
+/**
+ * Two drawings as the same picture: the same SVG text, numbers aside, and
+ * every number within a rounding step of its partner. The tester writes
+ * coordinates to a tenth of a pixel (tkinter/_coder_svg.py), and two programs
+ * that turn the same way by different routes — left(270), right(90) — can
+ * land either side of a rounding boundary.
+ */
+export function svgEquivalent(actual: string, expected: string, tolerance = 0.15): boolean {
+  const a = normalizeSvg(actual)
+  const b = normalizeSvg(expected)
+  if (a === b) return true
+  const textA = a.split(SVG_NUMBER)
+  const textB = b.split(SVG_NUMBER)
+  if (textA.length !== textB.length || textA.some((part, i) => part !== textB[i])) return false
+  const numbersA = a.match(SVG_NUMBER) ?? []
+  const numbersB = b.match(SVG_NUMBER) ?? []
+  return numbersA.length === numbersB.length
+    && numbersA.every((n, i) => Math.abs(Number(n) - Number(numbersB[i])) <= tolerance)
+}
+
 function evalRequirement(
   req: BookTestOutputReq,
   output: string,
@@ -143,7 +165,7 @@ function evalRequirement(
       if (req.filename) {
         const expected = solutionTurtleSvgs[req.filename] ?? ''
         if (!expected) { rr.passed = false; break }
-        rr.passed = normalizeSvg(turtleSvg) === normalizeSvg(expected)
+        rr.passed = svgEquivalent(turtleSvg, expected)
       } else if (pattern) {
         rr.passed = safeMatch(turtleSvg, pattern, ignore, count)
       } else {

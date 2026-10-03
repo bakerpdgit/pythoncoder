@@ -37,10 +37,11 @@ export default defineConfig({
     // the input and isolation specs run here too: `npm run test:e2e:webkit`
     // after `npx playwright install webkit`. So does the transport spec: the
     // service-worker way of waiting exists for the browsers where shared
-    // memory lets a student down, and those are WebKit.
+    // memory lets a student down, and those are WebKit. The turtle spec runs
+    // here too: its debugger and its event loop both wait on the service worker.
     {
       name: 'webkit',
-      testMatch: ['isolation.spec.ts', 'input.spec.ts', 'transport.spec.ts'],
+      testMatch: ['isolation.spec.ts', 'input.spec.ts', 'transport.spec.ts', 'turtle.spec.ts'],
       use: {
         ...devices['Desktop Safari'],
         launchOptions: {

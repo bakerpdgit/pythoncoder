@@ -75,7 +75,11 @@ import { type CanvasPaneHandle } from './components/CanvasPane'
 import { STDCTX_KEY_BUFFER_SIZE, STDCTX_WORKER_BOOTSTRAP, keyToVirtualKeyCode, processAudioCommand, type StdaudCommand, type StdctxCommand } from './utils/stdctx'
 import { MATPLOTLIB_BOOTSTRAP, MATPLOTLIB_FLUSH_CODE } from './utils/matplotlib'
 import { PLOTLY_BOOTSTRAP, micropipInstallCode } from './utils/plotly'
-import { TKINTER_MAIN_THREAD_BOOTSTRAP, TKINTER_SHIM_FILES, codeUsesTkinter, detectTkinter } from './utils/tkinter'
+import {
+  TKINTER_MAIN_THREAD_BOOTSTRAP, TKINTER_WORKER_AFTER_PROGRAM, TKINTER_WORKER_BOOTSTRAP, TKINTER_WORKER_SHUTDOWN,
+  codeUsesTkinter, detectTkinter, detectTurtle, loadCoderTkFiles, tkFilesForTesting,
+} from './utils/tkinter'
+import { TkWorkerBridge } from './utils/tkWorkerBridge'
 import { TkRenderer } from './utils/tkinterRenderer'
 import { createVfsMediaUrlCache, isDirectMediaUrl } from './utils/vfsMediaUrl'
 import { TraceTable } from './components/trace/TraceTable'
@@ -221,6 +225,14 @@ function detectWorkerPlan(): RememberedPlan {
   return { plan, reason: remembered?.plan === plan ? remembered.reason : '' }
 }
 
+/**
+ * Whether tkinter programs run in the trace worker (and so can be debugged),
+ * drawing through utils/tkWorkerBridge.ts as the Python turtle does.
+ * `?tk=main` keeps them on the main thread, which is how the two are compared
+ * on a particular browser.
+ */
+const TK_IN_WORKER = typeof window === 'undefined' || new URLSearchParams(window.location.search).get('tk') !== 'main'
+
 /** A run whose Pyodide crashed, and how to start it again. */
 type CrashedRun =
   | { runtime: 'trace-worker'; mode: WorkerRunMode }
@@ -274,6 +286,9 @@ export default function App() {
   const [turtleScrubStep, setTurtleScrubStep] = useState(0)
   const [turtleScrubPlaying, setTurtleScrubPlaying] = useState(false)
   const [turtleScrubSpeed, setTurtleScrubSpeed] = useState(400)
+  // The Python turtle's replay steps, kept by the tkinter renderer (one per
+  // finished turtle command); the slider shows them in the turtle's own window.
+  const [pyTurtleFrames, setPyTurtleFrames] = useState(0)
   // Latched once a stdctx program has drawn, so its Display surface stays available.
   const [hasCanvasOutput, setHasCanvasOutput] = useState(false)
   const [consoleCopied, setConsoleCopied] = useState(false)
@@ -529,6 +544,8 @@ export default function App() {
   // its DOM into a new host if React ever remounts the Display pane.
   const tkinterHostRef = useRef<HTMLDivElement | null>(null)
   const tkRendererRef = useRef<TkRenderer | null>(null)
+  // A turtle drawing from the trace worker: its drawing and questions reach the renderer through this.
+  const tkBridgeRef = useRef<TkWorkerBridge | null>(null)
   const setTkinterHost = useCallback((el: HTMLDivElement | null) => {
     tkinterHostRef.current = el
     if (el && tkRendererRef.current) tkRendererRef.current.attach(el)
@@ -578,6 +595,11 @@ export default function App() {
   const workerStartModeRef = useRef<WorkerRunMode>('debug')
   const turtleSvgHistoryRef = useRef<string[]>([])
   const turtleScrubLockedRef = useRef(false)
+  const pyTurtleCanvasRef = useRef<number | null>(null)
+  const pyTurtleFramesRef = useRef(0)
+  const pyTurtleFrameRafRef = useRef(0)
+  // The student closed the slider: no more steps for the rest of this run.
+  const pyTurtleDismissedRef = useRef(false)
 
   /** Start one of the app's workers, the way this tab has found works. */
   const startAppWorker = (script: WorkerScript): Worker => {
@@ -681,14 +703,18 @@ export default function App() {
   // ── Derived state ────────────────────────────────────────────────────────
 
   const isPygameLocked = codeUsesPygame(codeText)
-  // A tkinter program draws its windows into this page, so it can only run here.
-  const isTkinterLocked = codeUsesTkinter(codeText)
+  // A tkinter program runs in the trace worker like any other (drawing into
+  // this page through utils/tkWorkerBridge.ts), unless ?tk=main says otherwise.
+  const isTkinterLocked = codeUsesTkinter(codeText) && !TK_IN_WORKER
   const usesStdctx = codeUsesStdctx(codeText)
-  // Key handlers only work in the canvas renderer, so a program that registers
-  // them runs there whatever the preference says — in the SVG renderer it would
-  // silently draw nothing and exit.
+  // The SVG turtle has no key handlers, so a program that registers them gets
+  // the Python turtle whatever the preference says — in the SVG renderer it
+  // would silently draw nothing and exit.
   const effectiveTurtleMode = (code: string): TurtleMode =>
-    codeUsesTurtleKeyboard(code) ? 'pyo-js-turtle' : appSettings.turtleMode
+    appSettings.turtleMode === 'basthon-svg' && codeUsesTurtleKeyboard(code) ? 'cpython' : appSettings.turtleMode
+  // The canvas turtle draws straight into this page, so it runs here. The
+  // Python turtle runs in the trace worker like any program (drawing through
+  // utils/tkWorkerBridge.ts), so it can be debugged.
   const isTurtleLocked = codeUsesTurtle(codeText) && effectiveTurtleMode(codeText) === 'pyo-js-turtle'
   // A tab that cannot run the trace worker runs everything on the main thread,
   // without the student having to find the setting.
@@ -733,7 +759,9 @@ export default function App() {
     ? Object.prototype.hasOwnProperty.call(noteOverrides, GLOBAL_NOTE_KEY)
     : !!activeInsightDefinition && Object.prototype.hasOwnProperty.call(noteOverrides, activeInsightDefinition.key)
   const canExportNotes = structureModel.orderedDefinitions.length > 0 && hasCode
-  const showTurtleScrubber = shouldShowTurtleScrubber(turtleSvgHistory)
+  // The slider replays the Python turtle's steps when there are any, otherwise the SVG turtle's frames.
+  const scrubCount = pyTurtleFrames > 0 ? pyTurtleFrames : turtleSvgHistory.length
+  const showTurtleScrubber = pyTurtleFrames >= 2 || shouldShowTurtleScrubber(turtleSvgHistory)
   const displayedTurtleSvg = turtleSvgHistory.length > 0 && turtleScrubStep >= 0 && turtleScrubStep < turtleSvgHistory.length
     ? turtleSvgHistory[turtleScrubStep]
     : turtleSvg
@@ -1309,13 +1337,22 @@ export default function App() {
   // Turtle scrubber playback: advance one step per interval, stop at end
   useEffect(() => {
     if (!turtleScrubPlaying) return
-    const maxStep = turtleSvgHistory.length - 1
+    const maxStep = scrubCount - 1
     if (turtleScrubStep >= maxStep) { setTurtleScrubPlaying(false); return }
     const id = window.setTimeout(() => {
-      setTurtleScrubStep(prev => Math.min(prev + 1, turtleSvgHistoryRef.current.length - 1))
+      setTurtleScrubStep(prev => Math.min(prev + 1, scrubCountNow() - 1))
     }, turtleScrubSpeed)
     return () => window.clearTimeout(id)
-  }, [turtleScrubPlaying, turtleScrubStep, turtleSvgHistory.length, turtleScrubSpeed])
+  }, [turtleScrubPlaying, turtleScrubStep, scrubCount, turtleScrubSpeed])
+
+  // The Python turtle's window shows the step the slider is on; the newest is
+  // the live drawing itself.
+  useEffect(() => {
+    const canvasId = pyTurtleCanvasRef.current
+    const renderer = tkRendererRef.current
+    if (canvasId === null || !renderer || pyTurtleFrames === 0) return
+    renderer.showCanvasFrame(canvasId, turtleScrubStep >= pyTurtleFrames - 1 ? null : turtleScrubStep)
+  }, [turtleScrubStep, pyTurtleFrames])
 
   // ── Breakpoint mutation helpers ────────────────────────────────────────────
   const commitBreakpoints = (next: Map<number, Breakpoint>) => {
@@ -2343,12 +2380,17 @@ export default function App() {
    * Display pane showing its surface. The renderer is created once the host
    * exists — the output panel may only just have been switched on.
    */
-  const beginTkinterRun = async (): Promise<TkRenderer> => {
+  const beginTkinterRun = async (onEvent?: () => void, stepping = false): Promise<TkRenderer> => {
     setHasTkinterOutput(true)
     setVisiblePanels(p => (p.output ? p : { ...p, output: true }))
     setDisplaySurface('tkinter')
     setGroupTab('display')
     foldConsoleForDisplay()
+    // Debug and Trace keep the editor on screen. A window in the strip the
+    // output usually gets there is shrunk past use, so it gets at least half
+    // the column while the student steps through it. (A Run already gives the
+    // output the whole screen.)
+    if (stepping && viewMode === 'minimal') setCenterVerticalSplit(v => Math.min(v, 50))
     tkRendererRef.current?.dispose()
     tkRendererRef.current = null
     for (let i = 0; i < 10 && !tkinterHostRef.current; i++) {
@@ -2356,7 +2398,11 @@ export default function App() {
     }
     const host = tkinterHostRef.current
     if (!host) throw new Error('The tkinter display is not available.')
-    const renderer = new TkRenderer(host, { shouldYieldFocus: () => inputOwnsFocus() })
+    const renderer = new TkRenderer(host, {
+      shouldYieldFocus: () => inputOwnsFocus(),
+      onHistoryFrame: notePythonTurtleFrame,
+      onEvent,
+    })
     renderer.setZoom(displayZoomRef.current === 'fit' ? 'fit' : displayZoomRef.current / 100)
     tkRendererRef.current = renderer
     return renderer
@@ -2721,6 +2767,47 @@ export default function App() {
     addToTurtleHistory(svg)
   }
 
+  /** How many steps the slider has right now, ahead of the render that will show them. */
+  const scrubCountNow = () => pyTurtleFramesRef.current || turtleSvgHistoryRef.current.length
+
+  /**
+   * The Python turtle finished another command (TkRenderer's onHistoryFrame).
+   * A fast program finishes hundreds a second, so the slider catches up once
+   * per animation frame rather than re-rendering the app for each one.
+   */
+  const notePythonTurtleFrame = (canvasId: number, count: number) => {
+    if (pyTurtleDismissedRef.current) return
+    // One turtle window per run is replayed: the first one that drew.
+    if (pyTurtleCanvasRef.current !== null && pyTurtleCanvasRef.current !== canvasId) return
+    pyTurtleCanvasRef.current = canvasId
+    pyTurtleFramesRef.current = count
+    if (pyTurtleFrameRafRef.current) return
+    pyTurtleFrameRafRef.current = requestAnimationFrame(() => {
+      pyTurtleFrameRafRef.current = 0
+      const frames = pyTurtleFramesRef.current
+      if (!frames) return
+      setPyTurtleFrames(frames)
+      if (!turtleScrubLockedRef.current) setTurtleScrubStep(frames - 1)
+    })
+  }
+
+  /** A worker turtle run is over: nothing is left to answer its window. */
+  const endWorkerTkinter = () => {
+    const bridge = tkBridgeRef.current
+    if (!bridge) return
+    tkBridgeRef.current = null
+    bridge.end()
+    tkRendererRef.current?.end()
+  }
+
+  const resetPythonTurtleFrames = () => {
+    if (pyTurtleFrameRafRef.current) cancelAnimationFrame(pyTurtleFrameRafRef.current)
+    pyTurtleFrameRafRef.current = 0
+    pyTurtleCanvasRef.current = null
+    pyTurtleFramesRef.current = 0
+    setPyTurtleFrames(0)
+  }
+
   // Clearing the history is enough to retire the turtle surface — the Display
   // pane falls back to whatever else the program is drawing with.
   const resetTurtleHistory = () => {
@@ -2730,9 +2817,23 @@ export default function App() {
     setTurtleScrubStep(0)
     setTurtleScrubPlaying(false)
     setTurtleSvg('')
+    resetPythonTurtleFrames()
+    pyTurtleDismissedRef.current = false
   }
 
-  const closeScrubberAndClear = resetTurtleHistory
+  /** The slider's close button: the SVG turtle's frames go, or the Python turtle stops keeping steps. */
+  const closeTurtleScrubber = () => {
+    setTurtleScrubPlaying(false)
+    if (pyTurtleFramesRef.current > 0) {
+      pyTurtleDismissedRef.current = true
+      tkRendererRef.current?.stopHistory()
+      turtleScrubLockedRef.current = false
+      setTurtleScrubStep(0)
+      resetPythonTurtleFrames()
+      return
+    }
+    resetTurtleHistory()
+  }
 
   const resetExecutionState = () => {
     // A run that draws with neither library retires its Display surface;
@@ -3244,7 +3345,8 @@ export default function App() {
         if (d.type === 'done') { worker.terminate(); resolve(d.results as TesterRunOutput[]) }
         else if (d.type === 'error') { worker.terminate(); resolve([]) }
       }
-      worker.postMessage({ type: 'run_tests', code, files, tests })
+      // A turtle or tkinter challenge is tested with the real modules (utils/tkinterHeadless.ts).
+      void tkFilesForTesting(code, files, tests).then(tkFiles => worker.postMessage({ type: 'run_tests', code, files, tests, tkFiles }))
     })
 
   // Read a challenge's additional files from the book source into tester file specs.
@@ -3523,7 +3625,7 @@ export default function App() {
         if (d.type === 'done') { worker.terminate(); resolve(String(d.results?.[0]?.output ?? '')) }
         else if (d.type === 'error') { worker.terminate(); resolve('') }
       }
-      worker.postMessage({ type: 'run_tests', code, files, tests: [{ in: inputs, out: [] }] })
+      void tkFilesForTesting(code, files).then(tkFiles => worker.postMessage({ type: 'run_tests', code, files, tests: [{ in: inputs, out: [] }], tkFiles }))
     })
 
   const finishCaptureTestCase = async (inputs: string[]) => {
@@ -3684,7 +3786,10 @@ export default function App() {
       })
     }
 
-    worker.postMessage({ type: 'run_tests', code: capturedCode, files: vfsFiles, tests: capturedTests })
+    void tkFilesForTesting(capturedCode, vfsFiles, capturedTests).then(tkFiles => {
+      if (testerWorkerRef.current !== worker) return
+      worker.postMessage({ type: 'run_tests', code: capturedCode, files: vfsFiles, tests: capturedTests, tkFiles })
+    }).catch(error => failToStart(`Test runner could not be prepared: ${error instanceof Error ? error.message : String(error)}`))
   }
 
   const revealFilesystemPanel = () => {
@@ -3823,6 +3928,7 @@ export default function App() {
       setInputValue('')
     }
     resetMainThreadPyodide()
+    endWorkerTkinter()
     tkRendererRef.current?.end()
     if (workerRef.current) {
       workerRef.current.terminate()
@@ -3973,6 +4079,7 @@ export default function App() {
     )
     const choice = modeOverride ?? runModeChoice
     let vfsFiles: Awaited<ReturnType<typeof getAllFiles>>
+    let workerTkFiles: Record<string, string> | null = null
     try {
       returnToTraceTableAfterInputRef.current = false
       // Auto-refocus the Console when a run starts from the Tests tab.
@@ -4007,6 +4114,18 @@ export default function App() {
         abortStart('Runtime start cancelled because the code source changed while preparing it.')
         return
       }
+      // The Python turtle draws through Coder's tkinter from the worker, whose
+      // first message carries the package: fetched now, while waiting is allowed.
+      const source = startClaim.source
+      const reached = programPythonFiles(source.code, source.sourcePath, vfsFiles, source.workingDirectory)
+      const pythonTurtle = detectTurtle(source.code, reached) && effectiveTurtleMode(source.code) === 'cpython'
+      if (pythonTurtle || (TK_IN_WORKER && detectTkinter(source.code, reached))) {
+        workerTkFiles = await loadCoderTkFiles({ turtle: pythonTurtle })
+        if (!startIsCurrent()) {
+          abortStart('Runtime start cancelled because the code source changed while preparing it.')
+          return
+        }
+      }
     } catch (error) {
       abortStart(`Worker runtime could not be prepared: ${error instanceof Error ? error.message : String(error)}`)
       return
@@ -4027,10 +4146,19 @@ export default function App() {
     // tkinter draws its windows into this page, so it cannot run in the worker
     // at all. The open file may not import it itself (a GUI in gui.py), which
     // is why the runtime was not already locked to the main thread.
-    if (detectTkinter(capturedCode, programFiles)) {
+    const turtleMode = detectTurtle(capturedCode, programFiles) ? effectiveTurtleMode(capturedCode) : null
+    // CPython's turtle drawing from the worker, through Coder's tkinter (and
+    // any tkinter the same program uses along with it).
+    const turtleInWorker = turtleMode === 'cpython' && workerTkFiles !== null
+    const turtleOnPage = turtleMode === 'pyo-js-turtle'
+    // A tkinter program draws from the worker too, as the turtle does.
+    const tkinterInWorker = !turtleInWorker && TK_IN_WORKER && workerTkFiles !== null && detectTkinter(capturedCode, programFiles)
+    const tkInWorker = turtleInWorker || tkinterInWorker
+    if (turtleOnPage || (!tkInWorker && detectTkinter(capturedCode, programFiles))) {
       crashRetryRunRef.current = isCrashRetry
-      const tkinterNote = '[INFO] This program uses tkinter, which runs on the main thread: it runs normally, without stepping or the variable inspector.'
-      void startMainThreadRun(note ? `${tkinterNote}\n${note}` : tkinterNote)
+      const pageNote = `[INFO] This program uses ${turtleOnPage ? 'turtle' : 'tkinter'}, which runs on the main thread: it runs normally, without stepping or the variable inspector.`
+      void startMainThreadRun(note ? `${pageNote}
+${note}` : pageNote)
       return
     }
     const traceTableSessionId = choice === 'trace'
@@ -4073,7 +4201,13 @@ export default function App() {
 
     resetExecutionState()
     resetTurtleHistory()
+    endWorkerTkinter()
     if (note) appendOutput(note)
+    // Say so when key handlers overrode the turtle preference, rather than
+    // quietly using a turtle the student did not pick.
+    if (turtleInWorker && appSettings.turtleMode === 'basthon-svg') {
+      appendOutput('[INFO] This program responds to key presses, which the SVG turtle cannot do, so it is running with the Python turtle.')
+    }
     if (usesSpongeLibsForRun) resetStdaud()
     if (usesStdctxForRun) beginStdctxRun()
     setIsRunning(true); setActiveRuntime('trace-worker')
@@ -4099,6 +4233,17 @@ export default function App() {
       prewarmedTraceWorkerRef.current = null
       workerRef.current = worker
       startGuard.finish(startClaim)
+      if (tkInWorker) {
+        // The window is made asynchronously (it waits for the Display pane);
+        // the bridge holds whatever the worker sends before it is ready.
+        const bridge = new TkWorkerBridge(channel, ops => { if (ops.length > 2) displayUpdated() })
+        tkBridgeRef.current = bridge
+        void beginTkinterRun(() => bridge.eventQueued(), choice !== 'run').then(renderer => {
+          if (tkBridgeRef.current === bridge) bridge.attach(renderer)
+        }).catch(error => {
+          appendOutput(`\n[INFO] The turtle window could not be shown: ${error instanceof Error ? error.message : String(error)}`)
+        })
+      }
     } catch (error) {
       startGuard.finish(startClaim)
       disposeTraceChannel()
@@ -4129,6 +4274,7 @@ export default function App() {
       traceStopAckHandlerRef.current = null
       if (workerRef.current === worker) workerRef.current = null
       if (traceChannelRef.current === channel) traceChannelRef.current = null
+      endWorkerTkinter()
       channel.dispose()
       if (recycle && holdIdleTraceWorker(worker)) return
       worker.terminate()
@@ -4162,7 +4308,12 @@ export default function App() {
       // What the worker is about to block on, noted before anything answers it.
       // (A `trace` with no turn number only reports state: nothing is waiting.)
       if ((data.type === 'trace' || data.type === 'input') && typeof data.seq === 'number') channel.workerWaiting(data.type, data.seq)
-      if (data.type === 'sync-probe') {
+      if (data.type === 'tk_ops') {
+        tkBridgeRef.current?.ops(Number(data.seq) || 0, String(data.ops ?? '[]'))
+      } else if (data.type === 'tk_request') {
+        channel.workerWaiting('reply', Number(data.seq) || 0)
+        tkBridgeRef.current?.request(String(data.body ?? '{}'))
+      } else if (data.type === 'sync-probe') {
         // The handshake a run starts with: answering it is the whole test.
         channel.workerWaiting('probe', Number(data.seq) || 0)
         channel.answerProbe()
@@ -4359,6 +4510,11 @@ export default function App() {
         extraPackages: pyodidePackagesFor(plottingLibsForRun),
         micropipInstall: micropipPackagesForRun.length ? micropipInstallCode(micropipPackagesForRun) : '',
         moduleSources: programFiles.map(file => new TextDecoder().decode(file.content)),
+        tkBootstrap: tkInWorker ? TKINTER_WORKER_BOOTSTRAP : '',
+        tkFiles: tkInWorker ? workerTkFiles : null,
+        tkTurtle: turtleInWorker,
+        tkAfterProgram: TKINTER_WORKER_AFTER_PROGRAM,
+        tkShutdown: TKINTER_WORKER_SHUTDOWN,
         watches: watchesRef.current,
         breakpoints: initialBreakpoints,
         traceTableEnabled: choice === 'trace',
@@ -4393,18 +4549,22 @@ export default function App() {
     const runId = ++mainThreadRunIdRef.current
     mainThreadAbandonedRef.current = false
     const shouldRunPygame = codeUsesPygame(codeText)
-    const shouldRunTurtle = !shouldRunPygame && codeUsesTurtle(codeText)
+    // Only what the program can import decides what it needs (see startTraceWorker).
+    const programFiles = programPythonFiles(codeText, openFilePath ?? codeFileName, vfsFiles, capturedCwd)
+    const shouldRunTurtle = !shouldRunPygame && detectTurtle(codeText, programFiles)
     const turtleMode = shouldRunTurtle ? effectiveTurtleMode(codeText) : null
     const shouldRunTurtleCanvas = turtleMode === 'pyo-js-turtle'
     const shouldRunTurtleSvg = turtleMode === 'basthon-svg'
-    // Only what the program can import decides what it needs (see startTraceWorker).
-    const programFiles = programPythonFiles(codeText, openFilePath ?? codeFileName, vfsFiles, capturedCwd)
+    // CPython's own turtle.py, drawn by Coder's tkinter: a tkinter run in all
+    // but name (the bootstrap is told it is turtle, see __coder_turtle__).
+    const shouldRunTurtlePython = turtleMode === 'cpython'
     const spongeLibs = detectSpongeLibs(codeText, programFiles)
     const plottingLibs = detectPlottingLibs(codeText, programFiles)
     const shouldRunMatplotlib = plottingLibs.matplotlib
     const micropipPackages = micropipPackagesFor(plottingLibs)
     // A GUI kept in an imported module (gui.py) still needs the tkinter shim.
-    const shouldRunTkinter = !shouldRunPygame && !shouldRunTurtle && detectTkinter(codeText, programFiles)
+    const shouldRunTkinter = !shouldRunPygame
+      && (shouldRunTurtlePython || (!shouldRunTurtle && detectTkinter(codeText, programFiles)))
     const shouldRunSpongeLibs = !shouldRunPygame && !shouldRunTurtle && !shouldRunTkinter
       && (spongeLibs.usesStdctx || spongeLibs.usesStdaud)
     const shouldRunStdctx = shouldRunSpongeLibs && spongeLibs.usesStdctx
@@ -4446,6 +4606,7 @@ export default function App() {
     const turtlePendingKeys: string[] = []
     let turtleKeyListener: ((e: KeyboardEvent) => void) | null = null
     let tkRenderer: TkRenderer | null = null
+    let tkFiles: Record<string, string> = {}
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let pyodide: any = null
@@ -4503,6 +4664,8 @@ export default function App() {
       } else if (shouldRunTkinter) {
         tkRenderer = await beginTkinterRun()
         if (runId !== mainThreadRunIdRef.current) return
+        tkFiles = await loadCoderTkFiles({ turtle: shouldRunTurtlePython })
+        if (runId !== mainThreadRunIdRef.current) return
       }
 
       setMainThreadStatus(shouldRunPygame ? 'Loading pygame dependencies from imports...' : 'Loading packages from imports...')
@@ -4523,6 +4686,7 @@ export default function App() {
         shouldRunPygame ? 'Preparing pygame for browser execution...' :
         shouldRunTurtleCanvas ? 'Running turtle canvas program...' :
         shouldRunTurtleSvg ? 'Running turtle SVG program...' :
+        shouldRunTurtlePython ? 'Running turtle program...' :
         shouldRunTkinter ? 'Running tkinter program...' :
         'Executing code on the main thread...'
       )
@@ -4634,7 +4798,8 @@ export default function App() {
       }
       if (shouldRunTkinter && tkRenderer) {
         const renderer = tkRenderer
-        execGlobalsObj.__coder_tk_files__ = JSON.stringify(TKINTER_SHIM_FILES)
+        execGlobalsObj.__coder_tk_files__ = JSON.stringify(tkFiles)
+        execGlobalsObj.__coder_turtle__ = shouldRunTurtlePython
         execGlobalsObj.js_tk_flush = (ops: string) => {
           const json = String(ops ?? '[]')
           if (json.length > 2) displayUpdated()
@@ -4642,7 +4807,7 @@ export default function App() {
         }
         execGlobalsObj.js_tk_query = (q: string) => renderer.query(String(q ?? '{}'))
         execGlobalsObj.js_tk_poll = () => renderer.poll()
-        execGlobalsObj.js_tk_sleep = (ms: number) => renderer.sleep(Number(ms) || 0)
+        execGlobalsObj.js_tk_sleep = (ms: number, interruptible?: boolean) => renderer.sleep(Number(ms) || 0, interruptible !== false)
         execGlobalsObj.js_tk_dialog = (spec: string) => renderer.dialog(String(spec ?? '{}'))
         // Without JSPI Python cannot wait on the page's own dialog, so this
         // falls back to the browser's blocking alert/confirm/prompt.
@@ -4767,7 +4932,7 @@ ${runProgramPython('exec(code_obj, globals())')}
     if (turtleScrubLockedRef.current) {
       turtleScrubLockedRef.current = false
       setTurtleScrubPlaying(false)
-      setTurtleScrubStep(turtleSvgHistoryRef.current.length - 1)
+      setTurtleScrubStep(scrubCountNow() - 1)
     }
     // Only enabled breakpoints reach the worker, with the current watches.
     const enabledBreakpoints = [...breakpointsRef.current.entries()]
@@ -4823,6 +4988,7 @@ ${runProgramPython('exec(code_obj, globals())')}
         return
       }
       workerRef.current.terminate(); workerRef.current = null; disposeTraceChannel()
+      endWorkerTkinter()
       setCodeStatus('Worker runtime stopped.')
       restoreRunPresentationMode()
       workerRunModeRef.current = 'debug'
@@ -4846,7 +5012,7 @@ ${runProgramPython('exec(code_obj, globals())')}
         // A tkinter program may be waiting on a message box or asleep between
         // events; both give way at once so it can see the stop.
         tkRendererRef.current?.cancelDialogs()
-        tkRendererRef.current?.wake()
+        tkRendererRef.current?.wakeAll()
         appendOutput('\n[INFO] Stop requested for main-thread run.')
         setMainThreadStatus('Stopping main-thread run...')
         return
@@ -5405,7 +5571,7 @@ ${runProgramPython('exec(code_obj, globals())')}
         <div className="flex-shrink-0 border-b border-sky-700 bg-sky-950/80 px-5 py-2 text-sm text-sky-100 shadow-md">
           {isTkinterRunActive ? (
             <>
-              tkinter is running in the main page thread. Debugging and live inspection are disabled while it runs; close its window or click Stop to end it.
+              {codeUsesTurtle(codeText) ? 'turtle' : 'tkinter'} is running in the main page thread. Debugging and live inspection are disabled while it runs; close its window or click Stop to end it.
               {!browserSupportsJspi() && <> This browser cannot pause Python, so code after mainloop() runs straight away and message boxes use pop-ups.</>}
             </>
           ) : (
@@ -5413,8 +5579,8 @@ ${runProgramPython('exec(code_obj, globals())')}
           )}
           {/* Say so when key handlers overrode the turtle-mode preference, rather
               than quietly using a renderer the user did not pick. */}
-          {isTurtleCanvasRunActive && appSettings.turtleMode === 'basthon-svg' && (
-            <> This program responds to key presses, which the SVG turtle cannot do, so it is running on the turtle canvas.</>
+          {isTkinterRunActive && appSettings.turtleMode === 'basthon-svg' && codeUsesTurtle(codeText) && (
+            <> This program responds to key presses, which the SVG turtle cannot do, so it is running with the Python turtle.</>
           )}
         </div>
       )}
@@ -6162,15 +6328,16 @@ ${runProgramPython('exec(code_obj, globals())')}
                   onStdctxKeyUp={key => setStdctxKeyState(key, false)}
                   resolveStdctxImageUri={resolveStdctxImageUri}
                   turtleSvg={displayedTurtleSvg}
-                  turtleHistory={turtleSvgHistory}
+                  scrubCount={scrubCount}
+                  scrubberSurface={pyTurtleFrames > 0 ? 'tkinter' : 'turtle'}
                   showScrubber={showTurtleScrubber}
                   scrubStep={turtleScrubStep}
                   scrubPlaying={turtleScrubPlaying}
                   scrubSpeed={turtleScrubSpeed}
-                  onScrubStepChange={s => { setTurtleScrubStep(s); turtleScrubLockedRef.current = s < turtleSvgHistory.length - 1 }}
-                  onScrubTogglePlay={() => { if (turtleScrubPlaying) { setTurtleScrubPlaying(false) } else { turtleScrubLockedRef.current = true; if (turtleScrubStep >= turtleSvgHistory.length - 1) setTurtleScrubStep(0); setTurtleScrubPlaying(true) } }}
+                  onScrubStepChange={s => { setTurtleScrubStep(s); turtleScrubLockedRef.current = s < scrubCount - 1 }}
+                  onScrubTogglePlay={() => { if (turtleScrubPlaying) { setTurtleScrubPlaying(false) } else { turtleScrubLockedRef.current = true; if (turtleScrubStep >= scrubCount - 1) setTurtleScrubStep(0); setTurtleScrubPlaying(true) } }}
                   onScrubSpeedChange={s => setTurtleScrubSpeed(s)}
-                  onScrubClose={() => { setTurtleScrubPlaying(false); closeScrubberAndClear() }}
+                  onScrubClose={closeTurtleScrubber}
                 />
               </div>
               </div>

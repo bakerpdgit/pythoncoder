@@ -42,9 +42,9 @@ screen.setup(WIDTH, HEIGHT)
 ```
 
 The window and the drawing canvas inside it are two different things. `setup()`
-sizes the **window**; `turtle.screensize(width, height)` sizes the scrollable
-**canvas** within it, which on a desktop lets you draw a picture bigger than the
-window and scroll around it. In this browser turtle the two are the same thing,
-so `setup()` is all you need.
+sizes the **window**; `turtle.screensize(width, height)` sizes the **canvas**
+within it, which on a desktop lets you draw a picture bigger than the window
+and scroll around it. Here there are no scroll bars, so keep your drawing
+inside the window and `setup()` is all you need.
 
 **Try it:** add a third turtle that goes straight down the middle in green.

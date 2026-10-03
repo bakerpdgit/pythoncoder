@@ -9,9 +9,10 @@
 
 import {
   SAB_BYTES, SAB_CONDITIONS_MAX, SAB_CONDITIONS_START, SAB_INDEX_BREAKPOINT_COUNT, SAB_INDEX_COMMAND,
-  SAB_INDEX_CONDITIONS_LENGTH, SAB_INDEX_INPUT_LENGTH, SAB_INDEX_STATE, SAB_INDEX_STOP,
-  SAB_INDEX_WATCHES_LENGTH, SAB_INPUT_END, SAB_INPUT_START, SAB_MAX_BREAKPOINTS,
-  SAB_STATE_INPUT, SAB_STATE_PROBE, SAB_STATE_RUNNING, SAB_STATE_TRACE, SAB_WATCHES_MAX, SAB_WATCHES_START,
+  SAB_INDEX_CONDITIONS_LENGTH, SAB_INDEX_INPUT_LENGTH, SAB_INDEX_REPLY_LENGTH, SAB_INDEX_STATE, SAB_INDEX_STOP,
+  SAB_INDEX_TK_APPLIED, SAB_INDEX_TK_EVENTS,
+  SAB_INDEX_WATCHES_LENGTH, SAB_INPUT_END, SAB_INPUT_START, SAB_MAX_BREAKPOINTS, SAB_REPLY_END, SAB_REPLY_START,
+  SAB_STATE_INPUT, SAB_STATE_PROBE, SAB_STATE_REPLY, SAB_STATE_RUNNING, SAB_STATE_TRACE, SAB_WATCHES_MAX, SAB_WATCHES_START,
   SYNC_SW_SCOPE, SYNC_SW_URL, newSyncSessionId,
   type SyncPageMessage, type SyncWaitKind, type TraceBreakpoint, type TraceTransport,
 } from './traceSyncProtocol'
@@ -22,13 +23,24 @@ export interface TraceChannel {
   initFields(): Record<string, unknown>
   /** The worker has announced what it is about to block on. */
   workerWaiting(kind: SyncWaitKind, seq: number): void
-  isWaiting(kind: 'trace' | 'input'): boolean
+  isWaiting(kind: 'trace' | 'input' | 'reply'): boolean
+  /**
+   * The most a reply can carry, in bytes of UTF-8 (shared memory has a fixed
+   * region; a held request has no limit).
+   */
+  readonly replyLimit: number
   /** Answer the handshake a run starts with. */
   answerProbe(): void
   /** Release a worker paused on a line. False if it was not waiting for one. */
   sendCommand(cmd: number, breakpoints: TraceBreakpoint[], watches: string[]): boolean
   /** Answer input(). False if the worker was not waiting for one. */
   sendInput(text: string): boolean
+  /** Answer a question from the worker's tkinter host. False if it was not waiting for one. */
+  sendReply(text: string): boolean
+  /** The tkinter renderer has queued another event for the worker to collect. */
+  tkEventsQueued(): void
+  /** The page has applied the worker's batch `seq` of tkinter drawing. */
+  tkApplied(seq: number): void
   /** Ask a trace to stop and flush, waking it if it is waiting. False if already asked. */
   requestStop(): boolean
   setKey(code: number, isDown: boolean): void
@@ -50,11 +62,14 @@ export function createSabChannel(keyBufferSize: number | null): TraceChannel {
     Atomics.notify(int32, SAB_INDEX_STATE, 1)
   }
 
+  const WAIT_STATES = { trace: SAB_STATE_TRACE, input: SAB_STATE_INPUT, reply: SAB_STATE_REPLY }
+
   return {
     transport: 'sab',
+    replyLimit: SAB_REPLY_END - SAB_REPLY_START,
     initFields: () => ({ transport: 'sab', sab, stdctxKeyBuffer: keys?.buffer ?? null }),
     workerWaiting() { /* the buffer itself says what the worker is waiting for */ },
-    isWaiting: kind => Atomics.load(int32, SAB_INDEX_STATE) === (kind === 'trace' ? SAB_STATE_TRACE : SAB_STATE_INPUT),
+    isWaiting: kind => Atomics.load(int32, SAB_INDEX_STATE) === WAIT_STATES[kind],
     answerProbe() {
       if (Atomics.load(int32, SAB_INDEX_STATE) === SAB_STATE_PROBE) wake()
     },
@@ -89,12 +104,32 @@ export function createSabChannel(keyBufferSize: number | null): TraceChannel {
       wake()
       return true
     },
+    sendReply(text) {
+      if (Atomics.load(int32, SAB_INDEX_STATE) !== SAB_STATE_REPLY) return false
+      const bytes = new TextEncoder().encode(text).slice(0, SAB_REPLY_END - SAB_REPLY_START)
+      uint8.set(bytes, SAB_REPLY_START)
+      Atomics.store(int32, SAB_INDEX_REPLY_LENGTH, bytes.length)
+      wake()
+      return true
+    },
+    tkEventsQueued() {
+      Atomics.add(int32, SAB_INDEX_TK_EVENTS, 1)
+      Atomics.notify(int32, SAB_INDEX_TK_EVENTS)
+    },
+    tkApplied(seq) {
+      Atomics.store(int32, SAB_INDEX_TK_APPLIED, seq)
+      Atomics.notify(int32, SAB_INDEX_TK_APPLIED)
+    },
     requestStop() {
       if (Atomics.compareExchange(int32, SAB_INDEX_STOP, 0, 1) !== 0) return false
       // Wake a worker paused for stepping or for input; it reads the flag.
       // The state is cleared as well as notified, so a worker that has
       // announced a wait but not yet begun it does not sleep through the stop.
       wake()
+      // And a tkinter mainloop waiting for the student, or for the page.
+      Atomics.add(int32, SAB_INDEX_TK_EVENTS, 1)
+      Atomics.notify(int32, SAB_INDEX_TK_EVENTS)
+      Atomics.notify(int32, SAB_INDEX_TK_APPLIED)
       return true
     },
     setKey(code, isDown) {
@@ -118,9 +153,22 @@ export function createXhrChannel(): TraceChannel {
   let lastReply: { seq: number; body: unknown } | null = null
   let stop = false
   const held = new Set<number>()
+  let tk = 0
+  let applied = 0
+  let pushPending = false
 
   const post = (message: SyncPageMessage) => serviceWorkerTarget()?.postMessage(message)
-  const pushState = () => post({ type: 'coder-sync-state', session, state: { stop, keys: [...held] } })
+  const pushState = () => {
+    pushPending = false
+    post({ type: 'coder-sync-state', session, state: { stop, keys: [...held], tk, applied } })
+  }
+  // tkinter events and applied drawing arrive in bursts: one message per turn
+  // of the page's event loop is plenty.
+  const pushStateSoon = () => {
+    if (pushPending) return
+    pushPending = true
+    queueMicrotask(pushState)
+  }
   const reply = (body: unknown) => {
     if (!waiting) return
     lastReply = { seq: waiting.seq, body }
@@ -137,6 +185,7 @@ export function createXhrChannel(): TraceChannel {
 
   return {
     transport: 'xhr',
+    replyLimit: Number.POSITIVE_INFINITY,
     // The origin is sent rather than read from the worker's own location,
     // which is a blob: address when the worker was started from a copy.
     initFields: () => ({ transport: 'xhr', syncSession: session, syncOrigin: window.location.origin }),
@@ -155,12 +204,26 @@ export function createXhrChannel(): TraceChannel {
       reply({ text, stop })
       return true
     },
+    sendReply(text) {
+      if (waiting?.kind !== 'reply') return false
+      reply({ reply: text, stop })
+      return true
+    },
+    tkEventsQueued() {
+      tk += 1
+      pushStateSoon()
+    },
+    tkApplied(seq) {
+      applied = seq
+      pushStateSoon()
+    },
     requestStop() {
       if (stop) return false
       stop = true
       pushState()
       if (waiting?.kind === 'trace') reply({ cmd: 0, breakpoints: [], stop: true })
       else if (waiting?.kind === 'input') reply({ text: '', stop: true })
+      else if (waiting?.kind === 'reply') reply({ reply: null, stop: true })
       return true
     },
     setKey(code, isDown) {

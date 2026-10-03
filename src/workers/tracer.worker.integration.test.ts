@@ -545,6 +545,39 @@ describe.skipIf(!pythonAvailable)('tracer worker embedded Python recorder', () =
     expect(writes.find(write => write.name === 'after_object_hooks')?.value?.value).toBe(0)
   })
 
+  it('shows a plain tuple subclass (turtle\'s positions, a named tuple) as the sequence it is', () => {
+    const result = record([
+      'from collections import namedtuple',
+      'class Vec(tuple):',
+      '    def __new__(cls, x, y):',
+      '        return tuple.__new__(cls, (x, y))',
+      'Point = namedtuple("Point", "x y")',
+      'v = Vec(3, 4)',
+      'p = Point(1, 2)',
+      'done = True',
+    ].join('\n'))
+    const writes = events(result).flatMap(event => event.writes ?? [])
+    expect(result.error).toBeNull()
+    for (const name of ['v', 'p']) {
+      const value = writes.find(write => write.name === name)?.value as { kind?: string; length?: number; items?: unknown[] } | undefined
+      expect(value?.kind, name).toBe('sequence')
+      expect(value?.length, name).toBe(2)
+    }
+  })
+
+  it('traces the student\'s code called back from library code, and not the library itself', () => {
+    const result = record([
+      'def key(word):',
+      '    size = len(word)',
+      '    return size',
+      'ordered = sorted(["ccc", "a", "bb"], key=key)',
+    ].join('\n'))
+    expect(result.error).toBeNull()
+    // Each call of key() from inside sorted() is its own traced activation.
+    const keyLines = events(result).filter(event => event.function === 'key' && event.line === 2)
+    expect(keyLines).toHaveLength(3)
+  })
+
   it('marks each entered loop body with an ordered loop boundary', () => {
     const result = record('total = 0\nfor item in [4, 4]:\n    total += item\n')
     const boundaries = events(result)

@@ -2,7 +2,8 @@
 
 Every program so far drew its picture and stopped. This one waits for **you**.
 
-Click on the drawing area first so it has the keyboard focus, then:
+Run it, then use the keys (if nothing happens, click on the drawing first so
+it has the keyboard focus):
 
 | Key      | What it does                  |
 | -------- | ----------------------------- |
@@ -14,10 +15,7 @@ Click on the drawing area first so it has the keyboard focus, then:
 | `n`      | pen down — draw again         |
 | `c`      | clear and start over          |
 
-Press **Stop** when you have finished.
-
-Because it waits for keys, this program always runs on the main thread, so
-**Debug** and **Trace** are not offered for it.
+Press **Stop**, or close the turtle window, when you have finished.
 
 ## Beyond the PLS
 
@@ -58,11 +56,10 @@ watching the keyboard.
 
 ## Key names
 
-Letter keys are named by the letter: `"w"`, `"a"`, `"c"`. Arrow keys are named
-differently depending on where the program runs — a desktop Python window calls
-them `"Up"`, `"Down"`, `"Left"` and `"Right"`, while a browser reports them as
-`"ArrowUp"` and so on. This program registers both spellings for every arrow, so
-it works in either place.
+Letter keys are named by the letter: `"w"`, `"a"`, `"c"`. The arrow keys are
+`"Up"`, `"Down"`, `"Left"` and `"Right"`, and the space bar is `"space"`. A name
+Python does not know is an error, not a key that never does anything — try
+`"ArrowUp"` and see what it says.
 
 **Try it:**
 

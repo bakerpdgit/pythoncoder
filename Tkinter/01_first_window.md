@@ -53,9 +53,9 @@ everything works just as it does in IDLE, but a few things are different:
   the position part of `geometry("400x300+100+50")` is ignored.
 - **It looks like Windows**, with the same fonts and grey. On your own
   computer, sizes and fonts may be a pixel or two different.
-- **A tkinter program always runs with Run.** Debug and Trace can't step
-  through it, because its windows are part of this page. Page 8 shows a way
-  round this.
+- **Debug and Trace work.** Put a breakpoint inside a button's function, run
+  with **Debug**, press the button, and the program stops there with the
+  window still on screen.
 - **Stop ends it**, and so does closing its window.
 - **Pictures:** `PhotoImage` reads PNG and GIF files. As on a real computer,
   JPEG needs Pillow (`from PIL import Image, ImageTk`).

@@ -823,6 +823,13 @@ except Exception as __e:
     js_append_main_thread_log(f'[ERROR] {__e}')
     raise
 
+_TK_KEYSYMS = {
+    'ArrowUp': 'Up', 'ArrowDown': 'Down', 'ArrowLeft': 'Left', 'ArrowRight': 'Right',
+    ' ': 'space', 'Enter': 'Return', 'Escape': 'Escape', 'Backspace': 'BackSpace',
+    'Tab': 'Tab', 'Delete': 'Delete', 'Home': 'Home', 'End': 'End',
+    'PageUp': 'Prior', 'PageDown': 'Next', 'Shift': 'Shift_L', 'Control': 'Control_L',
+}
+
 if _global_screen._key_handlers and not js_should_stop_main_thread():
     js_set_main_thread_status('Turtle event loop running. Click Stop to exit.')
     while not js_should_stop_main_thread():
@@ -830,7 +837,11 @@ if _global_screen._key_handlers and not js_should_stop_main_thread():
         if __evts is not None:
             for __k in list(__evts):
                 __k_str = str(__k)
-                __cb = _global_screen._key_handlers.get(__k_str)
+                # A handler may be registered by Tk's name for the key ("Up",
+                # "space") — what turtle in IDLE, and the Python turtle, expect —
+                # or by the browser's ("ArrowUp", " ").
+                __cb = (_global_screen._key_handlers.get(__k_str)
+                        or _global_screen._key_handlers.get(_TK_KEYSYMS.get(__k_str, __k_str)))
                 if __cb:
                     try:
                         __r = __cb()

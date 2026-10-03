@@ -57,19 +57,11 @@ screen.onkey(lift_pen, "u")
 screen.onkey(drop_pen, "n")
 screen.onkey(start_again, "c")
 
-# The arrow keys as well. A desktop Python window names these "Up", "Down",
-# "Left" and "Right"; a browser reports them as "ArrowUp" and so on, so
-# register both names and the program works in either place.
-arrow_keys = [
-    (go_forward, "Up", "ArrowUp"),
-    (go_back, "Down", "ArrowDown"),
-    (turn_left, "Left", "ArrowLeft"),
-    (turn_right, "Right", "ArrowRight"),
-]
-
-for action, desktop_name, browser_name in arrow_keys:
-    screen.onkey(action, desktop_name)
-    screen.onkey(action, browser_name)
+# The arrow keys as well. Python names them "Up", "Down", "Left" and "Right".
+screen.onkey(go_forward, "Up")
+screen.onkey(go_back, "Down")
+screen.onkey(turn_left, "Left")
+screen.onkey(turn_right, "Right")
 
 # Nothing happens until the screen is told to start watching the keyboard.
 screen.listen()

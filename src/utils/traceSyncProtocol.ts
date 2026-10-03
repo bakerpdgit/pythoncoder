@@ -22,8 +22,12 @@
 
 export type TraceTransport = 'sab' | 'xhr'
 
-/** What the worker is blocked on. `probe` is the handshake at the start of a run. */
-export type SyncWaitKind = 'trace' | 'input' | 'probe' | 'park'
+/**
+ * What the worker is blocked on. `probe` is the handshake at the start of a
+ * run; `reply` is a question from the worker's tkinter host (a widget's size,
+ * the events queued since it last asked, a dialog's answer).
+ */
+export type SyncWaitKind = 'trace' | 'input' | 'probe' | 'park' | 'reply'
 
 export const SYNC_PREFIX = '/__coder_sync__/'
 export const SYNC_SW_URL = '/trace-sync-sw.js'
@@ -31,7 +35,7 @@ export const SYNC_SW_SCOPE = '/'
 /** The response header that marks an answer as the service worker's own. */
 export const SYNC_MARK_HEADER = 'X-Coder-Sync'
 
-// ── SharedArrayBuffer layout (4 KB) ──────────────────────────────────────────
+// ── SharedArrayBuffer layout (8 KB) ──────────────────────────────────────────
 // int32[0]   what the worker is waiting for (SAB_STATE_*); 0 = running
 // int32[1]   the debugger command answering a `trace` wait
 // int32[2]   byte length of the input() answer
@@ -41,11 +45,15 @@ export const SYNC_MARK_HEADER = 'X-Coder-Sync'
 // int32[750] byte length of the watches JSON (-1 = never written)
 // int32[751] cooperative stop request (trace mode)
 // uint8[3008..4095]  the watches JSON
-export const SAB_BYTES = 1024 * 4
+// int32[1024] tkinter events the page has queued (counts up; notified)
+// int32[1025] the last batch of tkinter drawing the page has applied (notified)
+// int32[1026] byte length of a `reply`, uint8[4112..8191] the reply, UTF-8
+export const SAB_BYTES = 1024 * 8
 export const SAB_STATE_RUNNING = 0
 export const SAB_STATE_TRACE = 1
 export const SAB_STATE_INPUT = 2
 export const SAB_STATE_PROBE = 3
+export const SAB_STATE_REPLY = 4
 export const SAB_INDEX_STATE = 0
 export const SAB_INDEX_COMMAND = 1
 export const SAB_INDEX_INPUT_LENGTH = 2
@@ -60,6 +68,11 @@ export const SAB_INDEX_WATCHES_LENGTH = 750
 export const SAB_INDEX_STOP = 751
 export const SAB_WATCHES_START = 3008
 export const SAB_WATCHES_MAX = 1088
+export const SAB_INDEX_TK_EVENTS = 1024
+export const SAB_INDEX_TK_APPLIED = 1025
+export const SAB_INDEX_REPLY_LENGTH = 1026
+export const SAB_REPLY_START = 4112
+export const SAB_REPLY_END = 8192
 
 /** How long the worker gives the page to answer the handshake. */
 export const PROBE_TIMEOUT_MS = 8000
@@ -88,6 +101,10 @@ export interface SyncState {
   stop: boolean
   /** Virtual key codes currently held down, for stdctx.check_key(). */
   keys: number[]
+  /** How many tkinter events the page has queued so far (counts up). */
+  tk: number
+  /** The last batch of tkinter drawing the page has applied. */
+  applied: number
 }
 
 export type SyncPageMessage =
@@ -127,9 +144,21 @@ export function breakpointMap(breakpoints: TraceBreakpoint[] | undefined): Map<n
 
 /** A SyncState from whatever a response body held; anything malformed is "nothing held, not stopped". */
 export function parseSyncState(value: unknown): SyncState {
-  const record = (value && typeof value === 'object' ? value : {}) as { stop?: unknown; keys?: unknown }
+  const record = (value && typeof value === 'object' ? value : {}) as { stop?: unknown; keys?: unknown; tk?: unknown; applied?: unknown }
   return {
     stop: record.stop === true,
     keys: Array.isArray(record.keys) ? record.keys.map(Number).filter(code => Number.isInteger(code) && code >= 0) : [],
+    tk: Number.isFinite(Number(record.tk)) ? Number(record.tk) : 0,
+    applied: Number.isFinite(Number(record.applied)) ? Number(record.applied) : 0,
   }
+}
+
+/**
+ * The reply to a tkinter `poll`: the events, and whether more are still
+ * queued (a reply through shared memory has a fixed size, so a long queue is
+ * handed over in parts).
+ */
+export interface TkPollReply {
+  events: unknown[]
+  more: boolean
 }

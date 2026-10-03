@@ -22,13 +22,7 @@ for side in range(3):
     leo.left(120)
 leo.end_fill()
 
-# The fill is painted on top of the outline, so the black pen has vanished.
-# Drawing the shape a second time puts the outline back over the fill.
-for side in range(3):
-    leo.forward(190)
-    leo.left(120)
-
-# A filled square, with no outline drawn over it for comparison.
+# A filled square, with a different colour for its edge.
 leo.penup()
 leo.setposition(40, -90)
 leo.setheading(0)

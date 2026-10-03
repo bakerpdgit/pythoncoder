@@ -20,9 +20,9 @@ def on_key(key):
 - **You can test it.** Open `calculator_logic.py` from the Files panel and run
   it: it checks itself. A function that returns a value is easy to test. A
   button that changes a label is not.
-- **You can trace it.** A tkinter program can't be stepped through in Coder,
-  but `calculator_logic.py` is ordinary Python. Open it and press **Trace** to
-  watch `evaluate` work through `12+3*4`, multiplication first.
+- **You can trace it on its own.** `calculator_logic.py` is ordinary Python,
+  with no window to click. Open it and press **Trace** to watch `evaluate`
+  work through `12+3*4`, multiplication first.
 - **You can change one without breaking the other.** A different layout, a
   text version, or another interface altogether can reuse the same logic. This
   is how large programs, and good A-level projects, are built.

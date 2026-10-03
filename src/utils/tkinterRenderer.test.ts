@@ -140,6 +140,61 @@ describe('TkRenderer', () => {
     expect(svg.querySelector('[data-tki="1"]')).toBeNull()
   })
 
+  it('keeps a canvas step per mark, and rebuilds any of them from whole states and changes', () => {
+    const frames: number[] = []
+    r.dispose()
+    host.remove()
+    host = document.createElement('div')
+    document.body.appendChild(host)
+    r = new TkRenderer(host, { onHistoryFrame: (_cid, count) => frames.push(count) })
+    send(['create', 1, 'toplevel', null, { title: 't' }], ['create', 2, 'canvas', 1, { width: 100, height: 80 }], ...packed(2))
+    const drawing = (layer: Element) => [...layer.children].map(g => g.firstElementChild?.getAttribute('points') ?? '').join('|')
+    const liveLayer = () => el(2).querySelector('svg > g')!
+    // 120 steps: more than two whole-state blocks, so rebuilding crosses them.
+    const live: string[] = []
+    for (let i = 0; i < 120; i++) {
+      if (i % 7 === 0) send(['cvitem', 2, 1000 + i, 'line', [i, 0, i, 10], { fill: 'black', width: 1 }])
+      send(['cvcoords', 2, 1000 + 7 * Math.floor(i / 7), [i, 0, i, 20]])
+      if (i % 11 === 5) send(['cvraise', 2, [1000], null])
+      if (i % 13 === 12) send(['cvdelete', 2, [1000 + 7 * Math.floor(i / 7)]])
+      send(['mark', 2])
+      live.push(drawing(liveLayer()))
+    }
+    expect(frames.at(-1)).toBe(120)
+    expect(r.historyLength(2)).toBe(120)
+    for (const step of [0, 1, 49, 50, 51, 77, 119]) {
+      r.showCanvasFrame(2, step)
+      expect((liveLayer() as SVGElement).style.display, `step ${step}`).toBe('none')
+      const shown = [...el(2).querySelectorAll('svg > g')].at(-1)!
+      expect(drawing(shown), `step ${step}`).toBe(live[step])
+    }
+    r.showCanvasFrame(2, null)
+    expect((liveLayer() as SVGElement).style.display).toBe('')
+    expect(el(2).querySelectorAll('svg > g')).toHaveLength(1)
+  })
+
+  it('moves only the items Python raised or lowered, and scrolls the view', () => {
+    send(
+      ['create', 2, 'canvas', 1, { width: 100, height: 80, bd: 2, relief: 'sunken' }],
+      ...packed(2),
+      ...[1, 2, 3, 4].map(i => ['cvitem', 2, i, 'rectangle', [0, 0, i, i], { fill: 'red', outline: '', width: 1 }]),
+    )
+    const order = () => [...el(2).querySelectorAll('[data-tki]')].map(g => Number(g.getAttribute('data-tki')))
+    send(['cvraise', 2, [1], 4])
+    expect(order()).toEqual([2, 3, 4, 1])
+    send(['cvraise', 2, [3], null])
+    expect(order()).toEqual([3, 2, 4, 1])
+    send(['cvlower', 2, [1], 2])
+    expect(order()).toEqual([3, 1, 2, 4])
+    send(['cvlower', 2, [3], null])
+    expect(order()).toEqual([1, 2, 4, 3])
+    // Canvas point (x, y) shows at window pixel (x - x0, y - y0), the window
+    // measured from the outside of its (here 1px CSS) border, as in Tk.
+    send(['cvview', 2, -50, -40])
+    const layer = el(2).querySelector('svg > g')!
+    expect(layer.getAttribute('transform')).toBe('translate(49 39)')
+  })
+
   it('keeps only the latest mouse motion for a widget, and wakes a sleeping loop', async () => {
     send(['want', ['motion']], ['create', 2, 'label', 1, label], ['manage', 2, 'pack', 1, { side: 'top', fill: 'none', expand: false, anchor: 'center', padx: [0, 0], pady: [0, 0] }], ['order', 1, [2]])
     const sleeping = r.sleep(10_000)

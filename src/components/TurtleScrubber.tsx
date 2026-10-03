@@ -1,5 +1,6 @@
 interface TurtleScrubberProps {
-  history: string[]
+  /** How many steps there are to move between. */
+  count: number
   step: number
   isPlaying: boolean
   speed: number
@@ -9,8 +10,8 @@ interface TurtleScrubberProps {
   onClose: () => void
 }
 
-export function TurtleScrubber({ history, step, isPlaying, speed, onStepChange, onTogglePlay, onSpeedChange, onClose }: TurtleScrubberProps) {
-  const max = Math.max(0, history.length - 1)
+export function TurtleScrubber({ count, step, isPlaying, speed, onStepChange, onTogglePlay, onSpeedChange, onClose }: TurtleScrubberProps) {
+  const max = Math.max(0, count - 1)
   const canGoPrev = step > 0
   const canGoNext = step < max
 
@@ -33,7 +34,7 @@ export function TurtleScrubber({ history, step, isPlaying, speed, onStepChange, 
 
       <button
         onClick={onTogglePlay}
-        disabled={history.length === 0}
+        disabled={count === 0}
         title={isPlaying ? 'Pause' : 'Play from start'}
         className={`${btnBase} min-w-[42px] font-semibold ${isPlaying ? 'text-amber-400 hover:bg-slate-700' : 'text-emerald-400 hover:bg-slate-700'}`}
       >
@@ -57,11 +58,11 @@ export function TurtleScrubber({ history, step, isPlaying, speed, onStepChange, 
         onChange={e => onStepChange(parseInt(e.target.value))}
         className="flex-1 accent-emerald-400 cursor-pointer"
         style={{ minWidth: 60 }}
-        title={`Step ${step + 1} of ${history.length}`}
+        title={`Step ${step + 1} of ${count}`}
       />
 
       <span className="text-slate-400 whitespace-nowrap tabular-nums" title="Current step / total steps">
-        {step + 1}/{history.length}
+        {step + 1}/{count}
       </span>
 
       <span className="text-slate-500 whitespace-nowrap ml-1">Speed:</span>

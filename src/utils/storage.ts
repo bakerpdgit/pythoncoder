@@ -1,6 +1,6 @@
 import { THEME_STORAGE_KEY, NOTES_STORAGE_KEY, SETTINGS_STORAGE_KEY } from '../constants'
 import { NO_TAB_GROUP, sanitiseTabGroup } from './tabGroup'
-import type { Theme, AppSettings, BookNavState, DisplayZoom, InputMode, NamedLayout, LayoutPrefs, PanelVisibility, ViewMode } from '../types'
+import type { Theme, AppSettings, BookNavState, DisplayZoom, InputMode, NamedLayout, LayoutPrefs, PanelVisibility, TurtleMode, ViewMode } from '../types'
 import type { ParsonsArrangement } from './parsons'
 
 const EDITOR_FONT_SIZE_KEY = 'coder_editor_font_size'
@@ -127,20 +127,33 @@ export const persistNoteOverrides = (overrides: Record<string, string>): void =>
 }
 
 const VALID_INPUT_MODES: InputMode[] = ['inline-console', 'input-bar', 'popup-dialog']
+const VALID_TURTLE_MODES: TurtleMode[] = ['cpython', 'pyo-js-turtle', 'basthon-svg']
+
+/**
+ * The turtle setting is stored as `turtleEngine`. Settings saved before there
+ * were three choices hold `turtleMode` instead, and since every setting is saved
+ * together, the old default ('pyo-js-turtle') was saved by anyone who changed
+ * anything else — it cannot be told apart from a deliberate choice, so it
+ * becomes the new default. Choosing SVG was always deliberate, so it stays.
+ */
+export const storedTurtleMode = (parsed: { turtleEngine?: unknown; turtleMode?: unknown }): TurtleMode => {
+  if (VALID_TURTLE_MODES.includes(parsed.turtleEngine as TurtleMode)) return parsed.turtleEngine as TurtleMode
+  return parsed.turtleMode === 'basthon-svg' ? 'basthon-svg' : 'cpython'
+}
 
 export const getStoredSettings = (): AppSettings => {
   try {
     const raw = localStorage.getItem(SETTINGS_STORAGE_KEY)
     const parsed = raw ? JSON.parse(raw) : {}
     return {
-      turtleMode: parsed.turtleMode === 'basthon-svg' ? 'basthon-svg' : 'pyo-js-turtle',
+      turtleMode: storedTurtleMode(parsed),
       inputMode: VALID_INPUT_MODES.includes(parsed.inputMode) ? (parsed.inputMode as InputMode) : 'inline-console',
       useFixedInputs: parsed.useFixedInputs === true,
       inlineTraceValues: parsed.inlineTraceValues !== false,
       stayOnRunView: parsed.stayOnRunView === true,
     }
   } catch {
-    return { turtleMode: 'pyo-js-turtle', inputMode: 'inline-console', useFixedInputs: false, inlineTraceValues: true, stayOnRunView: false }
+    return { turtleMode: 'cpython', inputMode: 'inline-console', useFixedInputs: false, inlineTraceValues: true, stayOnRunView: false }
   }
 }
 
@@ -245,7 +258,8 @@ export const clearParsonsStateForBook = (bookRootUrl: string): void => {
 
 export const persistSettings = (settings: AppSettings): void => {
   try {
-    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings))
+    const { turtleMode, ...rest } = settings
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify({ ...rest, turtleEngine: turtleMode }))
   } catch {
     // ignore storage errors
   }

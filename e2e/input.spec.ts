@@ -156,9 +156,11 @@ test.describe('on the main thread', () => {
     expect(problems).toEqual([])
   })
 
-  test('a turtle program, which always runs here, asks in the console too', async ({ page }) => {
+  test('a turtle program asks in the console too, when there is no worker to run it', async ({ page }) => {
     const problems = watchForErrors(page)
-    await page.goto('/')
+    // The Python turtle runs in the trace worker when there is one; without
+    // it, it runs here like any program.
+    await page.goto('/?transport=none')
     test.skip(!(await hasJspi(page)), 'this browser cannot suspend WebAssembly (no JSPI)')
 
     await setProgram(page, [

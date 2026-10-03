@@ -56,6 +56,9 @@ async function resetRuntimeBetweenRuns(pyodide: any): Promise<void> {
   try { await pyodide.runPythonAsync(PYODIDE_RUNTIME_RESET_CODE) } catch { /* best effort */ }
 }
 
+/** Python source indented one level, to sit inside a try: block. */
+const indentPython = (code: string): string => code.split('\n').map(line => (line ? '    ' + line : line)).join('\n')
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const ensurePyodide = (): Promise<any> => {
   if (pyodidePromise) return pyodidePromise
@@ -451,6 +454,18 @@ def _serialization_limit_node(value, reason):
     type_name = safe_type_name(value)
     return {"kind": "reference", "type": type_name, "summary": f"{type_name} ({reason})"}
 
+def is_plain_tuple_subclass(value_type):
+    # turtle's positions (Vec2D) and named tuples are tuples underneath, and are
+    # shown as the sequences they are. Decided from the type alone, and read
+    # through tuple's own methods: the student's own hooks never run here.
+    try:
+        return (
+            value_type is not tuple and issubclass(value_type, tuple) and
+            value_type.__len__ is tuple.__len__ and value_type.__getitem__ is tuple.__getitem__
+        )
+    except Exception:
+        return False
+
 def _serialize_value(value, path_ids=None, depth=0, budget=None):
     if path_ids is None:
         path_ids = set()
@@ -471,14 +486,17 @@ def _serialize_value(value, path_ids=None, depth=0, budget=None):
             "summary": summarize_value(value),
         }
 
-    if value_type in (list, tuple, set):
+    plain_tuple = is_plain_tuple_subclass(value_type)
+    if value_type in (list, tuple, set) or plain_tuple:
         object_id = id(value)
         if object_id in path_ids:
             return {"kind": "reference", "type": value_type.__name__, "summary": f"{value_type.__name__} (circular)"}
         next_ids = set(path_ids)
         next_ids.add(object_id)
-        length = len(value)
-        if value_type in (list, tuple):
+        length = tuple.__len__(value) if plain_tuple else len(value)
+        if plain_tuple:
+            sequence = tuple.__getitem__(value, slice(0, MAX_ITEMS))
+        elif value_type in (list, tuple):
             sequence = value[:MAX_ITEMS]
         else:
             # islice prevents copying an arbitrarily large set before applying
@@ -1276,11 +1294,27 @@ def snapshot_state(frame):
     except Exception:
         return func_name, class_name, "{}"
 
+def flush_drawing_before_pause():
+    # Coder's tkinter batches what it sends the page; a paused line must not
+    # leave half its drawing in the batch. Nothing of the student's runs here.
+    tk = sys.modules.get("tkinter")
+    app = getattr(tk, "_app", None)
+    if app is not None:
+        try:
+            app.flush()
+        except Exception:
+            pass
+
 def trace_calls(frame, event, arg):
     global pending_action
 
+    # Not the student's code (turtle.py, Coder's tkinter, the standard library):
+    # no line events in that frame at all. Python still calls this for every
+    # new frame, so a handler of the student's called from library code is
+    # traced like any other; turtle's animation no longer pays a Python call
+    # per line of turtle.py.
     if frame.f_code.co_filename != "simulation.py":
-        return trace_calls
+        return None
 
     if event == "call":
         ensure_frame_depth(frame)
@@ -1385,6 +1419,7 @@ def trace_calls(frame, event, arg):
     watch_vals = evaluate_watches(frame)
     current_depth = get_depth(frame)
 
+    flush_drawing_before_pause()
     cmd = js_trace_callback(line_no, func_name, class_name, sim_state, watch_vals, breakpoint_hit)
     if cmd == 5:
         trace_table_check_stop()
@@ -1482,6 +1517,9 @@ async function runProgram(e: MessageEvent) {
   }
 
   const useSvgTurtle = Boolean(e.data.svgTurtleBootstrap)
+  // A turtle (or tkinter) program drawing through Coder's tkinter from here.
+  const tkBootstrap = String(e.data.tkBootstrap ?? '')
+  const tkFiles = (e.data.tkFiles ?? null) as Record<string, string> | null
   const stdctxBootstrap = String(e.data.stdctxBootstrap ?? '')
   const matplotlibBootstrap = String(e.data.matplotlibBootstrap ?? '')
   const plotlyBootstrap = String(e.data.plotlyBootstrap ?? '')
@@ -1610,6 +1648,40 @@ async function runProgram(e: MessageEvent) {
     sync.sleep(ms)
   })
 
+  // ── tkinter host (Coder's tkinter, and CPython's turtle on it) ──────────
+  // Drawing is posted as it is flushed; questions block on the run's channel
+  // (see TKINTER_WORKER_BOOTSTRAP in utils/tkinter.ts and utils/tkWorkerBridge.ts).
+  let tkPosted = 0
+  const tkRequest = (body: Record<string, unknown>): string | null =>
+    sync.request(seq => self.postMessage({ type: 'tk_request', seq, body: JSON.stringify(body) }))
+  pyodide.globals.set('js_tk_flush', (ops: string) => {
+    tkPosted += 1
+    self.postMessage({ type: 'tk_ops', seq: tkPosted, ops: String(ops) })
+    // A program with no delays (speed(0), tracer off) can outrun the page.
+    sync.tkThrottle(tkPosted)
+  })
+  pyodide.globals.set('js_tk_query', (q: string) => tkRequest({ k: 'query', q: String(q) }))
+  pyodide.globals.set('js_tk_dialog_sync', (spec: string) => tkRequest({ k: 'dialog', spec: String(spec) }))
+  pyodide.globals.set('js_tk_poll', () => {
+    // Free unless the page has queued something: turtle polls once per animation step.
+    if (!sync.tkEventsPending()) return ''
+    sync.tkEventsTaken()
+    const raw = tkRequest({ k: 'poll' })
+    if (!raw) return ''
+    try {
+      const reply = JSON.parse(raw) as { events?: unknown[]; more?: boolean; n?: number }
+      // More than one reply holds: ask again next time round, whatever the tally says.
+      if (reply.more) sync.tkEventsTaken(-1)
+      else if (typeof reply.n === 'number' && sync.transport === 'xhr') sync.tkEventsTaken(reply.n)
+      return reply.events?.length ? JSON.stringify(reply.events) : ''
+    } catch {
+      return ''
+    }
+  })
+  pyodide.globals.set('js_tk_sleep_sync', (ms: number, interruptible: boolean) => {
+    sync.tkSleep(Number(ms) || 0, Boolean(interruptible))
+  })
+
   pyodide.globals.set('js_input_callback', (promptText: string) => {
     const answer = sync.waitInput(seq => self.postMessage({ type: 'input', prompt: promptText, seq }))
     if (traceTableEnabled && answer.stop) return ''
@@ -1695,6 +1767,13 @@ async function runProgram(e: MessageEvent) {
     if (useSvgTurtle) {
       await pyodide.runPythonAsync(e.data.svgTurtleBootstrap as string)
     }
+    if (tkBootstrap && tkFiles) {
+      pyodide.globals.set('__coder_tk_files__', JSON.stringify(tkFiles))
+      pyodide.globals.set('__coder_turtle__', Boolean(e.data.tkTurtle))
+      // The host's should_stop reads this before the setup code defines it for the trace.
+      pyodide.globals.set('trace_table_enabled', traceTableEnabled)
+      await pyodide.runPythonAsync(tkBootstrap)
+    }
     if (stdctxBootstrap) {
       await pyodide.runPythonAsync(stdctxBootstrap)
     }
@@ -1734,10 +1813,14 @@ async function runProgram(e: MessageEvent) {
     // this browser: whatever fails from here is the program's.
     stage = 'running the program'
     self.postMessage({ type: 'started' })
-    await pyodide.runPythonAsync(
-      'code_obj = compile(user_code_str, "simulation.py", "exec")\n' +
-      runProgramPython('exec(code_obj, user_namespace, user_namespace)'),
-    )
+    const runUserCode = 'code_obj = compile(user_code_str, "simulation.py", "exec")\n' +
+      runProgramPython('exec(code_obj, user_namespace, user_namespace)')
+    await pyodide.runPythonAsync(tkBootstrap && tkFiles
+      // A window the program left open keeps working, still under the
+      // debugger; however it ends, nothing is left to answer the windows.
+      ? 'try:\n' + indentPython(runUserCode) + '\n    ' + String(e.data.tkAfterProgram ?? 'pass') +
+        '\nfinally:\n    ' + String(e.data.tkShutdown ?? 'pass')
+      : runUserCode)
     await pyodide.runPythonAsync('trace_table_flush()')
     traceStdoutCapture = null
     // Figures the student built but never showed still belong on screen.

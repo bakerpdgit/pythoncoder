@@ -25,9 +25,9 @@ outer loop is what you do with that unit.
 - `leo.speed(0)` is the fastest setting there is. At 576 sides, anything slower
   is a long wait.
 
-There is also `leo.reset()`, which you will meet in the last example. It clears
-the canvas, sends the turtle home and puts every pen setting back to its default
-in one go.
+There is also `leo.reset()`, which you will meet in the last example. It wipes
+away everything `leo` has drawn, sends it home and puts every pen setting back
+to its default in one go. (Other turtles' drawings are left alone.)
 
 **Try it:**
 

@@ -30,8 +30,12 @@ interface CanvasItem { id: number; type: string; coords: number[]; props: Props;
 interface CanvasState {
   svg: SVGSVGElement
   bg: SVGRectElement
+  /** Holds the items, moved by the view: canvas (x, y) shows at window pixel (x - view[0], y - view[1]). */
+  layer: SVGGElement
   items: Map<number, CanvasItem>
   current: number | null
+  /** Tk's xOrigin / yOrigin: the canvas point at the window's top-left corner. */
+  view: [number, number]
 }
 
 interface Widget {
@@ -80,6 +84,89 @@ interface Dialog { el: HTMLElement; resolve: (value: string) => void; cancel: ()
 export interface TkRendererOptions {
   /** When true the renderer leaves keyboard focus alone (e.g. the console is asking for input()). */
   shouldYieldFocus?: () => boolean
+  /** A canvas has recorded another step for the replay slider; `count` steps in all. */
+  onHistoryFrame?: (canvasId: number, count: number) => void
+  /** An event was queued for Python to collect (a worker has to be told; see tkWorkerBridge). */
+  onEvent?: () => void
+}
+
+// ── Replaying a canvas ──────────────────────────────────────────────────────
+//
+// The Python turtle marks each finished command (`mark` op). The page keeps
+// what the canvas showed at every mark, so the student can step back through
+// a drawing and replay it. A full copy per step would grow with the square of
+// the drawing, so a step is the canvas operations since the last one, with
+// the whole state kept every HISTORY_KEY_EVERY steps to rebuild from.
+
+const HISTORY_KEY_EVERY = 50
+const HISTORY_MAX_FRAMES = 5000
+const HISTORY_OPS = new Set(['cvitem', 'cvcoords', 'cvdelete', 'cvorder', 'cvraise', 'cvlower', 'cvview', 'config'])
+
+interface FrameItem { type: string; coords: number[]; props: Props }
+
+/** Everything a canvas shows, as data. Item objects are shared, never changed in place. */
+export interface CanvasFrameState {
+  order: number[]
+  items: Map<number, FrameItem>
+  view: [number, number]
+  bg: unknown
+}
+
+interface CanvasHistory {
+  /** One per step: the whole state every HISTORY_KEY_EVERY steps, otherwise the operations since the last step. */
+  frames: { key: CanvasFrameState | null; ops: any[][] }[]
+  pending: any[][]
+}
+
+const moveIds = (order: number[], ids: number[]): { rest: number[]; moving: number[] } => {
+  const set = new Set(ids)
+  return { rest: order.filter(id => !set.has(id)), moving: ids.filter(id => order.includes(id)) }
+}
+
+/** Apply one canvas operation to a frame's state: the same rules as the live canvas. */
+export function applyFrameOp(state: CanvasFrameState, op: any[]): void {
+  switch (op[0]) {
+    case 'cvitem': {
+      const iid = op[2]
+      if (!state.items.has(iid)) state.order.push(iid)
+      state.items.set(iid, { type: op[3], coords: op[4] ?? [], props: op[5] ?? {} })
+      break
+    }
+    case 'cvcoords': {
+      const item = state.items.get(op[2])
+      if (item) state.items.set(op[2], { ...item, coords: op[3] ?? [] })
+      break
+    }
+    case 'cvdelete': {
+      const gone = new Set<number>(op[2] ?? [])
+      for (const iid of gone) state.items.delete(iid)
+      state.order = state.order.filter(id => !gone.has(id))
+      break
+    }
+    case 'cvorder': {
+      const { rest, moving } = moveIds(state.order, op[2] ?? [])
+      state.order = [...rest, ...moving]
+      break
+    }
+    case 'cvraise': {
+      const { rest, moving } = moveIds(state.order, op[2] ?? [])
+      const after = op[3] ?? null
+      const at = after === null ? 0 : rest.indexOf(after) + 1 || rest.length
+      state.order = [...rest.slice(0, at), ...moving, ...rest.slice(at)]
+      break
+    }
+    case 'cvlower': {
+      const { rest, moving } = moveIds(state.order, op[2] ?? [])
+      const before = op[3] ?? null
+      const found = before === null ? -1 : rest.indexOf(before)
+      const at = before === null ? rest.length : found < 0 ? 0 : found
+      state.order = [...rest.slice(0, at), ...moving, ...rest.slice(at)]
+      break
+    }
+    case 'cvview': state.view = [Number(op[2]) || 0, Number(op[3]) || 0]; break
+    case 'config': if (op[2] && 'bg' in op[2]) state.bg = op[2].bg; break
+    default: break
+  }
 }
 
 const SVG_NS = 'http://www.w3.org/2000/svg'
@@ -157,6 +244,11 @@ function drawRelief(el: HTMLElement, relief: string, bd: number, bg: string) {
   }
   el.style.borderStyle = 'solid'
   el.style.borderColor = relief === 'solid' ? '#000' : (bg === 'transparent' ? 'transparent' : bg)
+}
+
+/** The border drawRelief gave an element, read from its own style so it works before it is on the page. */
+function cssBorder(el: HTMLElement): [number, number] {
+  return [parseFloat(el.style.borderLeftWidth) || 0, parseFloat(el.style.borderTopWidth) || 0]
 }
 
 function sizeCss(spec: any): string | null {
@@ -335,7 +427,7 @@ export class TkRenderer {
   private zoom = 1
   private fit = false
   private fitObserver: ResizeObserver | null = null
-  private wakers: (() => void)[] = []
+  private wakers: { finish: () => void; interruptible: boolean }[] = []
   private grab: number | null = null
   private ended = false
   private dialogs: Dialog[] = []
@@ -347,6 +439,13 @@ export class TkRenderer {
   private options: TkRendererOptions
   private docListener: ((e: MouseEvent) => void) | null = null
   private theme = 'vista'
+  /** The element in each window (keyed by the window's element) that last had the keyboard. */
+  private lastFocus = new WeakMap<HTMLElement, HTMLElement>()
+  /** Replay history, per canvas that has been marked. */
+  private histories = new Map<number, CanvasHistory>()
+  private historyStopped = false
+  /** Canvases showing a past step instead of their live drawing. */
+  private showing = new Map<number, { layer: SVGGElement; bg: string }>()
 
   constructor(host: HTMLElement, options: TkRendererOptions = {}) {
     ensureStyles()
@@ -386,26 +485,35 @@ export class TkRenderer {
     return JSON.stringify(out)
   }
 
-  /** Resolves after `ms`, or sooner if the student does something. */
-  sleep(ms: number): Promise<void> {
+  /**
+   * Resolves after `ms`. An `interruptible` sleep — mainloop waiting for
+   * something to happen — also ends as soon as the student does something; a
+   * plain delay (after(ms), time.sleep, turtle's animation) lasts its length,
+   * as in Tk, and only the program ending cuts it short.
+   */
+  sleep(ms: number, interruptible = true): Promise<void> {
     return new Promise(resolve => {
       let done = false
       const finish = () => {
         if (done) return
         done = true
         window.clearTimeout(timer)
-        this.wakers = this.wakers.filter(w => w !== finish)
+        this.wakers = this.wakers.filter(w => w.finish !== finish)
         resolve()
       }
       const timer = window.setTimeout(finish, Math.max(0, ms))
-      if (ms > 0) this.wakers.push(finish)
+      if (ms > 0) this.wakers.push({ finish, interruptible: interruptible !== false })
     })
   }
 
+  /** Something happened: end the sleeps that are waiting for that. */
   wake(): void {
-    const wakers = this.wakers
-    this.wakers = []
-    for (const w of wakers) w()
+    for (const w of this.wakers.filter(w => w.interruptible)) w.finish()
+  }
+
+  /** End every sleep, delays included (the program is stopping). */
+  wakeAll(): void {
+    for (const w of [...this.wakers]) w.finish()
   }
 
   /** A percentage as a fraction, or 'fit': shrink (never enlarge) so every window shows. */
@@ -463,7 +571,7 @@ export class TkRenderer {
     for (const w of this.widgets.values()) {
       if (w.kind === 'toplevel' && w.titleText) w.titleText.textContent = `${w.props.title ?? 'tk'} — not running`
     }
-    this.wake()
+    this.wakeAll()
   }
 
   /** Cancel an open message box or prompt (Stop while the program waits on one). */
@@ -497,9 +605,101 @@ export class TkRenderer {
     }
   }
 
+  // ── The replay slider ──────────────────────────────────────────────────
+
+  /** How many steps a canvas has recorded. */
+  historyLength(canvasId: number): number {
+    return this.histories.get(canvasId)?.frames.length ?? 0
+  }
+
+  /** What a canvas showed at step `step`, rebuilt from the nearest whole state. */
+  frameState(canvasId: number, step: number): CanvasFrameState | null {
+    const h = this.histories.get(canvasId)
+    if (!h || step < 0 || step >= h.frames.length) return null
+    let start = step
+    while (start > 0 && !h.frames[start].key) start--
+    const key = h.frames[start].key
+    if (!key) return null
+    const state: CanvasFrameState = { order: [...key.order], items: new Map(key.items), view: [...key.view] as [number, number], bg: key.bg }
+    for (let i = start + 1; i <= step; i++) for (const op of h.frames[i].ops) applyFrameOp(state, op)
+    return state
+  }
+
+  /**
+   * Show step `step` of a canvas's drawing in place of the live one, inside
+   * the same window; null puts the live drawing back. While a past step is on
+   * screen the canvas sends the program nothing.
+   */
+  showCanvasFrame(canvasId: number, step: number | null): void {
+    const w = this.widgets.get(canvasId)
+    const c = w?.canvas
+    if (!w || !c) return
+    this.showing.get(canvasId)?.layer.remove()
+    this.showing.delete(canvasId)
+    const state = step === null ? null : this.frameState(canvasId, step)
+    if (!state) {
+      c.layer.style.display = ''
+      w.el.style.background = col(w.props.bg, '#f0f0f0')
+      return
+    }
+    const layer = svg('g') as SVGGElement
+    for (const iid of state.order) {
+      const item = state.items.get(iid)
+      if (!item || item.type === 'window') continue
+      const el = svg('g') as SVGElement
+      this.drawItem(w, { id: iid, type: item.type, coords: item.coords, props: item.props, el })
+      layer.appendChild(el)
+    }
+    const [left, top] = cssBorder(w.el)
+    layer.setAttribute('transform', `translate(${-(state.view[0] + left)} ${-(state.view[1] + top)})`)
+    c.layer.style.display = 'none'
+    c.svg.appendChild(layer)
+    const bg = col(state.bg, '#f0f0f0')
+    w.el.style.background = bg
+    this.showing.set(canvasId, { layer, bg })
+  }
+
+  /** Forget every canvas's steps and keep no more (the student closed the slider). */
+  stopHistory(): void {
+    for (const id of [...this.showing.keys()]) this.showCanvasFrame(id, null)
+    this.histories.clear()
+    this.historyStopped = true
+  }
+
+  private captureFrameState(w: Widget): CanvasFrameState {
+    const c = w.canvas!
+    const order: number[] = []
+    const items = new Map<number, FrameItem>()
+    for (const el of c.layer.children) {
+      const iid = Number((el as SVGElement).dataset.tki)
+      const item = c.items.get(iid)
+      if (!item) continue
+      order.push(iid)
+      items.set(iid, { type: item.type, coords: item.coords, props: item.props })
+    }
+    return { order, items, view: [...c.view] as [number, number], bg: w.props.bg }
+  }
+
+  private recordFrame(canvasId: number) {
+    const w = this.widgets.get(canvasId)
+    if (!w?.canvas || this.historyStopped) return
+    let h = this.histories.get(canvasId)
+    if (!h) {
+      h = { frames: [], pending: [] }
+      this.histories.set(canvasId, h)
+    }
+    const key = h.frames.length % HISTORY_KEY_EVERY === 0 ? this.captureFrameState(w) : null
+    h.frames.push({ key, ops: key ? [] : h.pending })
+    h.pending = []
+    // The oldest block goes whole, so every block still starts with its whole state.
+    if (h.frames.length > HISTORY_MAX_FRAMES) h.frames.splice(0, HISTORY_KEY_EVERY)
+    this.options.onHistoryFrame?.(canvasId, h.frames.length)
+  }
+
   // ── Operations ─────────────────────────────────────────────────────────
 
   private apply(op: any[]) {
+    if (HISTORY_OPS.has(op[0])) this.histories.get(op[1])?.pending.push(op)
     const [name] = op
     switch (name) {
       case 'create': this.create(op[1], op[2], op[3], op[4] ?? {}); break
@@ -533,6 +733,10 @@ export class TkRenderer {
       case 'cvcoords': this.canvasCoords(op[1], op[2], op[3] ?? []); break
       case 'cvdelete': this.canvasDelete(op[1], op[2] ?? []); break
       case 'cvorder': this.canvasOrder(op[1], op[2] ?? []); break
+      case 'cvraise': this.canvasRaise(op[1], op[2] ?? [], op[3] ?? null); break
+      case 'cvlower': this.canvasLower(op[1], op[2] ?? [], op[3] ?? null); break
+      case 'cvview': this.canvasView(op[1], op[2], op[3]); break
+      case 'mark': this.recordFrame(op[1]); break
       case 'raise': this.raise(op[1]); break
       case 'lower': this.lower(op[1]); break
       case 'grab': this.setGrab(op[1] ?? null); break
@@ -832,11 +1036,12 @@ export class TkRenderer {
     bg.setAttribute('width', '100%')
     bg.setAttribute('height', '100%')
     bg.setAttribute('fill', 'transparent')
-    s.appendChild(bg)
+    const layer = svg('g') as SVGGElement
+    s.append(bg, layer)
     const overlay = h('div', 'tkx-overlay')
     el.append(s, overlay)
     const w = this.newWidget(id, 'canvas', parent, props, el, overlay)
-    w.canvas = { svg: s, bg, items: new Map(), current: null }
+    w.canvas = { svg: s, bg, layer, items: new Map(), current: null, view: [0, 0] }
     return w
   }
 
@@ -1219,6 +1424,35 @@ export class TkRenderer {
     w.canvas!.svg.setAttribute('height', String(height))
     w.req.width = `${width}px`
     w.req.height = `${height}px`
+    this.placeCanvasView(w)
+    // A past step on screen keeps its own background over the live one's.
+    const shown = this.showing.get(w.id)
+    if (shown) w.el.style.background = shown.bg
+  }
+
+  /**
+   * Show the part of the canvas Tk would. Window pixel (x, y) — measured from
+   * the widget's outer edge, as mouse events are — shows canvas point
+   * (x + view[0], y + view[1]). The drawing area starts inside the CSS border,
+   * so the layer is shifted back by it: as in Tk, the corner of the canvas
+   * sits under the border.
+   */
+  private placeCanvasView(w: Widget) {
+    const c = w.canvas
+    if (!c) return
+    const [left, top] = cssBorder(w.el)
+    const dx = -(c.view[0] + left)
+    const dy = -(c.view[1] + top)
+    if (dx || dy) c.layer.setAttribute('transform', `translate(${dx} ${dy})`)
+    else c.layer.removeAttribute('transform')
+    for (const item of c.items.values()) if (item.type === 'window') this.drawItem(w, item)
+  }
+
+  private canvasView(cid: number, x: number, y: number) {
+    const w = this.widgets.get(cid)
+    if (!w?.canvas) return
+    w.canvas.view = [Number(x) || 0, Number(y) || 0]
+    this.placeCanvasView(w)
   }
 
   private styleMenubutton(w: Widget) {
@@ -1833,7 +2067,7 @@ export class TkRenderer {
     el.dataset.tki = String(iid)
     const item: CanvasItem = { id: iid, type, coords, props, el }
     if (existing) existing.el.replaceWith(el)
-    else w.canvas.svg.appendChild(el)
+    else w.canvas.layer.appendChild(el)
     w.canvas.items.set(iid, item)
     this.drawItem(w, item)
   }
@@ -1866,8 +2100,30 @@ export class TkRenderer {
     if (!w?.canvas) return
     for (const iid of order) {
       const item = w.canvas.items.get(iid)
-      if (item) w.canvas.svg.appendChild(item.el)
+      if (item) w.canvas.layer.appendChild(item.el)
     }
+  }
+
+  /** Put `ids`, in order, just above item `after` — or at the very bottom when it is null. */
+  private canvasRaise(cid: number, ids: number[], after: number | null) {
+    const c = this.widgets.get(cid)?.canvas
+    if (!c) return
+    const els = ids.map(iid => c.items.get(iid)?.el).filter((el): el is SVGElement => !!el)
+    const anchor = after === null ? null : c.items.get(after)?.el
+    if (anchor) anchor.after(...els)
+    else if (after === null) c.layer.prepend(...els)
+    else c.layer.append(...els)
+  }
+
+  /** Put `ids`, in order, just below item `before` — or at the very top when it is null. */
+  private canvasLower(cid: number, ids: number[], before: number | null) {
+    const c = this.widgets.get(cid)?.canvas
+    if (!c) return
+    const els = ids.map(iid => c.items.get(iid)?.el).filter((el): el is SVGElement => !!el)
+    const anchor = before === null ? null : c.items.get(before)?.el
+    if (anchor) anchor.before(...els)
+    else if (before === null) c.layer.append(...els)
+    else c.layer.prepend(...els)
   }
 
   private drawItem(w: Widget, item: CanvasItem) {
@@ -2058,7 +2314,9 @@ export class TkRenderer {
         const win = p.win ? this.widgets.get(p.win) : null
         if (!win) break
         const el = win.el
-        const [x, y] = c
+        const [left, top] = cssBorder(w.el)
+        const x = c[0] - w.canvas!.view[0] - left
+        const y = c[1] - w.canvas!.view[1] - top
         win.manager = 'canvas'
         win.master = w.id
         w.slaves.add(win.id)
@@ -2511,17 +2769,6 @@ export class TkRenderer {
         return 'nothing'
       }
       case 'screen': return { w: window.screen?.width || 1366, h: window.screen?.height || 768 }
-      case 'rgb': {
-        const ctx = measure()
-        if (!ctx) return null
-        ctx.fillStyle = '#010203'
-        ctx.fillStyle = String(q.c)
-        const v = String(ctx.fillStyle)
-        if (v === '#010203' && String(q.c).toLowerCase() !== '#010203') return 'bad'
-        if (v.startsWith('#')) return [parseInt(v.slice(1, 3), 16), parseInt(v.slice(3, 5), 16), parseInt(v.slice(5, 7), 16)]
-        const m = v.match(/(\d+(?:\.\d+)?)\D+(\d+(?:\.\d+)?)\D+(\d+(?:\.\d+)?)/)
-        return m ? [Math.round(Number(m[1])), Math.round(Number(m[2])), Math.round(Number(m[3]))] : [0, 0, 0]
-      }
       case 'measure': {
         const ctx = measure()
         if (!ctx) return null
@@ -2545,6 +2792,7 @@ export class TkRenderer {
 
   private push(ev: any) {
     if (this.ended) return
+    if (this.showing.has(ev.w)) return
     const last = this.events[this.events.length - 1]
     if (ev.t === 'mouse' && ev.k === 'motion' && last && last.t === 'mouse' && last.k === 'motion' && last.w === ev.w) {
       this.events[this.events.length - 1] = ev
@@ -2552,6 +2800,7 @@ export class TkRenderer {
       this.events.push(ev)
     }
     this.wake()
+    this.options.onEvent?.()
   }
 
   private widgetAt(target: EventTarget | null): { w: Widget; el: HTMLElement } | null {
@@ -2660,7 +2909,12 @@ export class TkRenderer {
         if (t.closest('.tkx-nofocus')) e.preventDefault()
         if (!focusable && !focusInWindow && top?.inner && !this.options.shouldYieldFocus?.()) {
           if (!t.closest('.tkx-nofocus')) e.preventDefault()
-          try { top.inner.focus({ preventScroll: true }) } catch { /* ignore */ }
+          // Coming back to a window returns the keyboard to whatever in it had
+          // it last, as Tk does — a turtle canvas that called listen() keeps
+          // its keys after the student has clicked elsewhere on the page.
+          const last = this.lastFocus.get(top.el)
+          const target = last && last.isConnected && top.el.contains(last) ? last : top.inner
+          try { target.focus({ preventScroll: true }) } catch { /* ignore */ }
         }
         if (this.want.has('press')) this.push(this.mouseEvent('press', e, hit, { b: e.button === 1 ? 2 : e.button === 2 ? 3 : 1, n: e.detail || 1 }))
       }
@@ -2701,6 +2955,9 @@ export class TkRenderer {
     area.addEventListener('keydown', key('press'))
     area.addEventListener('keyup', key('release'))
     area.addEventListener('focusin', e => {
+      const into = this.widgetAt(e.target)
+      const top = into ? this.toplevelOf(into.w) : null
+      if (top && e.target instanceof HTMLElement) this.lastFocus.set(top.el, e.target)
       if (!this.want.has('focus')) return
       const hit = this.widgetAt(e.target)
       if (hit) this.push({ t: 'focus', k: 'in', w: hit.w.id })

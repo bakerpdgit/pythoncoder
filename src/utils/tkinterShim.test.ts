@@ -30,7 +30,7 @@ function py(body: string, options: RunOptions = {}) {
     'host.query = lambda s: "null"',
     'host.poll = lambda: json.dumps(EVENTS.pop(0)) if EVENTS else ""',
     'host.should_stop = lambda: False',
-    'host.sleep = lambda ms: time.sleep(ms / 1000.0)',
+    'host.sleep = lambda ms, interruptible=True: time.sleep(ms / 1000.0)',
     'host.dialog = lambda s: "null"',
     'host.dialog_sync = lambda s: "null"',
     'sys.modules["_coder_tk_host"] = host',
@@ -371,7 +371,8 @@ describe.skipIf(!pythonAvailable)('the browser tkinter under native Python', () 
       '    tk._font_css(("Arial", 12, "bold italic")), tk._font_css("{Courier New} 10 underline"), tk._font_css(("Helvetica", -14)))',
     ].join('\n'))
     expect(r.lines[0]).toEqual([
-      ['#f0f0f0', 'lightblue', '#808080', 'color-mix(in srgb, red 80%, black)', '#ff00ff', ''],
+      // Tk's own values (Tk 8.6.15), numbered shades included.
+      ['#f0f0f0', '#add8e6', '#7f7f7f', '#cd0000', '#ff00ff', ''],
       ['italic bold 12pt Arial, Helvetica, sans-serif', ''],
       ['10pt "Courier New", Courier, monospace', 'underline'],
       ['14px Helvetica, Arial, sans-serif', ''],

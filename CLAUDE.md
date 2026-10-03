@@ -52,10 +52,17 @@ Three layers, all of which should pass before a change is called done:
   that everyone is sent `credentialless` (so WebKit is *not* isolated), that the
   runner is offered either way, and that `?isolation=on` / `off` switch
   `require-corp` on and off. `tkinter.spec.ts` drives tkinter
-  programs (a form and message box, canvas keys, ttk, a GUI in an imported
-  module, an `update()` game loop, `tkraise` pages, two `Tk()`s in a row, the
-  no-JSPI fallback) and runs every page of the shipped Tkinter book.
-  `workflow.spec.ts` covers the keyboard shortcuts (font size, F5 / Ctrl+F5 /
+  programs (a form and message box, canvas keys, ttk, an `update()` game loop,
+  `tkraise` pages, two `Tk()`s in a row) both in the trace worker and on the
+  main thread (`?tk=main`), plus a GUI in an imported module under Debug, a
+  breakpoint in a button callback, and the no-JSPI fallback; and runs every
+  page of the shipped Tkinter book in the worker on shared memory, in the
+  worker on the service worker, and on the main thread.
+  `turtle.spec.ts` drives the Python turtle (CPython's turtle.py on that
+  tkinter) in the trace worker — animation visible mid-move, Trace stepping
+  a drawing, keys and clicks, `textinput`, Stop in an endless loop, the replay
+  slider, the service-worker rung — and on the main thread (with and without
+  JSPI), and checks each Settings choice lands on its own surface. `workflow.spec.ts` covers the keyboard shortcuts (font size, F5 / Ctrl+F5 /
   Ctrl+Shift+F5, F11), Stay on run view, New file opening in the editor, and
   the tab group. `display.spec.ts` covers the Display pane across runs: emptied
   at every run's start, the console folding for a drawing and opening on the
@@ -80,7 +87,7 @@ Three layers, all of which should pass before a change is called done:
   book finds its end by asking for a file that is not there, and the browser logs
   that 404 as a console error. Needs network (Pyodide comes from a CDN), ~50s.
 - **`npm run test:e2e:webkit`** — the Safari engine (after `npx playwright install
-  webkit`): `isolation.spec.ts`, `input.spec.ts` and `transport.spec.ts` only. Playwright's WebKit build
+  webkit`): `isolation.spec.ts`, `input.spec.ts`, `transport.spec.ts` and `turtle.spec.ts` only. Playwright's WebKit build
   ships SharedArrayBuffer switched off (microsoft/playwright#28513), so the config
   passes `JSC_useSharedArrayBuffer=true`, and every test that needs SAB or JSPI
   skips itself with the reason when the build lacks it. WebKit is not isolated
@@ -136,6 +143,7 @@ src/
     explanations.ts           # Function explanation copy
   python/
     tkinter/                  # Coder's own tkinter package (real .py files, ?raw-imported)
+    turtle.py                 # CPython 3.13's turtle.py, unmodified, run on that package
   workers/
     tracer.worker.ts          # Pyodide trace worker (imported via ?worker)
     workerSync.ts             # how that worker blocks on the page: shared memory, or a held request
@@ -151,7 +159,9 @@ src/
     stdctx.ts                 # sys.stdctx / sys.stdaud (Python bootstrap + renderers)
     matplotlib.ts             # Agg backend bootstrap; plt.show() → a PNG in the Display pane
     plotly.ts                 # plotly bootstrap (fig.show() → HTML) + micropip installs
-    tkinter.ts                # tkinter detection + main-thread bootstrap (writes the package)
+    tkinter.ts                # tkinter/turtle detection + bootstraps for the main thread and the worker
+    tkinterSources.ts         # the package and turtle.py as text: a lazy chunk
+    tkinterHeadless.ts        # the package in the tester worker: headless turtle for marking and previews
     tkinterRenderer.ts        # draws tkinter windows as DOM in the Display pane
     vfsMediaUrl.ts            # deduped blob URLs for VFS-backed media (stdaud, drawImage)
     pyodideFs.ts              # which Pyodide MEMFS dirs are off-limits when syncing back
@@ -159,6 +169,7 @@ src/
     pyodideCrash.ts           # telling a dead Pyodide from a failed program
     traceSyncProtocol.ts      # what the page and the trace worker say to each other, either way
     traceChannel.ts           # the page's end of that, and the service worker's registration
+    tkWorkerBridge.ts         # the page's side of tkinter/turtle drawing from the trace worker
     runtimeFallback.ts        # shared memory → service worker → main thread: when to step down
     workerBoot.ts             # starting a worker from a blob copy when its address is refused
     isolationSwitch.ts        # ?isolation=on|off: the cookie that asks the server for require-corp
@@ -305,7 +316,7 @@ https, isolated but no SharedArrayBuffer, a WebKit tab with no service worker
 1. The user pastes Python code into the Monaco editor.
 2. On "Run", the main thread creates a **Web Worker** from `src/workers/tracer.worker.ts` (bundled by Vite as an IIFE so it can call `importScripts`).
 3. The worker calls `importScripts` to load Pyodide from CDN, then injects a Python `sys.settrace` hook that calls back into JS (`js_trace_callback`) on every line.
-4. The worker **blocks** after each trace event until the user clicks Step/Continue. Normally that is `Atomics.wait` on a **SharedArrayBuffer** (4 KB) the main thread writes to and notifies; where that is unavailable or does not work, it is a synchronous request a service worker holds open (next section).
+4. The worker **blocks** after each trace event until the user clicks Step/Continue. Normally that is `Atomics.wait` on a **SharedArrayBuffer** (8 KB) the main thread writes to and notifies; where that is unavailable or does not work, it is a synchronous request a service worker holds open (next section).
 5. Trace state (current line, variables, object graph) is posted back as structured messages and rendered by the React UI.
 
 ### Two ways for the worker to wait, and stepping down when one fails
@@ -1270,15 +1281,41 @@ https, isolated but no SharedArrayBuffer, a WebKit tab with no service worker
   auto-names (`.!frame.!button2`, from the Python class), Text's final newline,
   menu tearoff indices, Treeview's int-looking values, ttk having no `bg`. A
   program that errors in IDLE should error here the same way.
-- The package is real `.py` files, `?raw`-imported by `utils/tkinter.ts` and
-  written to `/lib/coder_tk` at run start. `/lib` keeps them out of the post-run
-  filesystem sweep, which also means the module eviction in
-  `PYODIDE_RUNTIME_RESET_CODE` skips them — so both the bootstrap and the reset
-  code pop `tkinter*` from `sys.modules` by name.
-- **Main thread only**, like pygame: `isTkinterLocked` (the open file imports
-  it) locks the runtime, and `startTraceWorker` reroutes to the main thread when
-  `detectTkinter` finds it in any module the program can import (a GUI in
-  `gui.py`).
+- The package is real `.py` files, `?raw`-imported by `utils/tkinterSources.ts`
+  — a lazy chunk, fetched by `loadCoderTkFiles` (`utils/tkinter.ts`) the first
+  time a run opens a window — and written to `/lib/coder_tk` at run start.
+  `/lib` keeps them out of the post-run filesystem sweep, which also means the
+  module eviction in `PYODIDE_RUNTIME_RESET_CODE` skips them — so both the
+  bootstrap and the reset code pop `tkinter*` (and `turtle`) from `sys.modules`
+  by name. `/lib/coder_tk` goes on `sys.path` *after* the program's own
+  directory, as the standard library does, so a student's own `turtle.py`
+  shadows ours exactly as it would in IDLE.
+- **It runs in the trace worker**, like any program, so Debug and Trace work
+  — a breakpoint in a button's callback pauses when the button is pressed,
+  with the window on screen. The worker draws through the tkinter host and
+  `utils/tkWorkerBridge.ts` (see *The tkinter host in the worker*);
+  `startTraceWorker` sends the package whenever `detectTkinter` finds tkinter
+  in any module the program can import. `TK_IN_WORKER` (App.tsx) is the
+  switch: `?tk=main` keeps tkinter on the main thread (then `isTkinterLocked`
+  locks the runtime and the worker reroutes, as it always did), which is how
+  the two are compared on a particular browser. A tab with no worker runs it
+  on the main thread anyway.
+- A Debug or Trace run that opens a window gives the output at least half the
+  column in minimal view (`beginTkinterRun(…, stepping)`): the strip the
+  output usually gets there shrank a window past use. A Run already gives it
+  the whole screen.
+- **How Python waits for the page** is `_host_mode()`: `'jspi'` (the page's own
+  thread, suspended on a promise), `'sync'` (a host that blocks the thread
+  itself — the trace worker's host, below), or `None` (no host, or no JSPI). With
+  `None` a delay is **skipped**, not slept: the page cannot paint while Python
+  waits, so sleeping only froze the tab for as long as the drawing would have
+  taken. `_pause(seconds, interruptible)`: only `mainloop` and the `wait_*`
+  calls are interruptible (`renderer.sleep(ms, true)` ends when an event
+  arrives); `after(ms)`, `time.sleep` and turtle's animation are fixed-length,
+  as in Tk, so pressing keys cannot speed a drawing up — Stop still ends them
+  (`renderer.wakeAll()`). In `'jspi'`, `_pause(0)` gives the page its thread
+  back at most every 16ms, so a program calling `update()` per frame is not
+  capped by setTimeout.
 - **mainloop() is a real loop** when JSPI is available: pump events and
   timers, then `run_sync` on a timer promise (`renderer.sleep`, which resolves
   early when an event arrives). `time.sleep` is patched the same way for a
@@ -1288,8 +1325,9 @@ https, isolated but no SharedArrayBuffer, a WebKit tab with no service worker
   after the program's last line; message boxes then fall back to the browser's
   `alert`/`confirm`/`prompt` — the same deliberate native-dialog exception as
   `js_input_prompt`.
-- With JSPI, callbacks run inside a Python stack entered by `runPythonAsync`,
-  so `input()` and `messagebox.askyesno()` work *inside* callbacks.
+- In the worker, and on the main thread with JSPI, callbacks run inside a
+  Python stack that can wait, so `input()` and `messagebox.askyesno()` work
+  *inside* callbacks.
 - **Layout is CSS**: grid → CSS grid (weights as `fr`); pack → nested flex boxes
   of "parcels" (so `expand` and `fill` stay separate) and "cavities" (what is
   left after each run of same-side slaves); place → absolute. The look is Tk on
@@ -1298,17 +1336,195 @@ https, isolated but no SharedArrayBuffer, a WebKit tab with no service worker
 - The renderer applies Display zoom itself (`setZoom`, including a real Fit that
   shrinks big windows) so event coordinates can be divided back through it.
   `attach()` moves its DOM if React remounts the Display pane.
+- **Colours are answered in Python**: `tkinter/_colors.py` is Tk 8.6.15's own
+  table (665 names, generated from a real Tk's `winfo_rgb`), so `winfo_rgb`,
+  numbered shades (`DarkOliveGreen3`) and Tk's errors (`unknown color name`,
+  `invalid color name "#12"`) need no page. Tk 8.6 uses web values for `green`,
+  `gray`, `maroon` and `purple`, and `gray50` is `#7f7f7f`.
+- **A canvas scrolls as Tk's does**: `xview`/`yview`/`canvasx`, the scroll
+  region, `confine` and scroll increments follow tkCanvas.c (`_set_origin`,
+  `_confine`, `_snap_origin`). Window pixel (x, y) shows canvas point
+  (x + xOrigin, y + yOrigin), with the window's corner under its border; the
+  page gets `cvview` and translates the items' layer (`placeCanvasView`).
+  Turtle centres (0, 0) this way; without it the drawing sat in a corner.
+- Canvas traffic is kept to what changed: `tag_raise` / `tag_lower` send
+  `cvraise` / `cvlower` with only the items that moved (never the whole
+  order); an `itemconfigure` that changes nothing redraws nothing; the canvas's
+  own `config` is resent only when its options changed; coordinates go to the
+  page rounded to 0.01px. A turtle animation frame is ~400 bytes.
+- `update()` delivers `<Configure>` synchronously when something that can
+  change a size has gone to the page (`sync_configure`), as Tk's update() does
+  — the page's own reports are asynchronous, and a size heard about twice is
+  delivered once.
+- Coming back to a window returns the keyboard to whatever in it last had it
+  (`lastFocus`), as Tk does, so a canvas that called `focus_set()` keeps its
+  keys after the student has clicked elsewhere on the page.
 - Stop sets the flag, cancels any open dialog and wakes the loop; the run ends as
   `[MAIN-THREAD RUN STOPPED]`. A finished run's windows stay on screen, inert.
-- **Known gap**: the tester worker has no tkinter, so a *tested* challenge whose
-  program imports it fails there. The package runs headless (no host → nothing
-  drawn, mainloop() returns), which is how the vitest suite runs it, and is what
-  the tester would need.
+- **Under test** the package runs headless in the tester worker (no host →
+  nothing drawn, mainloop() returns at once): the page sends it with any
+  challenge whose program imports tkinter or turtle (`tkFilesForTesting`), and
+  `utils/tkinterHeadless.ts` installs it. (Tested tkinter challenges used to
+  fail to import there.)
 - Tests: `tkinterShim.test.ts` runs the package under native Python against a
   fake host (including a faked `pyodide.ffi` so mainloop's JSPI loop runs);
   `tkinterRenderer.test.ts` checks the DOM the ops build; `tkinter.test.ts`
   detection and that the generated bootstrap compiles.
 - The **Tkinter** book (`Tkinter/`, in the catalog) is twelve worked examples.
+
+### Turtle is CPython's own (by default)
+
+- The default turtle is CPython 3.13's `Lib/turtle.py`, vendored unmodified
+  (`src/python/turtle.py`, line endings aside; licence in its header) and run on
+  Coder's tkinter. Pyodide removes `turtle.py` with `tkinter`; with ours in
+  place the real module does everything itself — its animation (`nhops` from
+  `speed()`, a 10ms `delay` per update), `tracer`/`update`,
+  `onkey`/`onclick`/`ontimer`, `textinput` (a Tk dialog), `undo`, stamps,
+  shapes, `mode("logo")`, `Terminator` when the window is closed, and every
+  error message. No turtle code of our own decides what a program does.
+- **It runs in the trace worker**, so Run, Debug and Trace all work and the
+  drawing is on screen as the student steps. `startTraceWorker` fetches the
+  package (`loadCoderTkFiles({ turtle: true })`, its own lazy chunk) while the
+  start may still wait, and sends it in `init` with `TKINTER_WORKER_BOOTSTRAP`
+  (see *The tkinter host in the worker* below). A program that also uses
+  tkinter goes with it. Only the canvas turtle locks a program to the main
+  thread now (`isTurtleLocked`).
+- **On the main thread** (no worker on this tab, `?transport=none`) it is a
+  tkinter run in all but name: `startMainThreadRun` sets
+  `shouldRunTurtlePython`, which takes the tkinter path with `turtle.py` added
+  and `__coder_turtle__` set. **Run** animates with JSPI; without JSPI delays
+  are skipped, the drawing appears at the end and its event loop runs after
+  the program's last line.
+- **A finished drawing ends its run.** `__coder_turtle__` sets
+  `_app.idle_exit`: `done()` / `mainloop()` / the keepalive return as soon as
+  `wants_events()` is false — no timers, no input bindings, no widget
+  commands (turtle's own `<Configure>` binding and scroll bars do not count).
+  So pages 1-9 of the Turtle book finish and tick, while page 10 (`onkey`) and
+  `exitonclick()` stay live until Stop or the window is closed. CPython would
+  wait for the window to close either way.
+- Its window is turtle's own: "Python Turtle Graphics", 683x576 — turtle's
+  default of half the width and three quarters of the height of the 1366x768
+  screen the package reports — shrunk by Display zoom's Fit.
+- **The older turtles are still choices** (Settings → Turtle graphics,
+  `AppSettings.turtleMode`, stored as `turtleEngine`): `'cpython'` (default),
+  `'pyo-js-turtle'` (the canvas shim, `TURTLE_CANVAS_BOOTSTRAP`) and
+  `'basthon-svg'` (the SVG shim, debuggable, `SVG_TURTLE_WORKER_SETUP` /
+  `TURTLE_SVG_BOOTSTRAP`). A program with key handlers under SVG runs with
+  the Python turtle (`effectiveTurtleMode`). Settings saved before there were
+  three choices held the old default, indistinguishable from a choice, so
+  `storedTurtleMode` moves it to `'cpython'`; a saved `'basthon-svg'` stays.
+  The canvas shim maps Tk key names (`"Up"`, `"space"`) to the browser's, so
+  one program's keys work under all three.
+- **The replay slider** (`TurtleScrubber`, the SVG turtle's history bar) works
+  for the Python turtle too, in any mode, during and after the run:
+  - Python marks the steps. `_coder_watch_turtle` (called by the bootstrap,
+    outside turtle.py) wraps every public method of a turtle and of the
+    screen, and their constructors; when the outermost one returns, the canvas
+    it drew on is marked (`_App.history_mark` → a `mark` op, sent after the
+    changes it marks, and only if the canvas changed). So making a turtle is
+    one step, each command one more — `circle()` is one, the animation's
+    in-between frames none, a getter nothing. Under `tracer(0)` only
+    `update()` marks, so the steps are what was actually shown. Methods that
+    wait for the student (`done`, `mainloop`, `textinput`…) are left alone, so
+    a key handler's moves are steps of their own.
+  - The renderer keeps the steps (`recordFrame`): the canvas operations since
+    the last mark, and the whole state every 50 steps (`HISTORY_KEY_EVERY`),
+    capped at 5000 steps. `frameState` rebuilds a step with `applyFrameOp`;
+    `showCanvasFrame` swaps it in for the live drawing inside the same window
+    and drops the canvas's events while it is there; `null` puts the live
+    drawing back. A full copy per step would have grown with the square of
+    the drawing.
+  - App: `onHistoryFrame` → `notePythonTurtleFrame`, batched to one update per
+    animation frame (a fast program finishes hundreds of commands a second).
+    `scrubCount` is the Python turtle's steps if it has any, else the SVG
+    frames; the slider shows on the `tkinter` surface for the former. Closing
+    it stops the run keeping steps (`stopHistory`).
+  - Canvas `coords()` with the same coordinates changes nothing, so a command
+    that leaves the drawing as it was is not a step.
+- **Marking and previews use the same turtle.** The tester worker runs the
+  student's program and each solution file with turtle.py on the headless
+  package (`TKINTER_TEST_SETUP`, utils/tkinterHeadless.ts): a fresh import for
+  every test case and every solution run (`_coder_tk_fresh`), turtle's delays
+  skipped, and textinput()/numinput() answered from the test's inputs in
+  order, as input() is (`_next_test_input`). The drawing is then written as a
+  canonical SVG (`tkinter/_coder_svg.py`, `turtle_svg`):
+  - lines become segments, and segments that carry straight on in the same
+    style are joined, so `forward(100)` and two `forward(50)`s — or turtle
+    starting a new line item every 42 points — are the same lines;
+  - a zero-length round-capped segment (what `dot()` draws) is a circle;
+  - filled shapes lose repeated and mid-side points; numbers are to 0.1px and
+    colours `#rrggbb`; invisible items and turtle's empty bgpic image are left
+    out;
+  - the turtles themselves are left out for marking and kept for previews.
+  `svgEquivalent` (utils/testMatcher.ts) then compares student and solution
+  as text with each number allowed a rounding step (0.15), so `left(270)` and
+  `right(90)` mark the same. A teacher's `pattern` written against the old SVG
+  turtle's markup would no longer match. Without the package (a page that sent
+  none) the tester falls back to the SVG shim. Previews (`BookPanel.tsx`,
+  `preview_turtle`) show the same canonical SVG, turtles included.
+
+### The tkinter host in the worker
+
+- In the trace worker Python can simply block, so its `_coder_tk_host` is
+  `mode = 'sync'` (`TKINTER_WORKER_BOOTSTRAP`, `utils/tkinter.ts`; the shared
+  part, `tkSetup`, is what the main-thread bootstrap uses too):
+  - `flush(ops)` posts a `tk_ops` message (numbered) and goes on —
+    `sync.tkThrottle` holds the worker only while the page is more than
+    `TK_MAX_BEHIND` (4) batches behind, so `speed(0)` cannot flood it;
+  - `query`, `poll` and `dialog_sync` are `tk_request`s: `sync.request()`
+    blocks until the page answers through the run's TraceChannel (a stop
+    answers with nothing);
+  - `poll()` costs nothing unless the page has queued events
+    (`sync.tkEventsPending`) — turtle polls once per animation step;
+  - `sleep_sync(ms, interruptible)` is `sync.tkSleep`: an interruptible wait
+    (mainloop with nothing to do) ends as soon as an event is queued, any wait
+    when a stop is asked for; `_pause(0)` does not call it at all;
+  - `should_stop` is the trace's own cooperative stop in Trace mode
+    (`trace_table_check_stop`), so a Trace waiting in `done()` stops cleanly.
+- The worker runs the program under its debugger as usual, then
+  `_coder_keepalive_sync()` — still traced, so a key handler after the
+  program's last line can be stepped — then `_coder_shutdown()`, however the
+  program ended.
+- The page side is `utils/tkWorkerBridge.ts`: it applies `tk_ops` to the same
+  `TkRenderer` a main-thread run draws with (holding them until the renderer,
+  made asynchronously, exists), reports each batch applied
+  (`channel.tkApplied`), answers requests from the renderer, tells the worker
+  of every queued event (`TkRendererOptions.onEvent` → `tkEventsQueued`) and,
+  through shared memory, hands a long event queue over in parts (`more`).
+  `endWorkerTkinter` (App.tsx) ends it on every way a run ends.
+- **Transport**, both rungs (`traceSyncProtocol.ts`, `workerSync.ts`,
+  `traceChannel.ts`):
+  - shared memory grew to 8 KB, the first 4 KB unchanged: int32[1024] the
+    page's tally of queued events (Atomics-notified, so an interruptible wait
+    can sleep on it), int32[1025] the last batch applied, int32[1026] a reply's
+    length and bytes 4112–8191 the reply (`SAB_STATE_REPLY`). A reply written
+    as -1 (never) on waking means a stop woke it. `requestStop` also bumps the
+    event tally, waking a mainloop;
+  - held requests carry the same in the polled state (`tk`, `applied`, pushed
+    once per turn of the page's event loop) and replies as `{ reply, stop }`.
+    A fixed delay of 30ms or less is spun out in the worker rather than held
+    (turtle waits 10ms per step; a held request costs far more in WebKit), and
+    an interruptible sleep asks the service worker to let it go early
+    (`sleep?wake=1&tk=N`, released when the page's tally moves or a stop
+    arrives). An older service worker ignores `wake` and holds it for the
+    short time asked.
+- **Tracing**: `trace_calls` returns `None` for frames outside
+  `simulation.py` (they used to return the trace function and be handed every
+  line event for nothing), so turtle.py's animation costs no Python call per
+  line; a student's function called back from library code is still traced.
+  Before every pause `flush_drawing_before_pause` sends what tkinter has
+  batched, so the window shows exactly what the paused line has drawn. The
+  inspector shows plain tuple subclasses — turtle's `Vec2D` positions, named
+  tuples — as sequences, decided from the type alone so no student hook runs.
+- Tests: `workerSync.test.ts` (both rungs: requests, stop instead of a reply,
+  events pending, interruptible vs fixed sleeps, throttling),
+  `tkWorkerBridge.test.ts`, `turtleShim.test.ts` (`sync` host mode),
+  `tracer.worker.integration.test.ts` (tuple subclasses, callbacks traced),
+  and `e2e/turtle.spec.ts`, which runs in WebKit too.
+- Tests: `turtleShim.test.ts` (the vendored module on the shim under native
+  Python: centring, op traffic, pauses, errors, dialogs, the idle rule, replay
+  marks, every Turtle book page); `tkinterRenderer.test.ts` (rebuilding steps
+  across whole-state blocks); `e2e/turtle.spec.ts`.
 
 ### stdctx canvas and stdaud audio
 

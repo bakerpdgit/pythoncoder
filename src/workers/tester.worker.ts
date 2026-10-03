@@ -6,6 +6,7 @@ import { MATPLOTLIB_BOOTSTRAP } from '../utils/matplotlib'
 import { detectMatplotlib, detectSpongeLibs } from '../utils/codeAnalysis'
 import { programPythonFiles, type ProgramFile } from '../utils/importGraph'
 import { normalizeTestInputs } from '../utils/testInputs'
+import { TKINTER_TEST_SETUP } from '../utils/tkinterHeadless'
 
 const PYODIDE_BASE_URL = 'https://cdn.jsdelivr.net/pyodide/v0.29.3/full'
 const PYODIDE_URL = `${PYODIDE_BASE_URL}/pyodide.js`
@@ -18,18 +19,24 @@ from io import StringIO
 _test_output = ''
 _test_error = None
 _test_namespace: dict = {}
+_test_queue = []
+
+def _next_test_input(default=''):
+    # The test's inputs, in order: input() takes them, and so do turtle's
+    # textinput() and numinput() (see TKINTER_TEST_SETUP).
+    return _test_queue.pop(0) if _test_queue else default
 
 def _run_test_case(code_str, inputs_list):
-    global _test_output, _test_error, _test_namespace
+    global _test_output, _test_error, _test_namespace, _test_queue
     buf = StringIO()
     old_stdout = sys.stdout
     sys.stdout = buf
-    queue = [str(x) for x in inputs_list]
+    _test_queue = [str(x) for x in inputs_list]
     def _mock_input(prompt=''):
         if prompt:
             sys.stdout.write(str(prompt))
             sys.stdout.flush()
-        return queue.pop(0) if queue else ''
+        return _next_test_input('')
     _test_namespace = {
         '__name__': '__main__',
         '__builtins__': builtins,
@@ -160,13 +167,39 @@ function readFileFromFs(filename: string): string {
   return ''
 }
 
-function runCodeAndCaptureSvg(srcCode: string, inputs: Array<string | number>): string {
-  pyodide.runPython(SVG_TURTLE_WORKER_SETUP)
+/**
+ * Coder's tkinter and CPython's turtle, headless (utils/tkinterHeadless.ts).
+ * Sent by the page when a challenge draws with turtle or uses tkinter; without
+ * it, turtle tests fall back to the old SVG turtle.
+ */
+let coderTkInstalled = false
+function installCoderTk(files: Record<string, string>): void {
+  pyodide.globals.set('__coder_tk_files__', JSON.stringify(files))
+  pyodide.runPython(TKINTER_TEST_SETUP)
+  coderTkInstalled = true
+}
+
+/** The drawing the last run left, as canonical SVG; without the turtles for marking, with them for a preview. */
+function capturedSvg(includeTurtles: boolean): string {
+  if (coderTkInstalled) {
+    pyodide.globals.set('_tc_include', includeTurtles)
+    return String(pyodide.runPython('_coder_turtle_svg(_tc_include)') ?? '')
+  }
+  const v = pyodide.globals.get('__turtle_svg__')
+  return v ? String(v) : ''
+}
+
+function freshTurtle(): void {
+  if (coderTkInstalled) pyodide.runPython('_coder_tk_fresh()')
+  else pyodide.runPython(SVG_TURTLE_WORKER_SETUP)
+}
+
+function runCodeAndCaptureSvg(srcCode: string, inputs: Array<string | number>, includeTurtles = false): string {
+  freshTurtle()
   pyodide.globals.set('_tc_code', srcCode)
   pyodide.globals.set('_tc_inputs', pyodide.toPy(inputs))
   pyodide.runPython('_run_test_case(_tc_code, _tc_inputs)')
-  const v = pyodide.globals.get('__turtle_svg__')
-  return v ? String(v) : ''
+  return capturedSvg(includeTurtles)
 }
 
 self.onmessage = async (e: MessageEvent) => {
@@ -181,16 +214,19 @@ self.onmessage = async (e: MessageEvent) => {
   }
 
   if (e.data.type === 'preview_turtle') {
-    const { solutionCode, inputs, files } = e.data as {
+    const { solutionCode, inputs, files, tkFiles } = e.data as {
       solutionCode: string
       inputs: Array<string | number>
       files: Array<{ path: string; content: ArrayBuffer }>
+      tkFiles?: Record<string, string> | null
     }
     try {
       await initPyodide(solutionCode, programPythonFiles(solutionCode, null, files ?? []))
       if (files?.length) mountFiles(files)
       try { pyodide.runPython('import os; os.chdir("/")') } catch { /* ignore */ }
-      const svg = runCodeAndCaptureSvg(solutionCode, inputs)
+      if (tkFiles) installCoderTk(tkFiles)
+      // A preview shows the turtles where they stopped, as the student will see it.
+      const svg = runCodeAndCaptureSvg(solutionCode, inputs, true)
       self.postMessage({ type: 'preview_done', svg })
     } catch (err) {
       self.postMessage({ type: 'preview_error', error: String(err) })
@@ -200,9 +236,10 @@ self.onmessage = async (e: MessageEvent) => {
 
   if (e.data.type !== 'run_tests') return
 
-  const { code, files, tests } = e.data as {
+  const { code, files, tests, tkFiles } = e.data as {
     code: string
     files: Array<{ path: string; content: ArrayBuffer }>
+    tkFiles?: Record<string, string> | null
     tests: Array<{
       in?: string | Array<string | number>
       out?: string | Array<{ typ?: string; statement?: string; filename?: string }>
@@ -218,9 +255,9 @@ self.onmessage = async (e: MessageEvent) => {
     const hasTurtleTests = tests.some(t =>
       Array.isArray(t.out) && t.out.some((r: { typ?: string }) => r.typ === 't')
     )
-    if (hasTurtleTests) {
-      pyodide.runPython(SVG_TURTLE_WORKER_SETUP)
-    }
+    // A program that imports turtle or tkinter gets the real modules, drawn by
+    // nothing, whether or not a test looks at the drawing.
+    if (tkFiles) installCoderTk(tkFiles)
 
     const spongeLibs = detectSpongeLibs(code, programFiles)
     if (spongeLibs.usesStdctx || spongeLibs.usesStdaud) installStdctxForTests()
@@ -244,10 +281,8 @@ self.onmessage = async (e: MessageEvent) => {
       if (files?.length) mountFiles(files)
       try { pyodide.runPython('import os; os.chdir("/")') } catch { /* ignore */ }
 
-      // Reset turtle state before each test
-      if (hasTurtleTests) {
-        pyodide.runPython(SVG_TURTLE_WORKER_SETUP)
-      }
+      // A fresh turtle (and tkinter) for each test
+      if (hasTurtleTests || coderTkInstalled) freshTurtle()
 
       const inputs = normalizeTestInputs(test.in)
 
@@ -259,8 +294,7 @@ self.onmessage = async (e: MessageEvent) => {
       const errorVal = pyodide.globals.get('_test_error')
       const error: string | null = errorVal ? String(errorVal) : null
 
-      const turtleSvgVal = hasTurtleTests ? pyodide.globals.get('__turtle_svg__') : null
-      const turtleSvg: string = turtleSvgVal ? String(turtleSvgVal) : ''
+      const turtleSvg: string = hasTurtleTests ? capturedSvg(false) : ''
 
       const statementResults: Record<string, string> = {}
       const fileContents: Record<string, string | null> = {}
