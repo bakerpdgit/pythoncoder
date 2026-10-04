@@ -19,6 +19,11 @@ export default defineConfig({
   // Pyodide, and racing them only makes the CDN the bottleneck.
   workers: 1,
   fullyParallel: false,
+  // On CI, one more go before a test counts as failed: these depend on a CDN
+  // and on a real browser's timing. A test that passes on its retry is listed
+  // as "flaky" in the log rather than failing the job; one that fails twice
+  // still fails it. Locally a failure is reported at once.
+  retries: process.env.CI ? 1 : 0,
   timeout: 120_000,
   expect: { timeout: 60_000 },
   reporter: process.env.CI ? 'list' : [['list']],
