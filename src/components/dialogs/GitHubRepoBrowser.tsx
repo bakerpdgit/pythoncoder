@@ -1,22 +1,21 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
-  gitHubLocationLabel, gitHubLocationUrl, gitHubParentPath, gitHubRawUrl, isBookFileName,
+  gitHubLocationLabel, gitHubLocationUrl, gitHubParentPath, gitHubRawUrl,
   listDirectory, resolveBranch, type GitHubEntry, type GitHubLocation,
 } from '../../utils/githubRepo'
 
-// Browse a public GitHub repository and pick the thing a learning book actually
-// lives in.
+// Browse a public GitHub repository and pick something to open: a folder (the
+// repository itself, or one inside it) or a ZIP.
 //
-// Teachers paste the address of the repository, not of a file inside it. Handing
-// that straight to the book loader is what produced "Cannot parse book.json from
-// https://github.com/…" and student links that opened to nothing, so a
-// repository address now opens this browser instead: click into folders, choose
-// a `book.json` or a book ZIP — or, for a simple learning book, choose a folder.
+// Every file is shown, so the student can see where they are, but only ZIPs
+// can be chosen: a folder is opened *as* a folder, and whether it is a learning
+// book, a simple learning book or plain files is worked out from what is in it
+// (`detectResourceKind`), never asked.
 
 export interface RepoSelection {
-  /** What to open or link to: a raw file address, or a folder's github.com address. */
+  /** What to open or link to: a ZIP's raw address, or a folder's github.com address. */
   url: string
-  kind: 'book' | 'zip' | 'folder'
+  kind: 'zip' | 'folder'
   /** Repo-relative path, for display. */
   label: string
 }
@@ -25,16 +24,12 @@ interface Props {
   /** Where to start browsing. Its branch is resolved here if the address omitted one. */
   start: GitHubLocation
   token: string
-  /**
-   * Offer the folder itself as a choice. A simple learning book *is* a folder
-   * of `.py` files, so there is no manifest file to point at.
-   */
-  allowFolder?: boolean
   selected: RepoSelection | null
   onSelect: (selection: RepoSelection | null) => void
 }
 
-export function GitHubRepoBrowser({ start, token, allowFolder, selected, onSelect }: Props) {
+export function GitHubRepoBrowser({ start, token, selected, onSelect }: Props) {
+  const isSelectable = (name: string) => name.toLowerCase().endsWith('.zip')
   const [location, setLocation] = useState<GitHubLocation | null>(null)
   const [entries, setEntries] = useState<GitHubEntry[] | null>(null)
   const [busy, setBusy] = useState(false)
@@ -87,15 +82,13 @@ export function GitHubRepoBrowser({ start, token, allowFolder, selected, onSelec
         {busy && <span className="flex-shrink-0 text-[10px] text-slate-500">loading…</span>}
       </div>
 
-      {allowFolder && (
-        <button type="button" onClick={() => onSelect(folderSelection)}
-          className={`flex w-full items-center gap-2 px-2 py-1.5 text-left transition-colors ${isFolderSelected ? 'bg-sky-500/20 text-emerald-300' : 'text-slate-300 hover:bg-slate-500/10'}`}>
-          <svg className="w-3.5 h-3.5 flex-shrink-0 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
-          </svg>
-          <span className="truncate">Use this folder as the book</span>
-        </button>
-      )}
+      <button type="button" onClick={() => onSelect(folderSelection)}
+        className={`flex w-full items-center gap-2 px-2 py-1.5 text-left transition-colors ${isFolderSelected ? 'bg-sky-500/20 text-emerald-300' : 'text-slate-300 hover:bg-slate-500/10'}`}>
+        <svg className="w-3.5 h-3.5 flex-shrink-0 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
+        </svg>
+        <span className="truncate">{here.path ? `Use this folder (${here.path.split('/').pop()})` : `Use this repository (${here.repo})`}</span>
+      </button>
 
       {error && <div className="px-2 py-1.5 text-[11px] text-red-400">{error}</div>}
 
@@ -116,7 +109,7 @@ export function GitHubRepoBrowser({ start, token, allowFolder, selected, onSelec
               </button>
             )
           }
-          const selectable = isBookFileName(entry.name)
+          const selectable = isSelectable(entry.name)
           const isSelected = selected?.url === gitHubRawUrl(here, entry.path)
           if (!selectable) {
             return (
@@ -127,7 +120,7 @@ export function GitHubRepoBrowser({ start, token, allowFolder, selected, onSelec
             <button key={entry.path} type="button"
               onClick={() => onSelect({
                 url: gitHubRawUrl(here, entry.path),
-                kind: entry.name.toLowerCase().endsWith('.zip') ? 'zip' : 'book',
+                kind: 'zip',
                 label: entry.path,
               })}
               className={`w-full px-2 py-1.5 text-left font-mono text-[11px] transition-colors ${isSelected ? 'bg-sky-500/20 text-emerald-300' : 'text-slate-300 hover:bg-slate-500/10'}`}>
@@ -137,12 +130,6 @@ export function GitHubRepoBrowser({ start, token, allowFolder, selected, onSelec
         })}
       </div>
 
-      {!allowFolder && entries && !entries.some(e => e.type === 'file' && isBookFileName(e.name)) && !error && (
-        <div className="border-t border-slate-700 px-2 py-1.5 text-[11px] text-slate-500">
-          No <code className="font-mono">book.json</code> or ZIP here — open a folder above, or tick
-          &ldquo;simple learning book&rdquo; to use a folder of <code className="font-mono">.py</code> files as it is.
-        </div>
-      )}
     </div>
   )
 }

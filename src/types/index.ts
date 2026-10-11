@@ -104,6 +104,21 @@ export interface VFSFilesystem {
   id: string
   name: string
   createdAt: number
+  /**
+   * Where its files came from, when that is an online address: the copy stays
+   * connected to it, so a revisit can resume or reset it.
+   */
+  source?: FilesystemSource
+  /** A filesystem that lasts only as long as the tab that made it. */
+  temporary?: { session: string }
+}
+
+export interface FilesystemSource {
+  url: string
+  /** What a single shared file is called, when its address does not say. */
+  name?: string
+  /** `sharedFilesDigest` of what was fetched when the copy was last made. */
+  digest: string
 }
 
 export interface VFSEntry {

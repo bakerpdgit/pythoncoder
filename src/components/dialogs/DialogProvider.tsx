@@ -34,6 +34,11 @@ export interface PromptOptions {
   placeholder?: string
   confirmLabel?: string
   cancelLabel?: string
+  /**
+   * Checked on every keystroke: a message refuses the value (shown under the
+   * box, OK disabled), null accepts it.
+   */
+  validate?: (value: string) => string | null
 }
 
 export interface AlertOptions {
@@ -57,7 +62,7 @@ export interface DialogApi {
 interface BaseReq { id: number; title?: string; detail?: string }
 interface ConfirmReq extends BaseReq { kind: 'confirm'; message: string; confirmLabel: string; cancelLabel: string; danger: boolean; resolve: (v: boolean) => void }
 interface ChooseReq extends BaseReq { kind: 'choose'; message: string; buttons: ChoiceButton[]; resolve: (v: string | null) => void }
-interface PromptReq extends BaseReq { kind: 'prompt'; message?: string; defaultValue: string; placeholder?: string; confirmLabel: string; cancelLabel: string; resolve: (v: string | null) => void }
+interface PromptReq extends BaseReq { kind: 'prompt'; message?: string; defaultValue: string; placeholder?: string; confirmLabel: string; cancelLabel: string; validate?: (value: string) => string | null; resolve: (v: string | null) => void }
 interface AlertReq extends BaseReq { kind: 'alert'; message: string; confirmLabel: string; resolve: () => void }
 type DialogReq = ConfirmReq | ChooseReq | PromptReq | AlertReq
 
@@ -87,7 +92,7 @@ export function DialogProvider({ children }: { children: ReactNode }) {
     }))),
     prompt: (o) => new Promise<string | null>(resolve => enqueue(id => ({
       id, kind: 'prompt', title: o.title, detail: undefined, message: o.message, defaultValue: o.defaultValue ?? '',
-      placeholder: o.placeholder, confirmLabel: o.confirmLabel ?? 'OK', cancelLabel: o.cancelLabel ?? 'Cancel', resolve,
+      placeholder: o.placeholder, confirmLabel: o.confirmLabel ?? 'OK', cancelLabel: o.cancelLabel ?? 'Cancel', validate: o.validate, resolve,
     }))),
     alert: (o) => new Promise<void>(resolve => enqueue(id => ({
       id, kind: 'alert', title: o.title, detail: o.detail, message: o.message, confirmLabel: o.confirmLabel ?? 'OK', resolve,
@@ -127,7 +132,12 @@ function DialogHost({ req, onDone }: { req: DialogReq; onDone: () => void }) {
 
   const finishConfirm = (v: boolean) => { if (req.kind === 'confirm') req.resolve(v); onDone() }
   const finishChoose = (v: string | null) => { if (req.kind === 'choose') req.resolve(v); onDone() }
-  const finishPrompt = (v: string | null) => { if (req.kind === 'prompt') req.resolve(v); onDone() }
+  const promptProblem = req.kind === 'prompt' && req.validate ? req.validate(value) : null
+  const finishPrompt = (v: string | null) => {
+    if (v !== null && promptProblem) return
+    if (req.kind === 'prompt') req.resolve(v)
+    onDone()
+  }
   const finishAlert = () => { if (req.kind === 'alert') req.resolve(); onDone() }
 
   const cancel = () => {
@@ -155,8 +165,10 @@ function DialogHost({ req, onDone }: { req: DialogReq; onDone: () => void }) {
           <input ref={inputRef} value={value} placeholder={req.placeholder}
             onChange={e => setValue(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); finishPrompt(value) } }}
+            aria-invalid={!!promptProblem}
             className="w-full mt-4 bg-slate-900 border border-slate-600 rounded px-3 py-2 text-white text-sm focus:outline-none focus:ring-1 focus:ring-sky-400" />
         )}
+        {promptProblem && <p role="alert" className="dialog-warning-text text-amber-300 text-xs mt-2">{promptProblem}</p>}
 
         <div className="flex justify-end gap-3 mt-6 flex-wrap">
           {req.kind === 'confirm' && (
@@ -183,8 +195,8 @@ function DialogHost({ req, onDone }: { req: DialogReq; onDone: () => void }) {
                 className="px-4 py-2 rounded border border-slate-600 text-slate-300 text-sm hover:bg-slate-700 transition-colors">
                 {req.cancelLabel}
               </button>
-              <button type="button" onClick={() => finishPrompt(value)}
-                className="px-4 py-2 rounded bg-sky-600 hover:bg-sky-500 text-white text-sm font-semibold transition-colors">
+              <button type="button" onClick={() => finishPrompt(value)} disabled={!!promptProblem}
+                className="px-4 py-2 rounded bg-sky-600 hover:bg-sky-500 text-white text-sm font-semibold transition-colors disabled:opacity-50 disabled:hover:bg-sky-600">
                 {req.confirmLabel}
               </button>
             </>

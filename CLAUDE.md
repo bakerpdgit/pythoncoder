@@ -80,7 +80,18 @@ Three layers, all of which should pass before a change is called done:
   browser that refuses to start workers by address still getting both the
   debugger and Submit from copies (the only e2e coverage Submit has). A
   program that only draws leaves its console folded, so specs read its
-  transcript through the Copy button rather than the rows. `tkinter.spec.ts` sets the
+  transcript through the Copy button rather than the rows. `share.spec.ts`
+  covers Share my code: a link with the code inside asking a second person
+  (a separate browser context) what to do — a new filesystem with a taken
+  name refused, a temporary one with its bar and Keep — a too-long program
+  greying that option out, a gist checked before its link is offered, a Drive
+  sign-in page caught, a Drive ZIP through `/api/proxy`, an online copy
+  resumed or reset (and its refresh icon), an exercise opened back inside its
+  book with *Replace your work?*, a book being edited shared in a link and on
+  Drive, and stray Pyodide files cleared — every host served through `route`.
+  `open.spec.ts` covers opening by what is there (a ZIP book, a ZIP simple
+  book, plain files staying connected, a GitHub repository browsed, a local
+  ZIP) and the teacher's student-link types refusing the wrong kind. `tkinter.spec.ts` sets the
   editor through Monaco's API rather than `insertText`, which re-indents every
   line after a colon, and reads the console through its copy button, because a
   finished run shrinks the console below what the program printed. Shared helpers live in
@@ -88,7 +99,10 @@ Three layers, all of which should pass before a change is called done:
   book finds its end by asking for a file that is not there, and the browser logs
   that 404 as a console error. Needs network (Pyodide comes from a CDN), ~50s.
 - **`npm run test:e2e:webkit`** — the Safari engine (after `npx playwright install
-  webkit`): `isolation.spec.ts`, `input.spec.ts`, `transport.spec.ts` and `turtle.spec.ts` only. Playwright's WebKit build
+  webkit`): `isolation.spec.ts`, `input.spec.ts`, `transport.spec.ts`, `turtle.spec.ts`,
+  `share.spec.ts` and `open.spec.ts` only (the last two open everything with `?transport=none`, and
+  reopens a link in a new tab rather than reloading: a WebKit page reloaded
+  mid-download reports every cancelled load). Playwright's WebKit build
   ships SharedArrayBuffer switched off (microsoft/playwright#28513), so the config
   passes `JSC_useSharedArrayBuffer=true`, and every test that needs SAB or JSPI
   skips itself with the reason when the build lacks it. WebKit is not isolated
@@ -156,6 +170,13 @@ src/
     bookLoader.ts             # Learning "book" manifest/challenge loading
     simpleBook.ts             # Books with no book.json — a flat folder of .py exercises
     githubRepo.ts             # Parse/browse a public GitHub repo (directory listings)
+    gist.ts                   # GitHub Gists: parse addresses, list a user's, raw addresses
+    codeShare.ts              # Share my code: #share= payloads, the links, length limits
+    sharedResource.ts         # what files a shared address holds (ZIP / GitHub folder / one file)
+    resourceKind.ts           # book.json → book, 01.py → simple book, else files
+    filesystemNames.ts        # naming rules and labels for filesystems
+    tempFilesystem.ts         # temporary filesystems: tab session, heartbeat, purge rule
+    clipboard.ts              # copyTextToClipboard, with the execCommand fallback
     htmlPreview.ts            # HTML file preview helpers
     stdctx.ts                 # sys.stdctx / sys.stdaud (Python bootstrap + renderers)
     matplotlib.ts             # Agg backend bootstrap; plt.show() → a PNG in the Display pane
@@ -201,7 +222,9 @@ src/
       ConfirmDialog.tsx       # Styled confirm dialog (with optional warning + checkbox)
       SaveFileDialog.tsx      # Save-to-VFS path/name picker
       GitHubRepoBrowser.tsx   # Pick a book.json / ZIP / folder inside a repository
-      SimpleBookOption.tsx    # The "simple learning book" tick and its (i) explainer
+      ShareCodeDialog.tsx     # The Share my code wizard (share/: the Gist and repo steps)
+      SimpleBookOption.tsx    # The (i) that explains a simple learning book
+      ResourceFinder.tsx      # Find something online: GitHub / Google Drive / any address
     ui/
       IconButton.tsx  FoldButton.tsx  ThemeToggleButton.tsx  ExecutionModeDialog.tsx
       PanelVisibilityMenu.tsx  DiagramFontControls.tsx  SettingsDialog.tsx
@@ -580,8 +603,10 @@ https, isolated but no SharedArrayBuffer, a WebKit tab with no service worker
 - The app reads these query parameters at startup (`App.tsx`, `utils/urlRunMode.ts`):
   `?book=<url>` (a `book.json` or a book ZIP), `?challenge=<id>`, `?showFirst`,
   `?simple` (read `?book=` as a *simple learning book*), `?mode=trace|run|debug`,
-  and `?filesystem=<url>`. `buildShareLink` (`utils/bookSource.ts`) is the only
-  place that composes them. (`?transport=` and `?isolation=` are diagnostics,
+  `?filesystem=<url>` (with `&name=`), and the `#share=` fragment.
+  `buildShareLink` (`utils/bookSource.ts`) is the only place that composes the
+  book links, and `buildHostedShareLink` / `buildEmbeddedShareLink`
+  (`utils/codeShare.ts`) the code links (see *Sharing code*). (`?transport=` and `?isolation=` are diagnostics,
   not student links: see *Two ways for the worker to wait* and the isolation
   section.)
 - `?challenge=` resolves through `findBookTargetById` (`utils/bookLoader.ts`),
@@ -595,12 +620,17 @@ https, isolated but no SharedArrayBuffer, a WebKit tab with no service worker
   sub-book to root would silently give the student a separate tick history.
 - A target that no longer exists must not strand the student: `handleOpenBookTarget`
   leaves the book open at its contents with a status message.
-- Teachers reach link building two ways, both opening `dialogs/StudentLinkDialog.tsx`:
-  right-clicking a row or breadcrumb in the Book panel, or the **Student links**
-  box in Teacher Tools. The Teacher Tools route builds links from the catalog
-  (`public/learning-tutorials.json`, via `utils/tutorialCatalog.ts`) or a pasted
-  URL **without opening the book** — deliberately, because `openResourceUrl`
-  calls `hideTeacherToolsPanel()` and would pull the panel out from under them.
+- Teachers reach link building three ways, all opening `dialogs/StudentLinkDialog.tsx`:
+  right-clicking a row or breadcrumb in the Book panel, the **Student links**
+  box in Teacher Tools, and Share for a book being edited (which hands over the
+  address it was put at as `pending`). The Teacher Tools route first asks what
+  the link is to — **a tutorial on this site** (a dropdown of
+  `public/learning-tutorials.json`, via `utils/tutorialCatalog.ts`), **my
+  learning book** or **my simple learning book** — then finds a custom book
+  with the `ResourceFinder` and checks it with `detectResourceKind`, refusing
+  one that is not that kind and saying why. All **without opening the book** —
+  deliberately, because `openResourceUrl` calls `hideTeacherToolsPanel()` and
+  would pull the panel out from under them.
 - `resolveBookShareSource` decides whether a book can be linked at all. A book
   unzipped from a URL still can: `loadFilesystemFromUrl` names the filesystem
   after its source URL. A locally authored or locally imported book cannot, and
@@ -610,27 +640,161 @@ https, isolated but no SharedArrayBuffer, a WebKit tab with no service worker
   replaces the link with an explanation. Pasting a bare repository address used
   to produce a link that opened to "Cannot parse book.json" for every student.
 
+### What an address holds decides how it opens
+
+- Nothing asks whether something is a learning book. `detectResourceKind`
+  (`utils/resourceKind.ts`) applies one rule everywhere — opening from the
+  web, a local ZIP or folder, a `?book=` link without `&simple`, and the
+  teacher's student-link check:
+  - a `book.json` → a learning book;
+  - otherwise a `01.py` → a simple learning book;
+  - otherwise → plain files.
+- A **GitHub folder** is probed for its two marker files by raw address, so
+  no API request is spent. A **ZIP** (Drive's included) is fetched once and
+  looked inside; a ZIP book is unpacked into a filesystem named by its address,
+  and a ZIP simple book stays `simplebook:<zip url>` so ticks survive. A
+  **book.json address** is a book as it stands. Anything else is one file.
+- A local ZIP or folder follows the same rule in `importLocalFiles` /
+  `holdsSimpleBook`. The *simple learning book* checkbox is gone; its (i)
+  explainer survives as `SimpleBookInfoButton`, used where a teacher says which
+  kind of book a link is to.
+- `?book=…&simple=1` still works for links already handed out.
+- **`dialogs/ResourceFinder.tsx`** is the one way to find something online:
+  GitHub (browse a username's repositories, or paste a repository, folder or
+  file address), Google Drive (a share link, through `driveDirectUrl`), or
+  any other `https` address. `GitHubRepoBrowser` lists every file and folder
+  but lets only a **folder** ("Use this folder / repository") or a **ZIP** be
+  chosen — what the folder is gets worked out afterwards. It is used by the
+  Open dialog, the share wizard's repository step and the student-link dialog.
+
+### Sharing code
+
+- **Share** opens `dialogs/ShareCodeDialog.tsx`. The editor's Share icon and a
+  file's right-click start at that file (Back reaches the choice); the File
+  System toolbar's icon starts at the choice: this file, as the editor holds
+  it, unsaved changes included — or all the filesystem's files. *What* and
+  *how* are independent: a small filesystem fits in a link as well as one
+  file does.
+- **In the link** (`#share=`): base64url of deflated UTF-8 JSON
+  `{v:1, files:[[path, text]], open, book?, isBook?}` (`utils/codeShare.ts`).
+  It is the *fragment*, so no server ever sees a student's program and no
+  server's URL limit applies. `deflate`, not `deflate-raw`, because every
+  runtime with CompressionStream has it. The finished link's length decides:
+  up to 2,000 characters fine, up to 8,000 with a warning, beyond that — or
+  with any file that is not UTF-8 text — the option is greyed out with the
+  reason.
+- **Hosted** (`?filesystem=<url>[&name=<file>]`): a **Gist** for one file, a
+  public **repository** (a ZIP, or the folder unzipped) for a filesystem, or
+  **Google Drive** for either. `name` names a single file whose address has
+  none (Drive's `uc?export=download&id=`). A gist link uses the unpinned
+  `/raw/<file>`, so fixing the gist updates the same link.
+- **A hosted link is checked before it is offered.** The last step runs
+  `fetchSharedFiles` — the very function the recipient's load uses — and says
+  what it found and whether it matches the code on screen. A web page where
+  code was expected is reported as not shared publicly: that is Drive's
+  sign-in page, and school Google accounts often forbid "Anyone with the link".
+- `fetchSharedFiles` (`utils/sharedResource.ts`) tells a **ZIP** by its bytes,
+  a **GitHub folder** by its address (one git-trees request, jsDelivr's flat
+  listing when rate limited, then fetched raw), and anything else is **one
+  file**. All fetching goes through `fetchResourceBufferOptional`, so Drive and
+  hosts without CORS go through `/api/proxy` as books do.
+
+#### Opening a link with the code inside: nothing is remembered
+
+- `#share=` creates nothing by itself. A choice (`openEmbeddedShare`) asks:
+  **Save as a new filesystem** (named through `dialogs.prompt({ validate })`,
+  which refuses an empty, taken or reserved name — `validateFilesystemName`
+  in `utils/filesystemNames.ts`), **Use a temporary filesystem**, or — when
+  the link carries a book — **Open it in the learning book**. Opening the same
+  link again asks again; nothing tracks it.
+- **A temporary filesystem** is a real IndexedDB filesystem (everything in
+  Coder reads IndexedDB) whose record carries `temporary: { session }`
+  (`utils/tempFilesystem.ts`). The session id lives in `sessionStorage`, so it
+  survives a reload of its tab and dies with it; the tab renews a heartbeat in
+  `localStorage` every 30s, and at startup any temporary filesystem whose
+  session has been quiet for 2 minutes is deleted (`staleTemporaryFilesystems`,
+  tested as a rule). One per tab: choosing temporary again replaces it. While
+  one is active an amber bar says so, with **Keep as a new filesystem**, and
+  the dropdown marks it *(temporary)*.
+- A `#share=` link pasted into an open tab changes only the fragment, so
+  `hashchange` is listened for (asking about unsaved changes first).
+
+#### Online code stays connected
+
+- A filesystem opened from an online address — a `?filesystem=` link, or
+  plain files opened from the web — records `source: { url, name?, digest }`
+  on its record (`VFSFilesystem`; no schema change, records are whole
+  objects). Its name is readable (`addressLabel`, made unique); old
+  filesystems named by their URL are still found, and shown readably by
+  `filesystemLabel`.
+- **A revisit** fetches first, then asks *You have opened this before*:
+  **Resume my copy** or **Reset to the online version** — saying so when the
+  online version's digest has changed. Reset confirms first (it is lost work),
+  then `replaceFilesystemContents`, which also deletes files the source no
+  longer has. Unreachable, the copy is resumed with a note.
+- **The File System toolbar's refresh icon** (`onResetToSource`) does the same
+  reset at any time. Inside a book activity it is *Reset this activity* — the
+  activity's online version is the book's.
+
+#### A file from a book carries the book
+
+- Sharing an activity's own file from a book that is online
+  (`resolveBookShareSource`) adds `{ url, simple, activity, title }`: in the
+  payload as `book`, on a hosted link as `&inbook=…&activity=…[&inbooksimple=1]`
+  (`buildHostedShareLink` / `readHostedBookContext`).
+- The recipient can then **open it in the learning book**
+  (`openSharedCodeInBook`): the book opens, the code is written into the
+  activity's own file, and the activity is entered. If they already have work
+  in that activity they are asked first (*Replace your work?* → Keep mine).
+- Only the file travels — never the activity's hidden files, instructions or
+  tests. A Parsons puzzle cannot be shared at all (its pieces come from the
+  answer).
+
+#### A book being edited is shared whole
+
+- In book edit mode there is no file-level Share. Teacher Tools' **Share this
+  book with students…** (and the File System toolbar's icon inside an
+  activity) opens the wizard in book mode over the `__booksrc__:` filesystem:
+  a **GitHub repository** (files or ZIP), **Google Drive** (a ZIP — a Drive
+  folder cannot be read), or a **link with the whole book inside**, marked
+  *not recommended* (a link is a snapshot: changing the book means a new link,
+  and ticks belong to each copy).
+- A hosted book goes straight on to `StudentLinkDialog` with the address as
+  `pending`: it is checked like any teacher's book and its activities offered.
+- A link-held book (`isBook` in the payload) opens for the recipient as a
+  book (`openEmbeddedBook`), from a temporary filesystem or a saved copy.
+
+#### Stray files
+
+- Files the browser cannot reach — a file whose folder has no entry — are
+  repaired at startup (`repairOrphanedFiles`, rule `planOrphanRepair`): under
+  Pyodide's system directories they are sweep debris from the old post-run
+  walk (a 2 MB `/lib/python313.zip` in Default) and are deleted; anywhere else
+  they were the user's, and get their folders so they show. Before this one
+  such file made Default "2 files", blocked sharing by link as "not text",
+  went into every ZIP download, and kept `/lib` from being skipped by the
+  post-run walk.
+- Shared code never runs by itself.
+
 ### A repository address is somewhere to look, not something to fetch
 
 - Teachers paste `https://github.com/them/their-repo`, not the address of a file
   inside it. `utils/githubRepo.ts` parses github.com and raw.githubusercontent.com
   addresses (`parseGitHubLocation`) and lists directories, and
   `dialogs/GitHubRepoBrowser.tsx` is the picker built on it: click into folders,
-  choose the `book.json` or ZIP — or, with the simple-book tick, the folder
-  itself. It is shared by the student-link dialog and the open-from-GitHub wizard.
+  choose a folder or a ZIP (see *What an address holds decides how it opens*).
 - Directory listings go through GitHub's API; **file contents never do**, they
   come from raw.githubusercontent.com through `bookSource` as before.
 - The API allows ~60 unauthenticated requests an hour **per IP**, and a school
   NATs a whole cohort behind one, so `listDirectory` falls back to jsDelivr's
   data API on a rate-limit. jsDelivr is the fallback and not the default because
   its cache can lag a teacher's push by hours.
-- Only a **teacher browsing for a book** ever reaches any of this. Opening a book
-  does not: a `book.json` or ZIP is fetched by address, and a simple learning book
-  finds its exercises by number (see below). A class of thirty opening a student
-  link therefore spends no API requests at all.
-- What counts as openable is `isBookFileName`, matched exactly as `isBookUrl`
-  routes it, so nothing is offered in the picker that the loader would then
-  decline to read.
+- Opening a **book** never reaches any of this: a `book.json` or ZIP is fetched
+  by address, a folder is told apart by probing its `book.json` / `01.py` raw,
+  and a simple learning book finds its exercises by number (see below). A class
+  of thirty opening a student link therefore spends no API requests at all. Only
+  someone browsing, and a GitHub folder of *plain files* being opened (one
+  git-trees request, with jsDelivr behind it), use the API.
 
 ### Simple learning books (no book.json)
 

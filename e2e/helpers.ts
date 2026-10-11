@@ -5,7 +5,14 @@ import { expect, type ConsoleMessage, type Page } from '@playwright/test'
  * mid-operation. `main.tsx` suppresses it; Playwright still reports it because
  * it sees the rejection first. Documented as benign in CLAUDE.md.
  */
-const BENIGN_TEXT = [/^Canceled$/, /ResizeObserver loop/]
+const BENIGN_TEXT = [
+  /^Canceled$/,
+  /ResizeObserver loop/,
+  // WebKit: Monaco's own logger, whenever focus moves from the editor to any
+  // button — it asks for the clipboard and WebKit refuses. Seen clicking
+  // Panels or Save as much as anything else; the editor is unaffected.
+  /^%c\s+ERR\b.*NotAllowedError: The request is not allowed by the user agent/,
+]
 
 export interface ErrorWatchOptions {
   /**

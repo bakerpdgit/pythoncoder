@@ -12,6 +12,8 @@ interface Props {
   onOpenJsonEditor: () => void
   onVerifyAll: () => void
   onCreateStudentLink: () => void
+  /** Put the book being edited online (or in a link) and make a student link to it. */
+  onShareBook?: () => void
 }
 
 function BigButton({ title, desc, onClick, icon }: { title: string; desc: string; onClick: () => void; icon: React.ReactNode }) {
@@ -36,7 +38,7 @@ function BigButton({ title, desc, onClick, icon }: { title: string; desc: string
 export function TeacherToolsPanel({
   isEditing, bookName, folderConnected, isVerifying,
   onNewBook, onOpenZip, onConnectFolder, onExportZip, onReloadFolder,
-  onCloseBook, onOpenJsonEditor, onVerifyAll, onCreateStudentLink,
+  onCloseBook, onOpenJsonEditor, onVerifyAll, onCreateStudentLink, onShareBook,
 }: Props) {
   return (
     <div className="flex h-full flex-col overflow-hidden text-xs select-none">
@@ -102,6 +104,16 @@ export function TeacherToolsPanel({
               )}
               {isVerifying ? 'Verifying…' : 'Verify all solutions'}
             </button>
+
+            {onShareBook && (
+              <button type="button" onClick={onShareBook}
+                className="w-full flex items-center gap-2 px-2.5 py-2 rounded border border-sky-600/60 text-sky-300 hover:border-sky-400 hover:text-sky-200 transition-colors">
+                <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8.684 13.342C8.886 12.938 9 12.482 9 12s-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" />
+                </svg>
+                Share this book with students…
+              </button>
+            )}
 
             <button type="button" onClick={onExportZip}
               className="w-full flex items-center gap-2 px-2.5 py-2 rounded border border-slate-600 text-slate-300 hover:border-sky-500 hover:text-sky-300 transition-colors">

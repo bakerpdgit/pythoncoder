@@ -24,12 +24,13 @@ import { buildCommentExport, buildDocstringExport, replaceExistingDocstring, get
 import { loadMainThreadPyodide, resetMainThreadPyodide, PYGAME_MAIN_THREAD_BOOTSTRAP, TURTLE_CANVAS_BOOTSTRAP, TURTLE_SVG_BOOTSTRAP, SVG_TURTLE_WORKER_SETUP, STDCTX_MAIN_THREAD_BOOTSTRAP } from './utils/mainThread'
 import { currentIsolationEnvironment, diagnoseIsolationProblem, isolationProblemMessage } from './utils/isolationStatus'
 import { MAIN_THREAD_INPUT_BOOTSTRAP, browserSupportsJspi, mainThreadInputSummary, promptWithRecentOutput, rememberRecentOutput } from './utils/mainThreadInput'
-import { fetchBookManifest, findFirstBookChallenge, findBookTargetById, getOrCreateChallengeFs, getHiddenPathsForFs, collectBookChallengeIds, deleteChallengeFilesystems, isBookUrl, isBookRef, BOOK_FS_PREFIX, BOOK_SRC_PREFIX } from './utils/bookLoader'
+import { fetchBookManifest, findFirstBookChallenge, findBookTargetById, getOrCreateChallengeFs, getHiddenPathsForFs, isChallengeFsName, resolveBookShareSource, collectBookChallengeIds, deleteChallengeFilesystems, isBookUrl, isBookRef, getBookFsDisplayName, BOOK_FS_PREFIX, BOOK_SRC_PREFIX } from './utils/bookLoader'
 import {
   ensureDefaultFilesystem, getAllFiles, syncFilesFromPyodide, writeFile,
   isTextMime, guessMimeType, mountFilesToPyodide, readFilesFromPyodide,
-  getEntryByPath, cleanFilesFromPyodide, ensureFilesystemFromUrl, loadFilesystemFromUrl,
-  createFilesystem, deleteFilesystem, listFilesystems, importFileMapToFs, downloadEntryAsZip,
+  getEntryByPath, cleanFilesFromPyodide, loadFilesystemFromUrl, createFilesystemFromFiles,
+  getFilesystem, updateFilesystemMeta, replaceFilesystemContents,
+  createFilesystem, deleteFilesystem, listFilesystems, importFileMapToFs, downloadEntryAsZip, repairOrphanedFiles,
 } from './utils/virtualFS'
 import { buildVfsPreviewUrl, ensureVfsPreviewServiceWorker, isHtmlFile } from './utils/htmlPreview'
 import {
@@ -47,7 +48,13 @@ import * as bookEdit from './utils/bookEditStore'
 import type { BookEditSession } from './utils/bookEditStore'
 import { HtmlPreviewDialog } from './components/HtmlPreviewDialog'
 import { SaveFileDialog } from './components/dialogs/SaveFileDialog'
-import { StudentLinkDialog, type StudentLinkSource } from './components/dialogs/StudentLinkDialog'
+import { StudentLinkDialog, type PendingBookResource, type StudentLinkSource } from './components/dialogs/StudentLinkDialog'
+import { ShareCodeDialog, type ShareScope, type ShareSource } from './components/dialogs/ShareCodeDialog'
+import { decodeSharePayload, isTextContent, payloadFileMap, readHostedBookContext, readShareFragment, sharedFilesDigest, type SharedBookContext } from './utils/codeShare'
+import { describeSharedFiles, fetchSharedFiles } from './utils/sharedResource'
+import { detectResourceKind } from './utils/resourceKind'
+import { addressLabel, filesystemLabel, uniqueFilesystemName, validateFilesystemName } from './utils/filesystemNames'
+import { currentSession, staleTemporaryFilesystemsNow, startSessionHeartbeat } from './utils/tempFilesystem'
 import { getExplanation, getDefinitionKey } from './data/explanations'
 import { ThemeToggleButton } from './components/ui/ThemeToggleButton'
 import { ExecutionModeDialog } from './components/ui/ExecutionModeDialog'
@@ -94,7 +101,7 @@ import type {
   StructureModel, DiagramModel, HierarchyModel, OutlineModel, DiagramView, DisplaySurface, DisplayZoom, PlotFigure, VFSEntry,
   LocalFolderSyncOp,
   AppSettings, BookNavState, BookChallenge, BookManifest, BookTestCase, BookAdditionalFile, NamedLayout, InspectorNode,
-  OverallTestResult, TesterRunOutput, ViewMode, Breakpoint, TurtleMode,
+  OverallTestResult, TesterRunOutput, ViewMode, Breakpoint, TurtleMode, VFSFilesystem,
 } from './types'
 import { evaluateAll } from './utils/testMatcher'
 import { createTraceSession, maybeAppendTraceCheckpoint, mergeTraceBatch } from './utils/traceLog'
@@ -341,7 +348,10 @@ export default function App() {
   const [editorTab, setEditorTab] = useState<'starter' | 'solution'>('starter')  // code editor tab in edit mode
   const [showBookJsonEditor, setShowBookJsonEditor] = useState(false)
   const [studentLinkRequest, setStudentLinkRequest] = useState<
-    { source: StudentLinkSource | null; targetId: string | null } | null>(null)
+    { source: StudentLinkSource | null; targetId: string | null; pending?: PendingBookResource } | null>(null)
+  const [shareSource, setShareSource] = useState<ShareSource | null>(null)
+  // The active filesystem's record: whether it is temporary, and where it came from.
+  const [activeFsRecord, setActiveFsRecord] = useState<VFSFilesystem | null>(null)
   const [isVerifyingSolutions, setIsVerifyingSolutions] = useState(false)
   const solutionPathRef = useRef<string | null>(null)          // active challenge's sol.file path
   const captureRunRef = useRef(false)                          // a "capture test case" run is in progress
@@ -891,13 +901,40 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeBookChallenge?.id, activeBookChallenge?.tests?.length])
 
+  // Keep this tab's temporary filesystems alive while it is open.
+  useEffect(() => startSessionHeartbeat(), [])
+
+  useEffect(() => {
+    let cancelled = false
+    void getFilesystem(activeFilesystemId).then(fs => { if (!cancelled) setActiveFsRecord(fs) })
+    return () => { cancelled = true }
+  }, [activeFilesystemId, vfsReloadTrigger])
+
   useEffect(() => {
     setIsCrossOriginIsolated(window.crossOriginIsolated === true)
     void (async () => {
       await ensureDefaultFilesystem()
+      // Files the browser cannot reach (Pyodide's stdlib swept in by an old
+      // bug) are deleted or given their folders before anything reads them.
+      await repairOrphanedFiles().catch(() => 0)
+      // Temporary filesystems whose tab has closed.
+      for (const stale of staleTemporaryFilesystemsNow(await listFilesystems())) {
+        await deleteFilesystem(stale.id).catch(() => undefined)
+      }
       setVfsReloadTrigger(t => t + 1)
 
       const params = new URLSearchParams(window.location.search)
+
+      // #share=<payload> — code carried inside the link itself (Share → link).
+      // A link that cannot be opened says why, after the default file has loaded
+      // (which would otherwise replace the message with its own).
+      let shareProblem: string | null = null
+      const embeddedShare = readShareFragment(window.location.hash)
+      if (embeddedShare) {
+        const result = await openEmbeddedShare(embeddedShare)
+        if (result.opened) return
+        shareProblem = result.problem ?? null
+      }
 
       // ?book=<encoded url> — auto-open a learning book (book.json or ZIP) hosted
       // anywhere. Routing (GitHub-direct → proxy) is handled by openResourceUrl.
@@ -919,18 +956,34 @@ export default function App() {
         } catch { /* fall through to default */ }
       }
 
+      // ?filesystem=<url>[&name=<file>] — code kept at a public address: a ZIP,
+      // a GitHub folder or a single file (Share → Gist / repository / Drive).
+      // With &inbook= it is an exercise file, which can open inside its book.
       const fsParam = params.get('filesystem')
       if (fsParam) {
+        const nameParam = params.get('name')
         const url = decodeURIComponent(fsParam)
+        const name = nameParam ? decodeURIComponent(nameParam) : undefined
         try {
-          const fsId = await ensureFilesystemFromUrl(url)
-          setActiveFilesystemId(fsId)
-          setCurrentWorkingDir('/')
-          setVfsReloadTrigger(t => t + 1)
-          revealFilesystemPanel()
-          await autoOpenMainPy(fsId)
-          return
-        } catch { /* fall through to default */ }
+          const book = readHostedBookContext(window.location.search)
+          if (book) {
+            const choice = await dialogs.choose({
+              title: 'Open shared code',
+              message: 'This code was shared from a learning book.',
+              detail: 'Open it inside that book, at its activity, or on its own as files.',
+              buttons: [{ label: 'Open it on its own', value: 'files', tone: 'neutral' }, ...bookChoice(book)],
+            })
+            if (choice === 'book') {
+              const files = (await fetchSharedFiles(url, { name })).files
+              shareProblem = await openSharedCodeInBook(book, files)
+              if (!shareProblem) return
+            }
+          }
+          if (!shareProblem) shareProblem = await openSharedFilesystemUrl(url, name)
+          if (!shareProblem) return
+        } catch (e) {
+          shareProblem = `Could not open the shared code: ${e instanceof Error ? e.message : String(e)}`
+        }
       }
 
       // Clear any stale book nav state and load default
@@ -941,6 +994,7 @@ export default function App() {
         const text = new TextDecoder().decode(entry.content)
         loadCodeText(text, 'main.py', '/main.py')
       }
+      if (shareProblem) setCodeStatus(shareProblem)
     })().finally(() => setStartupSettled(true))
   }, [])
 
@@ -2557,23 +2611,28 @@ export default function App() {
     return true
   }
 
+  /** Save / Don't save / Cancel for the editor's unsaved changes. False means Cancel. */
+  const settleUnsavedBeforeSwitch = async (title: string): Promise<boolean> => {
+    if (!isUnsaved || !openFilePath) return true
+    const choice = await dialogs.choose({
+      title,
+      message: `Save changes to "${codeFileName}" before switching filesystems?`,
+      buttons: [
+        { label: 'Save', value: 'save', tone: 'primary' },
+        { label: "Don't save", value: 'discard', tone: 'neutral' },
+        { label: 'Cancel', value: 'cancel', tone: 'neutral' },
+      ],
+    })
+    if (choice === 'cancel' || choice === null) return false
+    if (choice === 'save') await saveCurrentToVFS()
+    else clearDraft(activeFilesystemId)
+    return true
+  }
+
   const handleFilesystemChange = async (id: string) => {
     if (id === activeFilesystemId) return
     if (!canSwitchCodeSource()) return
-    if (isUnsaved && openFilePath) {
-      const choice = await dialogs.choose({
-        title: 'Switch filesystem',
-        message: `Save changes to "${codeFileName}" before switching filesystems?`,
-        buttons: [
-          { label: 'Save', value: 'save', tone: 'primary' },
-          { label: "Don't save", value: 'discard', tone: 'neutral' },
-          { label: 'Cancel', value: 'cancel', tone: 'neutral' },
-        ],
-      })
-      if (choice === 'cancel' || choice === null) return
-      if (choice === 'save') await saveCurrentToVFS()
-      else clearDraft(activeFilesystemId)
-    }
+    if (!(await settleUnsavedBeforeSwitch('Switch filesystem'))) return
     if (!clearEditorForSwitch()) return
     setActiveFilesystemId(id)
     setCurrentWorkingDir('/')
@@ -2935,26 +2994,28 @@ export default function App() {
         if (opened) revealFilesystemPanel()
         return opened ? rootUrl : null
       }
-      if (isBookUrl(url)) {
-        const opened = await handleBookOpen(url)
+      // What is there decides how it opens: book.json → a book, 01.py → a
+      // simple book, anything else → files kept connected to the address.
+      const found = await detectResourceKind(url)
+      if (found.kind === 'book') {
+        const opened = await handleBookOpen(found.url)
         revealFilesystemPanel()
-        return opened ? url : null
+        return opened ? found.url : null
       }
-      // Re-fetch fresh (avoids stale duplicates when the same link is reopened).
-      const existing = (await listFilesystems()).find(f => f.name === url)
-      if (existing) await deleteFilesystem(existing.id)
-      const fsId = await loadFilesystemFromUrl(url)
-      const bookEntry = await getEntryByPath(fsId, '/book.json')
-      if (bookEntry) {
+      if (found.kind === 'simple') return openResourceUrl(found.source, { simple: true })
+      if (found.kind === 'zip-book') {
+        // Re-fetched fresh each time: a student's work lives in the activities'
+        // own filesystems, not in this copy of the book.
+        const existing = (await listFilesystems()).find(f => f.name === url)
+        if (existing) await deleteFilesystem(existing.id)
+        const fsId = await createFilesystemFromFiles(url, found.files)
         const bookUrl = `vfs://fs:${fsId}/book.json`
         const opened = await handleBookOpen(bookUrl)
         revealFilesystemPanel()
         return opened ? bookUrl : null
-      } else {
-        if (!handleFilesystemForcedChange(fsId)) return null
-        await autoOpenMainPy(fsId)
       }
-      revealFilesystemPanel()
+      const problem = await openSharedFilesystemUrl(url, undefined, found.files)
+      if (problem) setCodeStatus(problem)
       return null
     } catch (e) {
       setCodeStatus(`Failed to open from URL: ${e instanceof Error ? e.message : String(e)}`)
@@ -3814,6 +3875,394 @@ export default function App() {
     }
   }
 
+  /** Open one file of a filesystem in the editor, or main.py if it is not there. */
+  const autoOpenFile = async (fsId: string, path: string) => {
+    const entry = await getEntryByPath(fsId, path)
+    if (!entry?.content) { await autoOpenMainPy(fsId); return }
+    loadCodeText(new TextDecoder().decode(entry.content), path.slice(path.lastIndexOf('/') + 1), path)
+  }
+
+  // ── Sharing code ────────────────────────────────────────────────────────
+
+  /**
+   * Open the Share wizard. `path` shares that file (the file browser's
+   * right-click); otherwise the file on offer is the one in the editor, as it
+   * is now — unsaved changes included, since that is what the student sees.
+   */
+  const openShareDialog = async (opts: { scope?: ShareScope; path?: string } = {}) => {
+    if (bookEditSession) {
+      // A book being edited is shared whole, from its own source filesystem.
+      const srcFsId = bookEditSession.srcFsId
+      setShareSource({
+        fileName: null, filePath: '/book.json', fileText: '', fileUnavailable: 'Share the whole book.',
+        filesystemLabel: editManifest?.name ?? 'This book',
+        inBookActivity: false,
+        initialScope: 'filesystem',
+        loadFilesystem: async () => new Map((await getAllFiles(srcFsId)).map(f => [f.path, f.content])),
+      })
+      return
+    }
+    const fsId = activeFilesystemId
+    const editorPath = openFilePath
+    const editorText = codeText
+    const hidden = new Set(isBookEditMode ? [] : challengeHiddenPaths)
+    let filePath = editorPath ?? `/${codeFileName}`
+    let fileText = editorText
+    let fileUnavailable: string | undefined
+    if (opts.path && opts.path !== editorPath) {
+      const entry = await getEntryByPath(fsId, opts.path)
+      filePath = opts.path
+      const content = entry?.content ?? new ArrayBuffer(0)
+      if (!isTextContent(content)) fileUnavailable = 'This file is not text, so it cannot be shared on its own.'
+      fileText = fileUnavailable ? '' : new TextDecoder().decode(content)
+    }
+    if (isParsonsChallenge && !opts.path) {
+      fileUnavailable = 'A Parsons puzzle has no file of its own to share — its pieces come from the answer.'
+    } else if (!fileUnavailable && !fileText.trim()) {
+      fileUnavailable = 'This file is empty.'
+    }
+    const fsName = (await listFilesystems()).find(f => f.id === fsId)?.name ?? fsId
+    const filesystemLabel = fsName.startsWith(BOOK_FS_PREFIX) ? getBookFsDisplayName(fsName)
+      : /^https?:\/\//i.test(fsName)
+        ? decodeURIComponent(fsName.replace(/[?#].*$/, '').split('/').filter(Boolean).pop() ?? fsName)
+        : fsName
+    const inBookActivity = !!bookNavState?.activeChallengeId
+    // The exercise file of an online book carries the book with it, so whoever
+    // opens the link can open the code inside that book.
+    let bookContext: SharedBookContext | null = null
+    if (inBookActivity && bookNavState && activeBookChallenge && filePath === editorPath) {
+      const url = await resolveBookShareSource(bookNavState.rootUrl).catch(() => null)
+      if (url) {
+        bookContext = {
+          url,
+          simple: isSimpleBookUrl(bookNavState.rootUrl),
+          activity: activeBookChallenge.id,
+          title: bookNavState.breadcrumb[0]?.name,
+          activityTitle: activeBookChallenge.name,
+        }
+      }
+    }
+    setShareSource({
+      bookContext,
+      fileName: filePath.slice(filePath.lastIndexOf('/') + 1) || DEFAULT_CODE_FILENAME,
+      filePath,
+      fileText,
+      fileUnavailable,
+      filesystemLabel,
+      filesystemUnavailable: inBookActivity
+        ? 'In a learning book you can share the file you are working on, not the whole activity.'
+        : undefined,
+      inBookActivity,
+      initialScope: opts.scope ?? (opts.path ? 'file' : undefined),
+      loadFilesystem: async () => {
+        const files = new Map<string, ArrayBuffer>()
+        for (const file of await getAllFiles(fsId)) {
+          if (!hidden.has(file.path)) files.set(file.path, file.content)
+        }
+        // What the student sees in the editor, saved or not.
+        if (editorPath) files.set(editorPath, new TextEncoder().encode(editorText).buffer as ArrayBuffer)
+        return files
+      },
+    })
+  }
+
+  /** Ask for a new filesystem's name, refusing one that is empty, reserved or taken. */
+  const promptNewFilesystemName = async (suggestion: string, title = 'Name the new filesystem'): Promise<string | null> => {
+    const names = (await listFilesystems()).map(f => f.name)
+    const name = await dialogs.prompt({
+      title,
+      message: 'What should it be called?',
+      defaultValue: uniqueFilesystemName(suggestion, names),
+      confirmLabel: 'Create',
+      validate: value => validateFilesystemName(value, names),
+    })
+    return name === null ? null : name.trim()
+  }
+
+  /** Switch the editor to a filesystem that has just been filled, and open a file in it. */
+  const showFilesystem = async (fsId: string, openPath: string | null, status: string): Promise<string | null> => {
+    if (!handleFilesystemForcedChange(fsId)) return 'Could not switch to the shared code.'
+    setVfsReloadTrigger(t => t + 1)
+    revealFilesystemPanel()
+    await autoOpenFile(fsId, openPath ?? '/main.py')
+    setCodeStatus(status)
+    return null
+  }
+
+  /** The file to open first among shared files: main.py, else the first .py, else the first. */
+  const firstSharedFile = (paths: string[]) =>
+    paths.length === 0 || paths.includes('/main.py') ? '/main.py' : paths.find(p => p.endsWith('.py')) ?? paths[0]
+
+  /**
+   * Reset a filesystem connected to an online address back to what is there
+   * now, after a warning. Returns false when nothing changed.
+   */
+  const resetFilesystemToSource = async (fs: VFSFilesystem, fetched?: Map<string, ArrayBuffer>): Promise<boolean> => {
+    const source = fs.source
+    if (!source) return false
+    let files = fetched
+    if (!files) {
+      try {
+        files = (await fetchSharedFiles(source.url, { name: source.name })).files
+      } catch (e) {
+        setCodeStatus(`Could not reach the online version: ${e instanceof Error ? e.message : String(e)}`)
+        return false
+      }
+    }
+    const confirmed = await dialogs.confirm({
+      title: 'Reset to the online version?',
+      message: `Everything in “${filesystemLabel(fs)}” will be replaced by the online version.`,
+      detail: 'Changes you have made here will be lost.',
+      confirmLabel: 'Reset',
+      danger: true,
+    })
+    if (!confirmed) return false
+    await replaceFilesystemContents(fs.id, files)
+    await updateFilesystemMeta(fs.id, { source: { ...source, digest: sharedFilesDigest(files) } })
+    if (fs.id === activeFilesystemId) {
+      savedCodeRef.current = ''
+      setIsUnsaved(false)
+      await showFilesystem(fs.id, firstSharedFile([...files.keys()]), 'Reset to the online version.')
+    }
+    setVfsReloadTrigger(t => t + 1)
+    return true
+  }
+
+  /** The File System panel's refresh icon. */
+  const handleResetToSource = async () => {
+    if (!canSwitchCodeSource()) return
+    if (bookNavState?.activeChallengeId && activeBookChallenge) {
+      // Inside a book activity the "online version" is the book's own.
+      const confirmed = await dialogs.confirm({
+        title: 'Reset this activity?',
+        message: `“${activeBookChallenge.name}” goes back to the book's version.`,
+        detail: 'Changes you have made to it will be lost.',
+        confirmLabel: 'Reset',
+        danger: true,
+      })
+      if (confirmed) await handleEnterChallenge(bookNavState.currentBookUrl, bookNavState.rootUrl, activeBookChallenge, true)
+      return
+    }
+    const fs = await getFilesystem(activeFilesystemId)
+    if (fs?.source) await resetFilesystemToSource(fs)
+  }
+
+  /**
+   * Open code kept at an online address (`?filesystem=`). The copy stays
+   * connected to the address: the first visit makes it, a later one asks
+   * whether to resume it or reset it to what is online now.
+   * Returns why it could not open, or null once something is on screen.
+   */
+  const openSharedFilesystemUrl = async (
+    url: string, name?: string, prefetched?: Map<string, ArrayBuffer>,
+  ): Promise<string | null> => {
+    const all = await listFilesystems()
+    const existing = all.find(f => f.source?.url === url) ?? all.find(f => f.name === url && !f.source)
+    let fetched: Map<string, ArrayBuffer> | null = prefetched ?? null
+    let fetchError = ''
+    if (!fetched) try {
+      fetched = (await fetchSharedFiles(url, { name })).files
+    } catch (e) {
+      fetchError = e instanceof Error ? e.message : String(e)
+    }
+
+    if (!existing) {
+      if (!fetched) return `Could not open the shared code: ${fetchError}`
+      const label = uniqueFilesystemName(name ?? addressLabel(url), all.map(f => f.name))
+      const fsId = await createFilesystemFromFiles(label, fetched, {
+        source: { url, name, digest: sharedFilesDigest(fetched) },
+      })
+      return showFilesystem(fsId, firstSharedFile([...fetched.keys()]),
+        `Opened “${label}”. It is your own copy, connected to where it was shared from.`)
+    }
+
+    if (!fetched) {
+      return showFilesystem(existing.id, '/main.py',
+        `Could not reach the shared code (${fetchError}) — opened your saved copy instead.`)
+    }
+
+    const digest = sharedFilesDigest(fetched)
+    const record: VFSFilesystem = existing.source ? existing : { ...existing, source: { url, name, digest } }
+    if (!existing.source) await updateFilesystemMeta(existing.id, { source: record.source })
+    const changed = !!existing.source && existing.source.digest !== digest
+    const choice = await dialogs.choose({
+      title: 'You have opened this before',
+      message: `You already have a copy of this in “${filesystemLabel(existing)}”.`,
+      detail: changed ? 'The online version has changed since you last loaded it.' : undefined,
+      buttons: [
+        { label: 'Reset to the online version', value: 'reset', tone: 'danger' },
+        { label: 'Resume my copy', value: 'resume', tone: 'primary' },
+      ],
+    })
+    if (choice === 'reset' && await resetFilesystemToSource(record, fetched)) {
+      return showFilesystem(existing.id, firstSharedFile([...fetched.keys()]), 'Reset to the online version.')
+    }
+    const paths = (await getAllFiles(existing.id)).map(f => f.path)
+    return showFilesystem(existing.id, firstSharedFile(paths), `Opened your copy of “${filesystemLabel(existing)}”.`)
+  }
+
+  /** Make this tab's temporary filesystem, replacing the one it had. */
+  const createTemporaryFilesystem = async (label: string, files: Map<string, ArrayBuffer>): Promise<string> => {
+    const session = currentSession()
+    for (const fs of await listFilesystems()) {
+      if (fs.temporary?.session === session) await deleteFilesystem(fs.id)
+    }
+    return createFilesystemFromFiles(label, files, { temporary: { session } })
+  }
+
+  /**
+   * Open shared code inside the learning book it came from: open the book, put
+   * the code in the activity's file, and enter the activity. The recipient's
+   * own work on that activity is replaced only after they agree.
+   */
+  const openSharedCodeInBook = async (book: SharedBookContext, files: Map<string, ArrayBuffer>): Promise<string | null> => {
+    const code = [...files.values()][0]
+    if (!code) return 'The shared code holds no file.'
+    const rootUrl = await openResourceUrl(book.url, { simple: book.simple })
+    if (!rootUrl) return 'Could not open the learning book the code belongs to.'
+    const target = await findBookTargetById(rootUrl, book.activity).catch(() => null)
+    if (!target || target.kind !== 'challenge' || !target.challenge) {
+      return 'The book is open, but it no longer has the activity the code was shared from.'
+    }
+    const hasOwnWork = (await listFilesystems()).some(f => isChallengeFsName(f.name, book.activity))
+    if (hasOwnWork) {
+      const replace = await dialogs.confirm({
+        title: 'Replace your work?',
+        message: `You have already worked on “${target.challenge.name}”.`,
+        detail: 'Putting the shared code there replaces what you have in that activity.',
+        confirmLabel: 'Replace it',
+        cancelLabel: 'Keep mine',
+        danger: true,
+      })
+      if (!replace) {
+        await handleOpenBookTarget(rootUrl, book.activity)
+        return null
+      }
+    }
+    const { fsId, pyFilename } = await getOrCreateChallengeFs(target.bookUrl, rootUrl, target.challenge)
+    await writeFile(fsId, `/${pyFilename}`, code)
+    await handleOpenBookTarget(rootUrl, book.activity)
+    setCodeStatus(`Opened the shared code in “${target.challenge.name}”.`)
+    return null
+  }
+
+  /**
+   * A link that holds a whole learning book (shared by its author in edit
+   * mode): open it as a book, from a temporary copy or a saved one.
+   */
+  const openEmbeddedBook = async (files: Map<string, ArrayBuffer>): Promise<{ opened: boolean; problem?: string }> => {
+    let title = 'a learning book'
+    try {
+      const manifest = JSON.parse(new TextDecoder().decode(files.get('/book.json'))) as BookManifest
+      if (manifest.name) title = `the learning book “${manifest.name}”`
+    } catch { /* the book itself will say what is wrong */ }
+    const choice = await dialogs.choose({
+      title: 'Open shared code',
+      message: `Someone has shared ${title} with you.`,
+      detail: 'Open it for now — it is lost when you close this tab — or save a copy of its files to keep.',
+      buttons: [
+        { label: 'Cancel', value: 'cancel', tone: 'neutral' },
+        { label: 'Save a copy of its files', value: 'new', tone: 'neutral' },
+        { label: 'Open the learning book', value: 'temporary', tone: 'primary' },
+      ],
+    })
+    let fsId: string
+    if (choice === 'new') {
+      const name = await promptNewFilesystemName(title.replace(/^the learning book “|”$|^a learning book$/g, '') || 'Shared book')
+      if (!name) return { opened: false }
+      fsId = await createFilesystemFromFiles(name, files)
+    } else if (choice === 'temporary') {
+      fsId = await createTemporaryFilesystem('Shared book', files)
+    } else {
+      return { opened: false }
+    }
+    setVfsReloadTrigger(t => t + 1)
+    const opened = await handleBookOpen(`vfs://fs:${fsId}/book.json`)
+    revealFilesystemPanel()
+    return opened ? { opened: true } : { opened: false, problem: 'The shared learning book could not be opened.' }
+  }
+
+  /** The book option in a shared-code question, when the link carries a book. */
+  const bookChoice = (book: SharedBookContext | undefined | null) => book
+    ? [{ label: `Open it in the learning book${book.title ? ` “${book.title}”` : ''}`, value: 'book', tone: 'primary' as const }]
+    : []
+
+  /**
+   * Open code carried inside a `#share=` link. Nothing is remembered about the
+   * link: each visit asks whether to keep it as a new filesystem or to work on
+   * it in a temporary one.
+   */
+  const openEmbeddedShare = async (encoded: string): Promise<{ opened: boolean; problem?: string }> => {
+    let payload
+    try {
+      payload = await decodeSharePayload(encoded)
+    } catch (e) {
+      return { opened: false, problem: `Could not open the shared code: ${e instanceof Error ? e.message : String(e)}` }
+    }
+    const files = payloadFileMap(payload)
+    if (payload.isBook && files.has('/book.json')) return openEmbeddedBook(files)
+    const openName = payload.open.slice(payload.open.lastIndexOf('/') + 1)
+    const choice = await dialogs.choose({
+      title: 'Open shared code',
+      message: `Someone has shared ${describeSharedFiles(files)} with you.`,
+      detail: 'Keep it as a new filesystem of your own, or try it in a temporary one that is lost when you close this tab.',
+      buttons: [
+        { label: 'Cancel', value: 'cancel', tone: 'neutral' },
+        { label: 'Use a temporary filesystem', value: 'temporary', tone: 'neutral' },
+        { label: 'Save as a new filesystem', value: 'new', tone: 'primary' },
+        ...bookChoice(payload.book),
+      ],
+    })
+    let fsId: string
+    let status: string
+    if (choice === 'book' && payload.book) {
+      const problem = await openSharedCodeInBook(payload.book, files)
+      return problem ? { opened: false, problem } : { opened: true }
+    }
+    if (choice === 'new') {
+      const name = await promptNewFilesystemName(openName.replace(/\.py$/i, '') || 'Shared code')
+      if (!name) return { opened: false }
+      fsId = await createFilesystemFromFiles(name, files)
+      status = `Saved the shared code as “${name}”.`
+    } else if (choice === 'temporary') {
+      fsId = await createTemporaryFilesystem(openName || 'shared code', files)
+      status = 'Opened the shared code in a temporary filesystem.'
+    } else {
+      return { opened: false }
+    }
+    const problem = await showFilesystem(fsId, payload.open, status)
+    return problem ? { opened: false, problem } : { opened: true }
+  }
+
+  /** The temporary bar's Keep button: give the filesystem a name and keep it. */
+  const keepTemporaryFilesystem = async () => {
+    const fs = await getFilesystem(activeFilesystemId)
+    if (!fs?.temporary) return
+    const name = await promptNewFilesystemName(fs.name.replace(/\.py$/i, ''), 'Keep as a new filesystem')
+    if (!name) return
+    await updateFilesystemMeta(fs.id, { name, temporary: undefined })
+    setVfsReloadTrigger(t => t + 1)
+    setCodeStatus(`Kept as “${name}”.`)
+  }
+
+  // A `#share=` link pasted into a tab that is already open changes only the
+  // fragment, which reloads nothing — so it is listened for.
+  const shareHashHandlerRef = useRef<() => void>(() => {})
+  shareHashHandlerRef.current = () => {
+    const encoded = readShareFragment(window.location.hash)
+    if (!encoded || !canSwitchCodeSource()) return
+    void (async () => {
+      if (!(await settleUnsavedBeforeSwitch('Open shared code'))) return
+      const { problem } = await openEmbeddedShare(encoded)
+      if (problem) setCodeStatus(problem)
+    })()
+  }
+  useEffect(() => {
+    const onHashChange = () => shareHashHandlerRef.current()
+    window.addEventListener('hashchange', onHashChange)
+    return () => window.removeEventListener('hashchange', onHashChange)
+  }, [])
+
   /**
    * Import a folder or ZIP from disk. Returns the filesystem it landed in, or
    * null when it was a full learning book (opened straight away) or the import
@@ -3886,18 +4335,20 @@ export default function App() {
     await handleBookOpen(rootUrl)
   }
 
-  const handleLocalFileImport = async (
-    fileMap: Map<string, ArrayBuffer>, sourceName: string, opts: { simple?: boolean } = {},
-  ) => {
+  /** A local ZIP or folder with numbered exercises and no book.json is a simple learning book. */
+  const holdsSimpleBook = (fileMap: Map<string, ArrayBuffer>) =>
+    !fileMap.has('book.json') && !fileMap.has('/book.json') && (fileMap.has('01.py') || fileMap.has('/01.py'))
+
+  const handleLocalFileImport = async (fileMap: Map<string, ArrayBuffer>, sourceName: string) => {
     if (!canSwitchCodeSource()) return
     try {
       const fsId = await importLocalFiles(fileMap, sourceName)
-      if (opts.simple && fsId) await openSimpleBookFromFilesystem(fsId)
+      if (fsId && holdsSimpleBook(fileMap)) await openSimpleBookFromFilesystem(fsId)
     }
     catch (e) { setCodeStatus(`Import failed: ${e instanceof Error ? e.message : String(e)}`) }
   }
 
-  const handleFolderConnect = async (handle: FileSystemDirectoryHandle, opts: { simple?: boolean } = {}) => {
+  const handleFolderConnect = async (handle: FileSystemDirectoryHandle) => {
     try {
       const perm = await handle.requestPermission({ mode: 'readwrite' })
       if (perm !== 'granted') { setCodeStatus('Folder permission denied.'); return }
@@ -3910,7 +4361,7 @@ export default function App() {
       setLocalFolderFsId(fsId)
       setDiskDeleteWarnDismissed(false)
       setCodeStatus(`Connected to local folder "${handle.name}" — changes now save back to disk.`)
-      if (opts.simple) await openSimpleBookFromFilesystem(fsId)
+      if (holdsSimpleBook(fileMap)) await openSimpleBookFromFilesystem(fsId)
     } catch (e) { setCodeStatus(`Folder connect failed: ${e instanceof Error ? e.message : String(e)}`) }
   }
 
@@ -5516,6 +5967,20 @@ ${runProgramPython('exec(code_obj, globals())')}
         </div>
       </div>
 
+      {/* A temporary filesystem (code opened from a link) is lost with the tab. */}
+      {activeFsRecord?.temporary && (
+        <div role="region" aria-label="Temporary filesystem"
+          className="flex-shrink-0 flex flex-wrap items-center justify-between gap-3 border-b border-amber-500/50 bg-amber-500/10 px-5 py-2 text-sm">
+          <span className="dialog-warning-text text-amber-300 min-w-0">
+            <strong>Temporary filesystem.</strong> “{filesystemLabel({ name: activeFsRecord.name })}” is lost when you close this tab.
+          </span>
+          <button type="button" onClick={() => void keepTemporaryFilesystem()}
+            className="rounded bg-amber-600 hover:bg-amber-500 px-3 py-1 text-xs font-bold text-white transition-colors flex-shrink-0">
+            Keep as a new filesystem
+          </button>
+        </div>
+      )}
+
       {/* New version available banner */}
       {updateAvailable && (
         <div className="flex-shrink-0 flex items-center justify-between gap-3 border-b border-emerald-600/60 bg-emerald-900/40 px-5 py-2 text-sm text-emerald-100">
@@ -5740,7 +6205,7 @@ ${runProgramPython('exec(code_obj, globals())')}
                             isChallengeMode={!!bookNavState?.activeChallengeId}
                             isBookOpen={!!bookNavState}
                             onCloseBook={handleCloseBook}
-                            onOpenResourceUrl={(url, opts) => void openResourceUrl(url, opts)}
+                            onOpenResourceUrl={url => void openResourceUrl(url)}
                             onFilesystemChange={id => void handleFilesystemChange(id)}
                             onFilesystemForcedChange={handleFilesystemForcedChange}
                             onFilesystemCreated={id => void handleFilesystemCreated(id)}
@@ -5749,10 +6214,14 @@ ${runProgramPython('exec(code_obj, globals())')}
                             onBeforeNewFile={handleBeforeNewFile}
                             onOpenNewFile={entry => void onOpenVFSFile(entry, { unsavedSettled: true })}
                             onPreviewHtml={entry => void handlePreviewHtml(entry)}
+                            onShare={(scope, path) => void openShareDialog({ scope, path })}
+                            shareBook={isBookEditMode}
+                            onResetToSource={activeFsRecord?.source || bookNavState?.activeChallengeId
+                              ? () => void handleResetToSource() : undefined}
                             onError={msg => setCodeStatus(msg)}
                             onBookOpen={url => void handleBookOpen(url)}
-                            onLocalFileImport={(m, n, o) => handleLocalFileImport(m, n, o)}
-                            onFolderConnect={(h, o) => handleFolderConnect(h, o)}
+                            onLocalFileImport={(m, n) => handleLocalFileImport(m, n)}
+                            onFolderConnect={h => handleFolderConnect(h)}
                             isLocalFolderConnected={localFolderFsId === activeFilesystemId}
                             onLocalFolderSync={op => syncToLocalFolder(op)}
                             onReloadFolder={() => void handleReloadFolder()}
@@ -5992,6 +6461,13 @@ ${runProgramPython('exec(code_obj, globals())')}
                     <IconButton title="Save to virtual filesystem" onClick={() => void handleSaveCode()} disabled={!hasCode || isRunning}>
                       <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2zM17 21v-8H7v8M7 3v5h8" />
+                      </svg>
+                    </IconButton>
+                    )}
+                    {!isBookEditMode && (
+                    <IconButton title="Share your code" onClick={() => void openShareDialog({ scope: 'file' })}>
+                      <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8.684 13.342C8.886 12.938 9 12.482 9 12s-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" />
                       </svg>
                     </IconButton>
                     )}
@@ -6482,6 +6958,7 @@ ${runProgramPython('exec(code_obj, globals())')}
                   onOpenJsonEditor={handleOpenBookJsonEditor}
                   onVerifyAll={() => void handleVerifyAllSolutions()}
                   onCreateStudentLink={() => setStudentLinkRequest({ source: null, targetId: null })}
+                  onShareBook={() => void openShareDialog()}
                   />
                 </div>
                 {lastRightSection !== 'teacher' && (
@@ -6524,10 +7001,22 @@ ${runProgramPython('exec(code_obj, globals())')}
         />
       )}
 
+      {shareSource && (
+        <ShareCodeDialog
+          source={shareSource}
+          bookEditMode={isBookEditMode}
+          onOpenStudentLinks={() => setStudentLinkRequest({ source: null, targetId: null })}
+          onContinueToStudentLink={found => setStudentLinkRequest({
+            source: null, targetId: null, pending: { type: 'book', url: found.url, label: found.label },
+          })}
+          onClose={() => setShareSource(null)}
+        />
+      )}
       {studentLinkRequest && (
         <StudentLinkDialog
           initialSource={studentLinkRequest.source}
           initialTargetId={studentLinkRequest.targetId}
+          pending={studentLinkRequest.pending}
           onExportZip={bookEditSession ? () => void handleExportBookZip() : null}
           onClose={() => setStudentLinkRequest(null)}
         />

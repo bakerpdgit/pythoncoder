@@ -280,7 +280,7 @@ export interface SimpleBookExercise {
  * would end the book at 99 exercises, 97 of them holding a copy of somebody's
  * HTML. No exercise or instructions file opens `<!doctype html>`.
  */
-function looksLikeWebPage(payload: ArrayBuffer): boolean {
+export function looksLikeWebPage(payload: ArrayBuffer): boolean {
   const head = new TextDecoder().decode(payload.slice(0, 200)).trimStart().toLowerCase()
   return head.startsWith('<!doctype html') || head.startsWith('<html')
 }

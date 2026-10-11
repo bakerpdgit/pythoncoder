@@ -3,6 +3,7 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import type { InputRequest } from '../types'
+import { copyTextToClipboard } from '../utils/clipboard'
 
 export interface ConsoleTerminalHandle {
   write: (text: string) => void
@@ -14,34 +15,10 @@ export interface ConsoleTerminalHandle {
   getAllText: () => string
 }
 
-/**
- * Put text on the clipboard.
- *
- * `navigator.clipboard` needs a secure context and can be refused outright, so
- * the old `execCommand` route stays as a fallback — students on a school
- * network are exactly the people most likely to hit a blocked permission.
- */
-export async function copyTextToClipboard(text: string): Promise<boolean> {
-  if (!text) return false
-  try {
-    await navigator.clipboard.writeText(text)
-    return true
-  } catch { /* fall through */ }
-  try {
-    const area = document.createElement('textarea')
-    area.value = text
-    area.setAttribute('readonly', '')
-    area.style.position = 'fixed'
-    area.style.opacity = '0'
-    document.body.appendChild(area)
-    area.select()
-    const ok = document.execCommand('copy')
-    document.body.removeChild(area)
-    return ok
-  } catch {
-    return false
-  }
-}
+// Lives in utils so the share dialogs can use it without pulling in xterm;
+// re-exported here for the callers and the test that already import it from
+// the console.
+export { copyTextToClipboard }
 
 interface Props {
   inputRequest: InputRequest | null

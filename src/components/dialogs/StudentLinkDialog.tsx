@@ -2,14 +2,14 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { BookChild, BookManifest } from '../../types'
 import { fetchBookManifest, findBookTargetById, isBookRef, resolveBookShareSource, resolveBookUrl } from '../../utils/bookLoader'
 import { githubRepositoryBookUrl } from '../../utils/bookSource'
-import { isBookFileName, parseGitHubLocation } from '../../utils/githubRepo'
+import { detectResourceKind } from '../../utils/resourceKind'
 import { isSimpleBookUrl, simpleBookRootUrl } from '../../utils/simpleBook'
-import { getStoredGitHubToken } from '../../utils/storage'
 import { fetchTutorialCatalog, type LearningTutorial } from '../../utils/tutorialCatalog'
 import type { WorkerRunMode } from '../../utils/urlRunMode'
-import { GitHubRepoBrowser, type RepoSelection } from './GitHubRepoBrowser'
-import { SimpleBookCheckbox } from './SimpleBookOption'
-import { ShareLinkRow, inputClass, primaryBtnClass, secondaryBtnClass } from './webWizardShared'
+import { createFilesystemFromFiles, deleteFilesystem, listFilesystems } from '../../utils/virtualFS'
+import { ResourceFinder, type FoundResource } from './ResourceFinder'
+import { SimpleBookInfoButton } from './SimpleBookOption'
+import { BigButton, ShareLinkRow, inputClass, primaryBtnClass, secondaryBtnClass } from './webWizardShared'
 
 // Build a link a teacher can hand to students: to a whole learning book, or to
 // one activity/section inside it. Reached from the Teacher Tools panel (with no
@@ -34,6 +34,8 @@ interface Props {
   onClose: () => void
   /** Passed only while a book edit session is open, for the publish instructions. */
   onExportZip?: (() => void) | null
+  /** A book just put online (Share, in book edit mode): checked, then linked. */
+  pending?: PendingBookResource | null
 }
 
 // ── Target tree ─────────────────────────────────────────────────────────────
@@ -69,7 +71,7 @@ function updateNode(nodes: TreeNode[], id: string, patch: Partial<TreeNode>): Tr
 
 // ── Component ───────────────────────────────────────────────────────────────
 
-export function StudentLinkDialog({ initialSource, initialTargetId, onClose, onExportZip }: Props) {
+export function StudentLinkDialog({ initialSource, initialTargetId, onClose, onExportZip, pending }: Props) {
   const [source, setSource] = useState<StudentLinkSource | null>(initialSource ?? null)
   const [resolving, setResolving] = useState(false)
   /** The public URL to link to; null once resolved means "cannot be linked yet". */
@@ -196,7 +198,7 @@ export function StudentLinkDialog({ initialSource, initialTargetId, onClose, onE
 
   // ── Source picker ─────────────────────────────────────────────────────────
   if (!source) {
-    return shell(<SourcePicker onPick={s => { setSource(s); setMode(s.mode ?? '') }} onClose={onClose} />)
+    return shell(<SourcePicker pending={pending} onPick={s => { setSource(s); setMode(s.mode ?? '') }} onClose={onClose} />)
   }
 
   const header = (
@@ -277,9 +279,7 @@ export function StudentLinkDialog({ initialSource, initialTargetId, onClose, onE
           <div className="font-semibold text-red-100">No learning book here.</div>
           <div className="mt-1">{treeError}</div>
           <div className="mt-1.5 text-red-200/80">
-            Choose another book and point at the <code className="font-mono">book.json</code> or ZIP inside
-            the repository — or, if this is a plain folder of <code className="font-mono">.py</code> exercises,
-            tick &ldquo;simple learning book&rdquo; when you choose it.
+            Choose another book, and choose the folder or ZIP that holds its <code className="font-mono">book.json</code>.
           </div>
         </div>
       ) : (
@@ -297,106 +297,172 @@ export function StudentLinkDialog({ initialSource, initialTargetId, onClose, onE
 
 // ── Source picker view ──────────────────────────────────────────────────────
 
-function SourcePicker({ onPick, onClose }: { onPick: (s: StudentLinkSource) => void; onClose: () => void }) {
+export type BookLinkType = 'tutorial' | 'book' | 'simple'
+
+/** A book found online that still has to be checked, e.g. one just uploaded from Share. */
+export interface PendingBookResource {
+  type: 'book' | 'simple'
+  url: string
+  label: string
+}
+
+/**
+ * Turn an address into a link source, if it holds the kind of book asked for.
+ * A ZIP book is unpacked into a filesystem named after its address — exactly
+ * as opening it would — so its contents can be browsed for a target, and the
+ * link still names the ZIP.
+ */
+async function checkBookResource(type: 'book' | 'simple', found: FoundResource): Promise<StudentLinkSource> {
+  const kind = await detectResourceKind(found.url)
+  if (type === 'simple') {
+    if (kind.kind === 'simple') return { rootUrl: simpleBookRootUrl(kind.source), label: `${found.label} (simple learning book)` }
+    throw new Error(kind.kind === 'book' || kind.kind === 'zip-book'
+      ? 'This has a book.json, so it is a learning book, not a simple one — go Back and choose “My learning book”.'
+      : 'No 01.py here. A simple learning book is a folder or ZIP of numbered exercises: 01.py, 02.py, …')
+  }
+  if (kind.kind === 'book') return { rootUrl: kind.url, label: found.label }
+  if (kind.kind === 'zip-book') {
+    const existing = (await listFilesystems()).find(f => f.name === kind.url)
+    if (existing) await deleteFilesystem(existing.id)
+    const fsId = await createFilesystemFromFiles(kind.url, kind.files)
+    return { rootUrl: `vfs://fs:${fsId}/book.json`, label: found.label }
+  }
+  throw new Error(kind.kind === 'simple'
+    ? 'No book.json here, but there is a 01.py — go Back and choose “My simple learning book”.'
+    : 'No book.json here. Choose the folder or ZIP that holds it.')
+}
+
+const TYPE_PROMPTS: Record<BookLinkType | 'none', string> = {
+  none: 'What is the link to? You do not need to open the book first.',
+  tutorial: 'Which of this site’s tutorials?',
+  book: 'Where is your learning book? Choose the folder or ZIP holding its book.json.',
+  simple: 'Where is your simple learning book? Choose the folder or ZIP holding 01.py, 02.py, …',
+}
+
+function SourcePicker({ onPick, onClose, pending }: {
+  onPick: (s: StudentLinkSource) => void
+  onClose: () => void
+  pending?: PendingBookResource | null
+}) {
+  const [type, setType] = useState<BookLinkType | null>(pending?.type ?? null)
   const [catalog, setCatalog] = useState<LearningTutorial[] | null>(null)
   const [catalogError, setCatalogError] = useState('')
-  const [url, setUrl] = useState('')
-  const [simple, setSimple] = useState(false)
-  const [selection, setSelection] = useState<RepoSelection | null>(null)
+  const [tutorialIndex, setTutorialIndex] = useState('')
+  const [found, setFound] = useState<FoundResource | null>(pending ? { url: pending.url, label: pending.label } : null)
+  const [checking, setChecking] = useState(false)
+  const [problem, setProblem] = useState('')
 
   useEffect(() => {
+    if (type !== 'tutorial' || catalog) return
     const controller = new AbortController()
     void fetchTutorialCatalog(controller.signal)
       .then(setCatalog)
       .catch(e => { if (!controller.signal.aborted) setCatalogError(e instanceof Error ? e.message : String(e)) })
     return () => controller.abort()
-  }, [])
+  }, [type, catalog])
 
-  const pasted = url.trim()
-  const pastedValid = /^https?:\/\//i.test(pasted)
-  const location = pastedValid ? parseGitHubLocation(pasted) : null
-  // A repository or folder address has to be browsed; a file address does not.
-  const repoStart = location && !location.isFile ? location : null
+  const check = async (kind: 'book' | 'simple', resource: FoundResource) => {
+    setChecking(true); setProblem('')
+    try {
+      onPick(await checkBookResource(kind, resource))
+    } catch (e) {
+      setProblem(e instanceof Error ? e.message : String(e))
+    } finally { setChecking(false) }
+  }
 
-  const chosenUrl = repoStart
-    ? (selection && (simple ? selection.kind === 'folder' : selection.kind !== 'folder') ? selection.url : null)
-    : (pastedValid ? pasted : null)
+  // Something found elsewhere (Share, for a book being edited) is checked at once.
+  const checkedPending = useRef(false)
+  useEffect(() => {
+    if (!pending || checkedPending.current) return
+    checkedPending.current = true
+    void check(pending.type, { url: pending.url, label: pending.label })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pending])
 
-  const lastSegment = (chosenUrl ?? pasted).split('?')[0].split('/').pop() ?? ''
-  const hint = repoStart
-    ? (selection
-        ? (simple && selection.kind !== 'folder' ? 'Choose a folder — a simple learning book has no book.json to point at.'
-          : !simple && selection.kind === 'folder' ? 'Choose a book.json or a ZIP, or tick “simple learning book” above.'
-          : '')
-        : simple ? 'Open the folder holding the .py exercises, then choose “Use this folder as the book”.'
-        : 'Choose the book.json or ZIP inside this repository.')
-    : !chosenUrl ? ''
-    : simple && !/\.zip$/i.test(lastSegment) && !pasted.endsWith('/') ? 'A simple learning book from another host is either a ZIP of the folder, or the folder’s own address.'
-    : !simple && !isBookFileName(lastSegment) ? 'That address is neither a book.json nor a ZIP — check it opens a book before handing the link out.'
-    : ''
+  const heading = (
+    <div className="mb-3">
+      <div className="text-sm font-bold text-white mb-1">Create a student link</div>
+      <p className="text-slate-400 leading-relaxed">{TYPE_PROMPTS[type ?? 'none']}</p>
+    </div>
+  )
 
-  const use = (rootUrl: string) => onPick({
-    rootUrl: simple ? simpleBookRootUrl(rootUrl) : rootUrl,
-    label: simple ? `${rootUrl} (simple learning book)` : rootUrl,
-  })
+  if (type === null) {
+    return (
+      <>
+        {heading}
+        <div className="flex flex-col gap-2">
+          <BigButton testId="link-type-tutorial" title="A tutorial on this site" desc="One of the learning books that come with Coder."
+            icon={<path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />}
+            onClick={() => setType('tutorial')} />
+          <BigButton testId="link-type-book" title="My learning book" desc="A book you have made, with a book.json — on GitHub, Google Drive or elsewhere."
+            icon={<path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />}
+            onClick={() => setType('book')} />
+          <div className="relative">
+            <BigButton testId="link-type-simple" title="My simple learning book" desc="A folder or ZIP of numbered exercises — 01.py, 02.py, … — and no book.json."
+              icon={<path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 6h16M4 10h16M4 14h16M4 18h16" />}
+              onClick={() => setType('simple')} />
+            <div className="absolute right-3 top-3"><SimpleBookInfoButton /></div>
+          </div>
+        </div>
+        <div className="flex justify-end mt-4">
+          <button type="button" onClick={onClose} className={secondaryBtnClass}>Cancel</button>
+        </div>
+      </>
+    )
+  }
+
+  const back = () => { setType(null); setFound(null); setProblem('') }
+
+  if (type === 'tutorial') {
+    const tutorial = catalog && tutorialIndex !== '' ? catalog[Number(tutorialIndex)] : null
+    return (
+      <>
+        {heading}
+        {catalogError ? (
+          <div className="rounded border border-red-500/30 bg-red-950/20 px-3 py-2 text-red-200">
+            Could not load the list of tutorials: {catalogError}
+          </div>
+        ) : !catalog ? (
+          <div className="text-slate-500 px-2 py-2">Loading…</div>
+        ) : (
+          <select aria-label="Tutorial" value={tutorialIndex} onChange={e => setTutorialIndex(e.target.value)}
+            className="w-full bg-slate-900 border border-slate-600 rounded px-2 py-2 text-xs text-slate-200 focus:outline-none focus:ring-1 focus:ring-sky-400">
+            <option value="">Choose a tutorial…</option>
+            {catalog.map((t, i) => <option key={t.book ?? t.github} value={i}>{t.name}</option>)}
+          </select>
+        )}
+        <div className="flex justify-between mt-4">
+          <button type="button" onClick={back} className={secondaryBtnClass}>Back</button>
+          <button type="button" disabled={!tutorial} className={primaryBtnClass}
+            onClick={() => tutorial && onPick({
+              rootUrl: tutorial.book ?? githubRepositoryBookUrl(tutorial.github),
+              label: tutorial.name,
+              mode: tutorial.mode,
+            })}>
+            Next
+          </button>
+        </div>
+      </>
+    )
+  }
 
   return (
     <>
-      <div className="mb-3">
-        <div className="text-sm font-bold text-white mb-1">Create a student link</div>
-        <p className="text-slate-400 leading-relaxed">
-          Which learning book? You do not need to open it first.
-        </p>
-      </div>
-
-      <div className="text-[11px] uppercase tracking-wider text-slate-500 mb-1">Learning books</div>
-      {catalogError ? (
-        <div className="rounded border border-red-500/30 bg-red-950/20 px-3 py-2 text-red-200">
-          Could not load the book list: {catalogError}
-        </div>
-      ) : !catalog ? (
-        <div className="text-slate-500 px-2 py-2">Loading…</div>
-      ) : (
-        <div className="max-h-44 overflow-y-auto rounded border border-slate-700 divide-y divide-slate-800">
-          {catalog.map(tutorial => (
-            <button key={tutorial.book ?? tutorial.github} type="button"
-              onClick={() => onPick({
-                rootUrl: tutorial.book ?? githubRepositoryBookUrl(tutorial.github),
-                label: tutorial.name,
-                mode: tutorial.mode,
-              })}
-              className="w-full text-left px-2 py-1.5 text-slate-300 hover:bg-slate-700 hover:text-emerald-300 transition-colors">
-              {tutorial.name}
-            </button>
-          ))}
+      {heading}
+      <ResourceFinder selected={found} onSelect={next => { setFound(next); setProblem('') }}
+        driveNote="Share the book's ZIP with “Anyone with the link”. A folder on Drive cannot be used — share a ZIP of it." />
+      {checking && <div className="text-slate-500 mt-2">Checking what is there…</div>}
+      {problem && (
+        <div role="alert" className="mt-2 rounded border border-red-500/40 bg-red-950/30 px-2.5 py-2 text-[11px] leading-relaxed text-red-200">
+          {problem}
         </div>
       )}
-
-      <div className="text-[11px] uppercase tracking-wider text-slate-500 mt-3 mb-1">Or a book at any public URL</div>
-      <div className="flex gap-2">
-        <input type="url" value={url}
-          onChange={e => { setUrl(e.target.value); setSelection(null) }}
-          onKeyDown={e => { if (e.key === 'Enter' && chosenUrl) use(chosenUrl) }}
-          placeholder="https://github.com/you/your-repo — or a link to a book.json / ZIP"
-          className={inputClass} />
-        <button type="button" disabled={!chosenUrl}
-          onClick={() => chosenUrl && use(chosenUrl)}
-          className={primaryBtnClass}>Use</button>
-      </div>
-
-      <SimpleBookCheckbox checked={simple} onChange={v => { setSimple(v); setSelection(null) }} />
-
-      {/* A repository address names no book file, so look inside it rather than
-          building a link that would open to "Cannot parse book.json". */}
-      {repoStart && (
-        <GitHubRepoBrowser start={repoStart} token={getStoredGitHubToken()} allowFolder={simple}
-          selected={selection} onSelect={setSelection} />
-      )}
-
-      {hint && <div className="dialog-warning-text mt-2 text-[11px] text-amber-300">{hint}</div>}
-
-      <div className="flex justify-end mt-4">
-        <button type="button" onClick={onClose} className={secondaryBtnClass}>Cancel</button>
+      <div className="flex justify-between mt-4">
+        <button type="button" onClick={back} className={secondaryBtnClass}>Back</button>
+        <button type="button" disabled={!found || checking} className={primaryBtnClass}
+          onClick={() => found && void check(type, found)}>
+          Next
+        </button>
       </div>
     </>
   )
@@ -441,8 +507,8 @@ function PublishHelp({ onExportZip }: { onExportZip?: (() => void) | null }) {
           <div className="text-slate-100 font-semibold">2. A ZIP on any public host</div>
           <p className="text-slate-400 leading-relaxed mt-0.5">
             A student link can point at a book ZIP just as well as a <code className="book-inline-code font-mono px-1 rounded">book.json</code> —
-            upload it to a repo, a release, or your school web space, then come back and paste
-            its address into &ldquo;Or a book at any public URL&rdquo;.
+            upload it to a repo, a release, or your school web space, then come back, choose another
+            book and pick &ldquo;My learning book&rdquo;.
           </p>
           {onExportZip && (
             <button type="button" onClick={onExportZip}

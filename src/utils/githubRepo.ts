@@ -98,7 +98,7 @@ export class GitHubRateLimitError extends Error {
   }
 }
 
-async function ghFetch<T>(path: string, token: string): Promise<T> {
+export async function ghFetch<T>(path: string, token: string): Promise<T> {
   const headers: Record<string, string> = { Accept: 'application/vnd.github+json' }
   if (token.trim()) headers.Authorization = `Bearer ${token.trim()}`
   const resp = await fetch(`https://api.github.com${path}`, { headers })
@@ -189,6 +189,43 @@ async function listDirectoryViaJsDelivr(loc: GitHubLocation): Promise<GitHubEntr
       type: node.type === 'directory' ? 'dir' as const : 'file' as const,
     }))
     .sort(compareEntries)
+}
+
+interface TreeEntry { path: string; type: string }
+interface JsDelivrFlatFile { name: string }
+
+/**
+ * Every file beneath a location, as paths relative to it.
+ *
+ * Opening shared code that was left as a folder in a repository has to know
+ * what is in it, which only a listing can say. The git trees API answers for a
+ * whole repository in one request; jsDelivr's flat listing stands in when
+ * GitHub is rate limiting the network, as it does for `listDirectory`.
+ */
+export async function listRepoFilesRecursive(loc: GitHubLocation, token: string): Promise<string[]> {
+  const resolved = await resolveBranch(loc, token)
+  const prefix = resolved.path ? `${resolved.path.replace(/\/+$/, '')}/` : ''
+  let paths: string[]
+  try {
+    const tree = await ghFetch<{ tree?: TreeEntry[]; truncated?: boolean }>(
+      `/repos/${resolved.owner}/${resolved.repo}/git/trees/${encodeURIComponent(resolved.branch ?? 'HEAD')}?recursive=1`, token)
+    paths = (tree.tree ?? []).filter(entry => entry.type === 'blob').map(entry => entry.path)
+  } catch (e) {
+    if (!(e instanceof GitHubRateLimitError)) throw e
+    const version = encodeURIComponent(resolved.branch ?? 'HEAD')
+    const url = `https://data.jsdelivr.com/v1/packages/gh/${resolved.owner}/${resolved.repo}@${version}?structure=flat`
+    try {
+      const payload = JSON.parse(await fetchResourceText(url)) as { files?: JsDelivrFlatFile[] }
+      paths = (payload.files ?? []).map(file => file.name.replace(/^\/+/, ''))
+    } catch {
+      throw new GitHubRateLimitError()
+    }
+  }
+  return paths
+    .filter(path => path.startsWith(prefix))
+    .map(path => path.slice(prefix.length))
+    .filter(path => path && !path.split('/').some(part => part === '.git' || part === '.github'))
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }))
 }
 
 function compareEntries(a: GitHubEntry, b: GitHubEntry): number {

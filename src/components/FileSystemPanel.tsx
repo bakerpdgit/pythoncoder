@@ -7,6 +7,7 @@ import {
 } from '../utils/virtualFS'
 import { BOOK_FS_PREFIX, BOOK_SRC_PREFIX, getBookFsDisplayName } from '../utils/bookLoader'
 import { isHtmlFile } from '../utils/htmlPreview'
+import { filesystemLabel } from '../utils/filesystemNames'
 import { ConfirmDialog } from './dialogs/ConfirmDialog'
 import { SaveFileDialog } from './dialogs/SaveFileDialog'
 import { OpenResourceDialog } from './dialogs/OpenResourceDialog'
@@ -20,7 +21,7 @@ interface Props {
   isChallengeMode?: boolean
   isBookOpen?: boolean
   onCloseBook?: () => void
-  onOpenResourceUrl?: (url: string, opts?: { simple?: boolean }) => void
+  onOpenResourceUrl?: (url: string) => void
   onFilesystemChange: (id: string) => void
   onFilesystemForcedChange: (id: string) => void
   onFilesystemCreated: (id: string) => void
@@ -34,10 +35,19 @@ interface Props {
   /** A file just made with New file, to open in the editor as VS Code does. */
   onOpenNewFile?: (entry: VFSEntry) => void
   onPreviewHtml: (entry: VFSEntry) => void
+  /** Open the Share wizard: for all files, or (with `path`) for that one file. */
+  onShare?: (scope: 'file' | 'filesystem', path?: string) => void
+  /** Book edit mode: Share shares the whole book, and no single file. */
+  shareBook?: boolean
+  /**
+   * Reset the active filesystem to the online address it came from — or, in a
+   * book activity, the activity to the book's version. Absent when neither applies.
+   */
+  onResetToSource?: () => void
   onError: (msg: string) => void
   onBookOpen?: (url: string) => void
-  onLocalFileImport?: (fileMap: Map<string, ArrayBuffer>, sourceName: string, opts?: { simple?: boolean }) => Promise<void>
-  onFolderConnect?: (handle: FileSystemDirectoryHandle, opts?: { simple?: boolean }) => Promise<void>
+  onLocalFileImport?: (fileMap: Map<string, ArrayBuffer>, sourceName: string) => Promise<void>
+  onFolderConnect?: (handle: FileSystemDirectoryHandle) => Promise<void>
   isLocalFolderConnected?: boolean
   onLocalFolderSync?: (op: LocalFolderSyncOp) => Promise<void>
   onReloadFolder?: () => void
@@ -72,7 +82,7 @@ export function FileSystemPanel({
   activeFilesystemId, currentWorkingDir, openFilePath, hiddenPaths, isChallengeMode,
   isBookOpen, onCloseBook, onOpenResourceUrl,
   onFilesystemChange, onFilesystemForcedChange, onFilesystemCreated, onCwdChange, onOpenFile, onError, onBookOpen,
-  onBeforeNewFile, onOpenNewFile, onPreviewHtml, onLocalFileImport, onFolderConnect,
+  onBeforeNewFile, onOpenNewFile, onPreviewHtml, onShare, shareBook, onResetToSource, onLocalFileImport, onFolderConnect,
   isLocalFolderConnected, onLocalFolderSync, onReloadFolder, onDisconnectFolder, onCloseFolder,
   diskDeleteWarnDismissed, onDismissDiskDeleteWarn,
   reloadTrigger,
@@ -107,9 +117,6 @@ export function FileSystemPanel({
   const [showNewMenu, setShowNewMenu] = useState(false)
   const uploadInputRef = useRef<HTMLInputElement>(null)
   const zipInputRef = useRef<HTMLInputElement>(null)
-  // The Open dialog is gone by the time the file picker fires, so its "simple
-  // learning book" choice has to be parked here.
-  const simpleImportRef = useRef(false)
   const fsMenuRef = useRef<HTMLDivElement>(null)
 
   const reload = useCallback(async () => {
@@ -345,18 +352,18 @@ export function FileSystemPanel({
         fileMap.set(stripped, await zip.files[name].async('arraybuffer'))
       }
       const zipName = file.name.replace(/\.zip$/i, '')
-      await onLocalFileImport?.(fileMap, zipName, { simple: simpleImportRef.current })
+      await onLocalFileImport?.(fileMap, zipName)
     } catch (err) { onError(err instanceof Error ? err.message : String(err)) }
   }
 
-  const handleFolderOpen = async (simple = false) => {
+  const handleFolderOpen = async () => {
     if (!('showDirectoryPicker' in window)) {
       onError('Your browser does not support the File System Access API.')
       return
     }
     try {
       const handle = await (window as typeof window & { showDirectoryPicker: (o?: object) => Promise<FileSystemDirectoryHandle> }).showDirectoryPicker({ mode: 'readwrite' })
-      await onFolderConnect?.(handle, { simple })
+      await onFolderConnect?.(handle)
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') return
       onError(err instanceof Error ? err.message : String(err))
@@ -397,7 +404,7 @@ export function FileSystemPanel({
           <div className="relative flex-1" ref={fsMenuRef}>
             <button onClick={() => setShowFsMenu(o => !o)}
               className="w-full flex items-center justify-between gap-1 px-2 py-1.5 rounded border border-slate-600 bg-slate-900 text-slate-300 text-xs hover:border-slate-500 transition-colors">
-              <span className="truncate">{currentFs?.name ?? '...'}</span>
+              <span className="truncate">{currentFs ? filesystemLabel(currentFs) : '...'}</span>
               <svg className="w-3 h-3 flex-shrink-0 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
               </svg>
@@ -408,11 +415,11 @@ export function FileSystemPanel({
                   <div key={fs.id} className="flex items-center justify-between px-2 py-1.5 hover:bg-slate-700 transition-colors">
                     <button className={`flex-1 text-left truncate ${fs.id === activeFilesystemId ? 'text-emerald-400' : 'text-slate-300'}`}
                       onClick={() => { onFilesystemChange(fs.id); setShowFsMenu(false) }}>
-                      {fs.name}
+                      {filesystemLabel(fs)}
                     </button>
                     {fs.id !== 'default' && (
                       <div className="flex items-center ml-2 flex-shrink-0 gap-1">
-                        <button type="button" onClick={() => { void downloadEntryAsZip(fs.id, '/', fs.name) }}
+                        <button type="button" onClick={() => { void downloadEntryAsZip(fs.id, '/', filesystemLabel({ name: fs.name })) }}
                           title="Download as zip"
                           className="text-slate-500 hover:text-sky-400">
                           <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -557,9 +564,25 @@ export function FileSystemPanel({
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
             </svg>
           </ToolbarBtn>
+          {onShare && (
+            <ToolbarBtn title={shareBook ? 'Share this learning book' : isChallengeMode ? 'Share this file' : 'Share these files'}
+              onClick={() => onShare(isChallengeMode && !shareBook ? 'file' : 'filesystem')}>
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8.684 13.342C8.886 12.938 9 12.482 9 12s-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" />
+              </svg>
+            </ToolbarBtn>
+          )}
           {isLocalFolderConnected && (
             <ToolbarBtn title="Reload from connected local folder (pick up external edits on disk)" onClick={() => onReloadFolder?.()}>
               <svg className="w-3.5 h-3.5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+            </ToolbarBtn>
+          )}
+          {onResetToSource && (
+            <ToolbarBtn title={isChallengeMode ? "Reset this activity to the book's version" : 'Reset to the online version'}
+              onClick={onResetToSource}>
+              <svg className="w-3.5 h-3.5 text-sky-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
               </svg>
             </ToolbarBtn>
@@ -683,6 +706,9 @@ export function FileSystemPanel({
           )}
           <CtxItem label="Rename" onClick={() => startRename(contextMenu.entry)} disabled={isProtected(contextMenu.entry)} />
           <CtxItem label="Download" onClick={() => void handleDownload(contextMenu.entry)} />
+          {onShare && !shareBook && contextMenu.entry.type === 'file' && (
+            <CtxItem label="Share…" onClick={() => { onShare('file', contextMenu.entry.path); setContextMenu(null) }} />
+          )}
           {contextMenu.entry.type === 'folder' && (
             <CtxItem label="Download as ZIP" onClick={() => void handleDownload(contextMenu.entry)} />
           )}
@@ -734,9 +760,9 @@ export function FileSystemPanel({
       {showOpenDialog && (
         <OpenResourceDialog
           onClose={() => setShowOpenDialog(false)}
-          onOpenLocalZip={opts => { simpleImportRef.current = !!opts?.simple; zipInputRef.current?.click() }}
-          onConnectFolder={opts => void handleFolderOpen(!!opts?.simple)}
-          onOpenResourceUrl={(url, opts) => onOpenResourceUrl?.(url, opts)}
+          onOpenLocalZip={() => zipInputRef.current?.click()}
+          onConnectFolder={() => void handleFolderOpen()}
+          onOpenResourceUrl={url => onOpenResourceUrl?.(url)}
         />
       )}
     </div>

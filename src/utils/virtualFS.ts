@@ -1,6 +1,6 @@
 import type { VFSEntry, VFSFile, VFSFilesystem } from '../types'
 import { fetchResourceBuffer, MIN_PLAUSIBLE_ZIP_BYTES } from './bookSource'
-import { pyodideSkipDirs } from './pyodideFs'
+import { PYODIDE_SYSTEM_DIRS, pyodideSkipDirs } from './pyodideFs'
 import { clearDraft } from './editorDraft'
 
 const DB_NAME = 'pythoncoder-vfs'
@@ -113,19 +113,36 @@ export async function createFilesystem(name: string, opts?: { seedMainPy?: boole
 
 export function renameFilesystem(id: string, newName: string): Promise<void> {
   if (id === 'default') return Promise.reject(new Error('Cannot rename the default filesystem.'))
+  return updateFilesystemMeta(id, { name: newName })
+}
+
+/**
+ * Change a filesystem's record: its name, its online source, whether it is
+ * temporary. A field given as `undefined` is removed.
+ */
+export function updateFilesystemMeta(
+  id: string, patch: Partial<Pick<VFSFilesystem, 'name' | 'source' | 'temporary'>>,
+): Promise<void> {
   return new Promise((resolve, reject) => {
     openVFSDb().then(db => {
       const store = db.transaction('filesystems', 'readwrite').objectStore('filesystems')
       const getReq = store.get(id)
       getReq.onsuccess = () => {
         if (!getReq.result) { reject(new Error('Filesystem not found.')); return }
-        const putReq = store.put({ ...(getReq.result as VFSFilesystem), name: newName })
+        const next: Record<string, unknown> = { ...(getReq.result as VFSFilesystem), ...patch }
+        for (const key of Object.keys(patch)) if (next[key] === undefined) delete next[key]
+        const putReq = store.put(next)
         putReq.onsuccess = () => resolve()
         putReq.onerror = () => reject(putReq.error)
       }
       getReq.onerror = () => reject(getReq.error)
     }).catch(reject)
   })
+}
+
+export async function getFilesystem(id: string): Promise<VFSFilesystem | null> {
+  const db = await openVFSDb()
+  return idbGet<VFSFilesystem>(db.transaction('filesystems', 'readonly').objectStore('filesystems'), id)
 }
 
 export async function deleteFilesystem(id: string): Promise<void> {
@@ -275,6 +292,46 @@ export async function deleteEntry(fsId: string, path: string): Promise<void> {
   await Promise.all(toDelete.map(e => idbDelete(store, e.id)))
 }
 
+/**
+ * What to do about files the file browser cannot reach.
+ *
+ * The browser lists a folder's children by `parentPath`, so a file whose
+ * folder has no entry is invisible — but it is still mounted into every run,
+ * zipped, shared and counted. Two kinds exist:
+ *   * Pyodide's own files, under its system directories, swept in by the old
+ *     post-run walk (a 2 MB `/lib/python313.zip` in the Default filesystem).
+ *     They are nobody's work, and while one sits under `/lib` that directory
+ *     counts as the user's and is swept again after every run. Deleted.
+ *   * Anything else was the user's, written before folders were created for
+ *     every write. Given its folders, so it shows up.
+ */
+export function planOrphanRepair(entries: VFSEntry[]): { remove: VFSEntry[]; reveal: VFSEntry[] } {
+  const folders = new Set(entries.filter(e => e.type === 'folder').map(e => `${e.fsId}\0${e.path}`))
+  const remove: VFSEntry[] = []
+  const reveal: VFSEntry[] = []
+  for (const entry of entries) {
+    const missing = ancestorFolderPaths(entry.path).some(folder => !folders.has(`${entry.fsId}\0${folder}`))
+    if (!missing) continue
+    const top = `/${entry.path.split('/').filter(Boolean)[0] ?? ''}`
+    if ((PYODIDE_SYSTEM_DIRS as readonly string[]).includes(top)) remove.push(entry)
+    else if (entry.type === 'file') reveal.push(entry)
+  }
+  return { remove, reveal }
+}
+
+/** Apply `planOrphanRepair` to every filesystem. Run once per page load. */
+export async function repairOrphanedFiles(): Promise<number> {
+  const db = await openVFSDb()
+  const entries = await idbGetAll<VFSEntry>(db.transaction('entries', 'readonly').objectStore('entries'))
+  const { remove, reveal } = planOrphanRepair(entries)
+  if (remove.length) {
+    const store = db.transaction('entries', 'readwrite').objectStore('entries')
+    await Promise.all(remove.map(e => idbDelete(store, e.id)))
+  }
+  for (const entry of reveal) await ensureAncestorFolders(entry.fsId, entry.path)
+  return remove.length + reveal.length
+}
+
 export async function getAllFiles(fsId: string): Promise<VFSFile[]> {
   const db = await openVFSDb()
   const entries = await _getAllEntriesForFs(db, fsId)
@@ -315,22 +372,35 @@ export function isImageMime(mimeType: string): boolean {
   return mimeType.startsWith('image/')
 }
 
-export async function downloadEntryAsZip(fsId: string, entryPath: string, zipName: string): Promise<void> {
+/**
+ * A ZIP of a filesystem, or of one folder in it. `exclude` names paths to
+ * leave out — a book activity's hidden files must not travel with it.
+ */
+export async function buildZipBlob(fsId: string, entryPath: string, opts: { exclude?: string[] } = {}): Promise<Blob> {
   const { default: JSZip } = await import('jszip')
   const allFiles = await getAllFiles(fsId)
   const zip = new JSZip()
   const prefix = entryPath === '/' ? '' : entryPath
-  const files = entryPath === '/' ? allFiles : allFiles.filter(f => f.path.startsWith(prefix + '/') || f.path === entryPath)
+  const excluded = new Set(opts.exclude ?? [])
+  const files = (entryPath === '/' ? allFiles : allFiles.filter(f => f.path.startsWith(prefix + '/') || f.path === entryPath))
+    .filter(f => !excluded.has(f.path))
   for (const file of files) {
     const rel = prefix ? file.path.substring(prefix.length + 1) : file.path.substring(1)
     if (rel) zip.file(rel, file.content)
   }
-  const blob = await zip.generateAsync({ type: 'blob' })
+  return zip.generateAsync({ type: 'blob' })
+}
+
+export function downloadBlob(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
-  a.href = url; a.download = `${zipName}.zip`
+  a.href = url; a.download = filename
   document.body.appendChild(a); a.click(); a.remove()
   URL.revokeObjectURL(url)
+}
+
+export async function downloadEntryAsZip(fsId: string, entryPath: string, zipName: string): Promise<void> {
+  downloadBlob(await buildZipBlob(fsId, entryPath), `${zipName}.zip`)
 }
 
 export function downloadSingleFile(content: ArrayBuffer, filename: string, mimeType: string): void {
@@ -437,11 +507,32 @@ export async function loadFilesystemFromUrl(url: string): Promise<string> {
   return newFs.id
 }
 
-export async function ensureFilesystemFromUrl(url: string): Promise<string> {
-  const fsList = await listFilesystems()
-  const existing = fsList.find(f => f.name === url)
-  if (existing) return existing.id
-  return loadFilesystemFromUrl(url)
+/**
+ * A new filesystem holding exactly `files`. Code shared by link opens into one
+ * of these, so it never lands on top of anything the recipient already has.
+ */
+export async function createFilesystemFromFiles(
+  name: string, files: Map<string, ArrayBuffer>,
+  meta: Partial<Pick<VFSFilesystem, 'source' | 'temporary'>> = {},
+): Promise<string> {
+  const fs = await createFilesystem(name)
+  if (meta.source || meta.temporary) await updateFilesystemMeta(fs.id, meta)
+  await importFileMapToFs(fs.id, files, true)
+  return fs.id
+}
+
+/**
+ * Make a filesystem hold exactly `files`: everything else in it is deleted.
+ * Resetting a copy to its online version has to drop files the source no
+ * longer has, which `importFileMapToFs` never does.
+ */
+export async function replaceFilesystemContents(fsId: string, files: Map<string, ArrayBuffer>): Promise<void> {
+  const db = await openVFSDb()
+  const existing = await _getAllEntriesForFs(db, fsId)
+  const store = db.transaction('entries', 'readwrite').objectStore('entries')
+  await Promise.all(existing.map(e => idbDelete(store, e.id)))
+  clearDraft(fsId)
+  await importFileMapToFs(fsId, files, true)
 }
 
 export async function importFileMapToFs(

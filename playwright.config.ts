@@ -44,9 +44,11 @@ export default defineConfig({
     // service-worker way of waiting exists for the browsers where shared
     // memory lets a student down, and those are WebKit. The turtle spec runs
     // here too: its debugger and its event loop both wait on the service worker.
+    // And the share spec: a link has to open on a student's iPad, and the
+    // in-link code relies on CompressionStream.
     {
       name: 'webkit',
-      testMatch: ['isolation.spec.ts', 'input.spec.ts', 'transport.spec.ts', 'turtle.spec.ts'],
+      testMatch: ['isolation.spec.ts', 'input.spec.ts', 'transport.spec.ts', 'turtle.spec.ts', 'share.spec.ts', 'open.spec.ts'],
       use: {
         ...devices['Desktop Safari'],
         launchOptions: {

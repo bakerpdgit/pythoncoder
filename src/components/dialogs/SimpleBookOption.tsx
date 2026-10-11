@@ -1,30 +1,19 @@
 import { useState } from 'react'
 
-// The "simple learning book" tick, and the round (i) that explains it.
-//
-// Shared by the Teacher Tools student-link dialog and the open-from-web wizards
-// so the wording a teacher reads is the same wherever they meet the option.
+// The round (i) that explains what a simple learning book is, for the
+// Teacher Tools student-link dialog — the one place a teacher still says which
+// kind of book they mean (opening one works it out from what is there).
 
-export function SimpleBookCheckbox({ checked, onChange }: {
-  checked: boolean
-  onChange: (checked: boolean) => void
-}) {
+export function SimpleBookInfoButton() {
   const [showInfo, setShowInfo] = useState(false)
   return (
     <>
-      <div className="mt-2 flex items-center gap-1.5">
-        <label className="flex items-center gap-2 text-[11px] text-slate-400">
-          <input type="checkbox" checked={checked} onChange={e => onChange(e.target.checked)}
-            className="accent-sky-500" />
-          Simple learning book (no book.json)
-        </label>
-        <button type="button" onClick={() => setShowInfo(true)}
-          aria-label="What is a simple learning book?"
-          title="What is a simple learning book?"
-          className="flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full border border-slate-500 text-[10px] font-semibold text-slate-400 transition-colors hover:border-sky-400 hover:text-sky-300">
-          i
-        </button>
-      </div>
+      <button type="button" onClick={e => { e.stopPropagation(); setShowInfo(true) }}
+        aria-label="What is a simple learning book?"
+        title="What is a simple learning book?"
+        className="flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full border border-slate-500 text-[10px] font-semibold text-slate-400 transition-colors hover:border-sky-400 hover:text-sky-300">
+        i
+      </button>
       {showInfo && <SimpleBookInfoDialog onClose={() => setShowInfo(false)} />}
     </>
   )

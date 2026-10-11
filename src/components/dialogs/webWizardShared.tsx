@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { buildShareLink, type ShareLinkOptions } from '../../utils/bookSource'
+import { copyTextToClipboard } from '../../utils/clipboard'
 
 // Shared building blocks for the "open from the web" wizards (GitHub / Google
 // Drive / other public URL). Styling mirrors the app's other modal dialogs
@@ -23,22 +24,25 @@ export const primaryBtnClass =
 export const secondaryBtnClass =
   'px-3 py-1.5 rounded border border-slate-600 text-slate-300 hover:border-slate-400 disabled:opacity-50 transition-colors'
 
-/** A copyable "student link" row: the shareable ?book= URL + a Copy button. */
+/**
+ * A copyable link row: the shareable ?book= URL (or a prebuilt `link`) + a
+ * Copy button.
+ */
 export function ShareLinkRow({
-  resourceUrl, options, label = 'Student link — opens this book directly:',
+  resourceUrl, options, link: prebuilt, label = 'Student link — opens this book directly:',
 }: {
-  resourceUrl: string
+  resourceUrl?: string
   options?: ShareLinkOptions
+  link?: string
   label?: string
 }) {
   const [copied, setCopied] = useState(false)
-  const link = buildShareLink(resourceUrl, options)
+  const link = prebuilt ?? buildShareLink(resourceUrl ?? '', options)
   const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(link)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
-    } catch { /* clipboard blocked — the text is still selectable below */ }
+    // Refused clipboard: the text is still selectable in the box.
+    if (!(await copyTextToClipboard(link))) return
+    setCopied(true)
+    setTimeout(() => setCopied(false), 1500)
   }
   return (
     <div className="mt-3 rounded border border-slate-700 bg-slate-900/60 p-2">
@@ -88,5 +92,30 @@ export function WizardHeader({ title, subtitle }: { title: string; subtitle: str
       <div className="text-sm font-bold text-white mb-1">{title}</div>
       <p className="text-slate-400 leading-relaxed">{subtitle}</p>
     </div>
+  )
+}
+
+/** A large choice card: icon, title and a line of description. */
+export function BigButton({
+  title, desc, icon, onClick, disabled, testId,
+}: {
+  title: string
+  desc: React.ReactNode
+  icon: React.ReactNode
+  onClick: () => void
+  disabled?: boolean
+  testId?: string
+}) {
+  return (
+    <button type="button" onClick={onClick} disabled={disabled} data-testid={testId}
+      className="flex items-start gap-3 text-left p-3 rounded border border-slate-600 bg-slate-900/50 hover:border-sky-500 hover:bg-slate-900 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:border-slate-600 disabled:hover:bg-slate-900/50">
+      <svg className="w-6 h-6 text-sky-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        {icon}
+      </svg>
+      <span className="flex-1 min-w-0">
+        <span className="block text-slate-100 font-semibold text-sm">{title}</span>
+        <span className="block text-slate-400 text-[11px] leading-snug mt-0.5">{desc}</span>
+      </span>
+    </button>
   )
 }
