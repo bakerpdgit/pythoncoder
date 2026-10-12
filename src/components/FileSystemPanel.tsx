@@ -1,10 +1,14 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react'
 import {
   listChildren, listFilesystems, createFilesystem, deleteFilesystem, renameFilesystem,
   createEntry, deleteEntry, renameEntry, getEntryByPath, guessMimeType,
   isTextMime, isImageMime, downloadEntryAsZip, downloadSingleFile, writeFile,
-  getParentPath,
+  getParentPath, getAllFiles, downloadBlob,
 } from '../utils/virtualFS'
+import {
+  EMPTY_SELECTION, clickSelection, nudgeInside, pruneSelection, selectionFiles, type FileSelection,
+} from '../utils/fileSelection'
+import { zipFileMap } from '../utils/sharedResource'
 import { BOOK_FS_PREFIX, BOOK_SRC_PREFIX, getBookFsDisplayName } from '../utils/bookLoader'
 import { isHtmlFile } from '../utils/htmlPreview'
 import { filesystemLabel } from '../utils/filesystemNames'
@@ -37,8 +41,12 @@ interface Props {
   /** A file just made with New file, to open in the editor as VS Code does. */
   onOpenNewFile?: (entry: VFSEntry) => void
   onPreviewHtml: (entry: VFSEntry) => void
-  /** Open the Share wizard: for all files, or (with `path`) for that one file. */
-  onShare?: (scope: 'file' | 'filesystem', path?: string) => void
+  /**
+   * Open the Share wizard: for all files, (with `path`) for that one file, or
+   * (with `selection`) for several files and folders selected together.
+   */
+  onShare?: (scope: 'file' | 'filesystem' | 'selection', path?: string,
+    selection?: { paths: string[]; base: string }) => void
   /** Book edit mode: Share shares the whole book, and no single file. */
   shareBook?: boolean
   /**
@@ -69,6 +77,8 @@ interface Props {
 
 interface ContextMenu {
   x: number; y: number; entry: VFSEntry
+  /** Right-clicked inside a selection of several: the menu acts on all of them. */
+  many?: VFSEntry[]
 }
 
 interface ConfirmConfig {
@@ -96,7 +106,7 @@ export function FileSystemPanel({
   const [currentFsEntry, setCurrentFsEntry] = useState<VFSFilesystem | null>(null)
   const [currentPath, setCurrentPath] = useState('/')
   const [entries, setEntries] = useState<VFSEntry[]>([])
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [selection, setSelection] = useState<FileSelection>(EMPTY_SELECTION)
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null)
   const [renameId, setRenameId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
@@ -108,7 +118,7 @@ export function FileSystemPanel({
   const [showSaveDialog, setShowSaveDialog] = useState(false)
   const [pendingUpload, setPendingUpload] = useState<{ name: string; content: ArrayBuffer; mimeType: string; isNewFile?: boolean } | null>(null)
   const [imagePreview, setImagePreview] = useState<ImagePreview | null>(null)
-  const [copySource, setCopySource] = useState<VFSEntry | null>(null)
+  const [copySource, setCopySource] = useState<VFSEntry[] | null>(null)
 
   // Single owner for the preview's blob URL: revoked when it is replaced and
   // when the panel unmounts, which closing alone used to miss.
@@ -123,6 +133,9 @@ export function FileSystemPanel({
   const uploadInputRef = useRef<HTMLInputElement>(null)
   const zipInputRef = useRef<HTMLInputElement>(null)
   const fsMenuRef = useRef<HTMLDivElement>(null)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const newMenuRef = useRef<HTMLDivElement>(null)
+  const contextMenuRef = useRef<HTMLDivElement>(null)
 
   const reload = useCallback(async () => {
     try {
@@ -144,6 +157,35 @@ export function FileSystemPanel({
   useEffect(() => { void reload() }, [reload, reloadTrigger])
 
   useEffect(() => { setCurrentPath('/') }, [activeFilesystemId])
+
+  // A selection only holds what is still listed: a reload after a delete or
+  // rename drops the rest.
+  useEffect(() => { setSelection(s => pruneSelection(s, entries.map(e => e.id))) }, [entries])
+
+  // The New menu hangs right-aligned under its button, and the panel clips
+  // anything outside it — so in a narrow sidebar, where the button sits near
+  // the left edge, the menu used to start off-panel. Shift it back inside.
+  useLayoutEffect(() => {
+    const menu = newMenuRef.current
+    const panel = rootRef.current
+    if (!showNewMenu || !menu || !panel) return
+    menu.style.transform = ''
+    const p = panel.getBoundingClientRect()
+    const bounds = { left: Math.max(p.left, 0), top: p.top, right: Math.min(p.right, window.innerWidth), bottom: p.bottom }
+    const { dx } = nudgeInside(menu.getBoundingClientRect(), bounds)
+    if (dx) menu.style.transform = `translateX(${dx}px)`
+  }, [showNewMenu])
+
+  // A right-click near the bottom or right of the window opens the menu there:
+  // keep the whole of it on screen.
+  useLayoutEffect(() => {
+    const menu = contextMenuRef.current
+    if (!contextMenu || !menu) return
+    menu.style.transform = ''
+    const { dx, dy } = nudgeInside(menu.getBoundingClientRect(),
+      { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight })
+    if (dx || dy) menu.style.transform = `translate(${dx}px, ${dy}px)`
+  }, [contextMenu])
 
   useEffect(() => {
     if (!showFsMenu) return
@@ -170,7 +212,35 @@ export function FileSystemPanel({
     return crumbs
   })()
 
-  const navigate = (path: string) => { setCurrentPath(path); setSelectedId(null) }
+  const navigate = (path: string) => { setCurrentPath(path); setSelection(EMPTY_SELECTION) }
+
+  const selectedEntries = entries.filter(e => selection.ids.has(e.id))
+
+  const handleRowClick = (e: React.MouseEvent, entry: VFSEntry) => {
+    const ctrl = e.ctrlKey || e.metaKey
+    const order = entries.map(x => x.id)
+    // Ctrl and Shift only choose; a plain click chooses and opens, as before.
+    if (ctrl || e.shiftKey) {
+      setSelection(s => clickSelection(s, order, entry.id, { ctrl, shift: e.shiftKey }))
+      return
+    }
+    setSelection(s => clickSelection(s, order, entry.id, {}))
+    void handleOpenEntry(entry)
+  }
+
+  const handleListKeyDown = (e: React.KeyboardEvent) => {
+    if ((e.target as HTMLElement).tagName === 'INPUT') return
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
+      e.preventDefault()
+      setSelection({ ids: new Set(entries.map(x => x.id)), anchor: entries[0]?.id ?? null })
+    } else if (e.key === 'Escape' && selection.ids.size) {
+      setSelection(EMPTY_SELECTION)
+    } else if (e.key === 'Delete' && selectedEntries.length) {
+      e.preventDefault()
+      if (selectedEntries.length === 1) handleDelete(selectedEntries[0])
+      else handleDeleteMany(selectedEntries)
+    }
+  }
 
   const handleOpenEntry = async (entry: VFSEntry) => {
     if (entry.type === 'folder') { navigate(entry.path); return }
@@ -189,6 +259,13 @@ export function FileSystemPanel({
 
   const handleContextMenu = (e: React.MouseEvent, entry: VFSEntry) => {
     e.preventDefault(); e.stopPropagation()
+    // Inside a selection of several, the menu is for all of them; anywhere
+    // else the right-clicked entry becomes the selection, as in Explorer.
+    if (selection.ids.has(entry.id) && selectedEntries.length > 1) {
+      setContextMenu({ x: e.clientX, y: e.clientY, entry, many: selectedEntries })
+      return
+    }
+    setSelection({ ids: new Set([entry.id]), anchor: entry.id })
     setContextMenu({ x: e.clientX, y: e.clientY, entry })
   }
 
@@ -235,8 +312,56 @@ export function FileSystemPanel({
     })
   }
 
+  /** Delete several entries at once, keeping any a single delete would refuse. */
+  const handleDeleteMany = (list: VFSEntry[]) => {
+    setContextMenu(null)
+    const kept = list.filter(e => isProtected(e) || e.path === openFilePath)
+    const doomed = list.filter(e => !kept.includes(e))
+    if (doomed.length === 0) {
+      onError(kept.some(isProtected) ? 'main.py cannot be deleted from the default filesystem.' : 'Cannot delete the currently open file.')
+      return
+    }
+    const warnDisk = !!isLocalFolderConnected && !diskDeleteWarnDismissed
+    const shown = doomed.slice(0, 8).map(e => `  • ${e.name}${e.type === 'folder' ? '/ (and all its contents)' : ''}`)
+    if (doomed.length > 8) shown.push(`  • …and ${doomed.length - 8} more`)
+    const why = [
+      ...kept.filter(isProtected).map(e => `${e.name} always stays in Default`),
+      ...kept.filter(e => e.path === openFilePath).map(e => `${e.name} is open in the editor`),
+    ]
+    const keptNote = why.length ? `\n\nKept: ${why.join('; ')}.` : ''
+    setConfirmConfig({
+      message: `Delete these ${doomed.length} items?\n${shown.join('\n')}${keptNote}`,
+      warning: warnDisk ? 'This will also permanently delete them from your connected local folder on disk.' : undefined,
+      checkboxLabel: warnDisk ? "Don't warn me again for this folder" : undefined,
+      onConfirm: async (dontWarnAgain) => {
+        try {
+          for (const entry of doomed) {
+            await deleteEntry(activeFilesystemId, entry.path)
+            if (isLocalFolderConnected) await onLocalFolderSync?.({ kind: 'delete', path: entry.path })
+          }
+        } catch (err) { onError(String(err)) }
+        void reload()
+        if (warnDisk && dontWarnAgain) onDismissDiskDeleteWarn?.()
+        setConfirmConfig(null)
+      },
+    })
+  }
+
+  /** A ZIP of several selected entries, holding them at its top as Explorer's would. */
+  const handleDownloadMany = async (list: VFSEntry[]) => {
+    setContextMenu(null)
+    try {
+      const hidden = new Set(hiddenPaths ?? [])
+      const all = (await getAllFiles(activeFilesystemId)).filter(f => !hidden.has(f.path))
+      const files = selectionFiles(all.map(f => [f.path, f.content]), list.map(e => e.path), currentPath)
+      if (files.size === 0) { onError('The selected folders hold no files to download.'); return }
+      const where = currentPath === '/' ? filesystemLabel(currentFs ?? { name: 'files' }) : currentPath.slice(currentPath.lastIndexOf('/') + 1)
+      downloadBlob(await zipFileMap(files), `${where.replace(/[^\w.-]+/g, '-') || 'files'}-selection.zip`)
+    } catch (err) { onError(err instanceof Error ? err.message : String(err)) }
+  }
+
   const handleCopied = async (dstFsId: string, dstPath: string, written: PlannedCopy[]) => {
-    const entry = copySource
+    const copied = copySource ?? []
     setCopySource(null)
     // Only the filesystem on screen can be the connected folder's.
     if (dstFsId === activeFilesystemId && isLocalFolderConnected) {
@@ -248,7 +373,7 @@ export function FileSystemPanel({
     }
     const where = dstFsId === activeFilesystemId ? dstPath
       : `${dstPath} in ${filesystemLabel(filesystems.find(f => f.id === dstFsId) ?? { name: dstFsId })}`
-    onNotice?.(`Copied ${entry?.name ?? 'it'} to ${where}.`)
+    onNotice?.(copied.length > 1 ? `Copied ${copied.length} items to ${where}.` : `Copied ${copied[0]?.name ?? 'it'} to ${where}.`)
     void reload()
   }
 
@@ -400,7 +525,7 @@ export function FileSystemPanel({
   const showFileBrowser = !isBookOpen || isChallengeMode
 
   return (
-    <div className="flex flex-col h-full overflow-hidden text-xs select-none">
+    <div ref={rootRef} className="flex flex-col h-full overflow-hidden text-xs select-none">
       {/* Filesystem selector + open / close-book controls */}
       <div className="px-2 py-2 border-b border-slate-700 flex items-center gap-1 flex-shrink-0">
         {/* Hidden inputs driven by the Open dialog and the Upload action */}
@@ -556,7 +681,7 @@ export function FileSystemPanel({
               </svg>
             </ToolbarBtn>
             {showNewMenu && (
-              <div className="absolute right-0 top-full z-40 pt-1">
+              <div ref={newMenuRef} className="absolute right-0 top-full z-40 pt-1">
                 <div className="bg-slate-800 border border-slate-600 rounded shadow-xl py-1 min-w-[120px]">
                   <button type="button" onClick={() => { setShowNewMenu(false); void handleNewFile() }}
                     className="w-full text-left px-3 py-1.5 text-slate-300 hover:bg-slate-700 flex items-center gap-2 transition-colors">
@@ -619,7 +744,8 @@ export function FileSystemPanel({
       </div>
 
       {/* File list */}
-      <div className="section-scroll flex-1 overflow-y-auto py-1 min-h-0">
+      <div className="section-scroll flex-1 overflow-y-auto py-1 min-h-0 focus:outline-none" tabIndex={0}
+        aria-label="Files" onKeyDown={handleListKeyDown}>
         {showNewFolderInline && (
           <div className="flex items-center gap-1 px-2 py-1">
             <svg className="w-4 h-4 text-amber-400 flex-shrink-0" fill="currentColor" viewBox="0 0 24 24">
@@ -638,15 +764,20 @@ export function FileSystemPanel({
           entries.map(entry => {
             const isOpen = entry.path === openFilePath
             const isCwd = entry.path === currentWorkingDir && entry.type === 'folder'
+            const isSelected = selection.ids.has(entry.id)
+            const inMany = isSelected && selection.ids.size > 1
             return (
-              <div key={entry.id}
+              <div key={entry.id} aria-selected={isSelected}
                 className={`group flex items-center gap-1.5 px-2 py-1 cursor-pointer rounded mx-1 transition-colors border-l-2
-                  ${isOpen
-                    ? 'border-emerald-400 bg-emerald-500/10'
-                    : selectedId === entry.id
-                      ? 'border-transparent bg-slate-500/20'
-                      : 'border-transparent hover:bg-slate-500/10'}`}
-                onClick={() => { setSelectedId(entry.id); void handleOpenEntry(entry) }}
+                  ${isOpen ? 'border-emerald-400' : 'border-transparent'}
+                  ${inMany
+                    ? 'bg-sky-500/20'
+                    : isOpen
+                      ? 'bg-emerald-500/10'
+                      : isSelected
+                        ? 'bg-slate-500/20'
+                        : 'hover:bg-slate-500/10'}`}
+                onClick={e => handleRowClick(e, entry)}
                 onContextMenu={e => handleContextMenu(e, entry)}>
                 {renameId === entry.id ? (
                   <>
@@ -705,6 +836,19 @@ export function FileSystemPanel({
         )}
       </div>
 
+      {selection.ids.size > 1 && (
+        <div className="px-2 py-1 border-t border-slate-700 flex items-center gap-2 flex-shrink-0 bg-sky-500/10">
+          <span className="flex-1 truncate text-sky-400 text-[11px]" data-testid="fs-selection-count">
+            {selection.ids.size} selected — right-click for actions
+          </span>
+          <button type="button" onClick={() => setSelection(EMPTY_SELECTION)}
+            title="Clear the selection (Esc)"
+            className="text-[10px] text-slate-400 hover:text-slate-200 underline decoration-dotted flex-shrink-0">
+            Clear
+          </button>
+        </div>
+      )}
+
       {/* CWD indicator */}
       <div className="px-2 py-1.5 border-t border-slate-700 flex-shrink-0">
         <div className="text-[10px] text-slate-500 truncate" title={`CWD: ${currentWorkingDir}`}>
@@ -716,8 +860,30 @@ export function FileSystemPanel({
       )}
 
       {/* Context menu */}
-      {contextMenu && (
-        <div className="fixed z-50 bg-slate-800 border border-slate-600 rounded shadow-2xl py-1 text-xs min-w-[140px]"
+      {contextMenu?.many && (() => {
+        const many = contextMenu.many
+        const blocked = many.filter(e => isProtected(e) || e.path === openFilePath).length
+        return (
+          <div ref={contextMenuRef} className="fixed z-50 bg-slate-800 border border-slate-600 rounded shadow-2xl py-1 text-xs min-w-[160px]"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+            onMouseDown={e => e.stopPropagation()}>
+            <div className="px-3 py-1 text-[10px] uppercase tracking-wide text-slate-500">{many.length} items selected</div>
+            <CtxItem label="Copy to…" onClick={() => { setCopySource(many); setContextMenu(null) }} />
+            <CtxItem label="Download as ZIP" onClick={() => void handleDownloadMany(many)} />
+            {onShare && !shareBook && (
+              <CtxItem label="Share…" onClick={() => {
+                onShare('selection', undefined, { paths: many.map(e => e.path), base: currentPath })
+                setContextMenu(null)
+              }} />
+            )}
+            <div className="border-t border-slate-700 my-1" />
+            <CtxItem label={`Delete ${many.length - blocked} item${many.length - blocked === 1 ? '' : 's'}`}
+              onClick={() => handleDeleteMany(many)} danger disabled={blocked === many.length} />
+          </div>
+        )
+      })()}
+      {contextMenu && !contextMenu.many && (
+        <div ref={contextMenuRef} className="fixed z-50 bg-slate-800 border border-slate-600 rounded shadow-2xl py-1 text-xs min-w-[140px]"
           style={{ left: contextMenu.x, top: contextMenu.y }}
           onMouseDown={e => e.stopPropagation()}>
           {contextMenu.entry.type === 'file' && (
@@ -727,7 +893,7 @@ export function FileSystemPanel({
             <CtxItem label="Preview HTML" onClick={() => { onPreviewHtml(contextMenu.entry); setContextMenu(null) }} />
           )}
           <CtxItem label="Rename" onClick={() => startRename(contextMenu.entry)} disabled={isProtected(contextMenu.entry)} />
-          <CtxItem label="Copy to…" onClick={() => { setCopySource(contextMenu.entry); setContextMenu(null) }} />
+          <CtxItem label="Copy to…" onClick={() => { setCopySource([contextMenu.entry]); setContextMenu(null) }} />
           <CtxItem label="Download" onClick={() => void handleDownload(contextMenu.entry)} />
           {onShare && !shareBook && contextMenu.entry.type === 'file' && (
             <CtxItem label="Share…" onClick={() => { onShare('file', contextMenu.entry.path); setContextMenu(null) }} />
@@ -762,7 +928,7 @@ export function FileSystemPanel({
       )}
       {copySource && (
         <CopyToDialog sourceFsId={activeFilesystemId}
-          entry={copySource}
+          entries={copySource}
           hiddenPaths={hiddenPaths}
           onCopied={(fsId, path, written) => void handleCopied(fsId, path, written)}
           onCancel={() => setCopySource(null)} />

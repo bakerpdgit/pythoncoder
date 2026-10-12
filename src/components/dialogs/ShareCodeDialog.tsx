@@ -9,6 +9,7 @@ import {
 } from '../../utils/sharedResource'
 import { getStoredGitHubToken } from '../../utils/storage'
 import { downloadBlob } from '../../utils/virtualFS'
+import { rebasePath, selectionFiles } from '../../utils/fileSelection'
 import { GistFindStep, type HostedChoice } from './share/GistFindStep'
 import { ResourceFinder } from './ResourceFinder'
 import { BigButton, ShareLinkRow, inputClass, primaryBtnClass, secondaryBtnClass } from './webWizardShared'
@@ -16,7 +17,8 @@ import { BigButton, ShareLinkRow, inputClass, primaryBtnClass, secondaryBtnClass
 // Share my code: a wizard that ends in a link which opens the student's code in
 // Coder for whoever clicks it.
 //
-// First *what* (this file, or every file in the filesystem), then *how*:
+// First *what* (this file, the files selected in the file browser, or every
+// file in the filesystem), then *how*:
 //   * inside the link itself, when it is short enough and all text;
 //   * a GitHub Gist (one file) or public repository (a filesystem);
 //   * Google Drive.
@@ -24,7 +26,7 @@ import { BigButton, ShareLinkRow, inputClass, primaryBtnClass, secondaryBtnClass
 // at it, and the last step fetches it exactly as the recipient's link will —
 // so a link is never handed out for an address that does not hold the code.
 
-export type ShareScope = 'file' | 'filesystem'
+export type ShareScope = 'file' | 'filesystem' | 'selection'
 
 export interface ShareSource {
   /** The file on offer, e.g. `main.py`; null when there is none to share. */
@@ -47,6 +49,12 @@ export interface ShareSource {
    */
   bookContext?: SharedBookContext | null
   initialScope?: ShareScope
+  /**
+   * Files and folders selected together in the file browser, all in the
+   * folder `base`. Shared as if that folder were the top: a selection in
+   * `/project` arrives at the recipient's root.
+   */
+  selection?: { paths: string[]; base: string }
 }
 
 interface Props {
@@ -92,10 +100,12 @@ function lineCount(text: string): number {
 export function ShareCodeDialog({ source, bookEditMode, onOpenStudentLinks, onContinueToStudentLink, onClose }: Props) {
   const fileShareable = !!source.fileName && !source.fileUnavailable
   const fsShareable = !source.filesystemUnavailable
+  const selection = bookEditMode ? null : source.selection ?? null
   const initialScope: ShareScope | null = bookEditMode ? 'filesystem'
     : source.initialScope === 'file' && fileShareable ? 'file'
       : source.initialScope === 'filesystem' && fsShareable ? 'filesystem'
-        : null
+        : source.initialScope === 'selection' && selection ? 'selection'
+          : null
   const [whyNotLink, setWhyNotLink] = useState(false)
 
   const [scope, setScope] = useState<ShareScope | null>(initialScope)
@@ -115,22 +125,28 @@ export function ShareCodeDialog({ source, bookEditMode, onOpenStudentLinks, onCo
   }, [onClose])
 
   // The filesystem is read once, up front, so step 1 can say how many files it holds.
+  // A selection is cut from it, so it is read for one too.
+  const needFiles = fsShareable || !!selection
   useEffect(() => {
-    if (!fsShareable) return
+    if (!needFiles) return
     let cancelled = false
     source.loadFilesystem()
       .then(files => { if (!cancelled) setFsFiles(files) })
       .catch(e => { if (!cancelled) setFsError(e instanceof Error ? e.message : String(e)) })
     return () => { cancelled = true }
-  }, [source, fsShareable])
+  }, [source, needFiles])
+
+  const selFiles = useMemo(() => selection && fsFiles ? selectionFiles(fsFiles, selection.paths, selection.base) : null,
+    [selection, fsFiles])
 
   const fileMap = useMemo<Map<string, ArrayBuffer> | null>(() => {
     if (scope === 'file') {
       return new Map([[source.filePath, new TextEncoder().encode(source.fileText).buffer as ArrayBuffer]])
     }
     if (scope === 'filesystem') return fsFiles
+    if (scope === 'selection') return selFiles
     return null
-  }, [scope, fsFiles, source.filePath, source.fileText])
+  }, [scope, fsFiles, selFiles, source.filePath, source.fileText])
 
   const nonText = useMemo(() => fileMap
     ? [...fileMap].filter(([, content]) => !isTextContent(content)).map(([path]) => path.slice(1))
@@ -142,14 +158,15 @@ export function ShareCodeDialog({ source, bookEditMode, onOpenStudentLinks, onCo
     let cancelled = false
     const decoder = new TextDecoder()
     const files = [...fileMap].map(([path, content]) => ({ path, text: decoder.decode(content) }))
+    const editorPath = scope === 'selection' && selection ? rebasePath(source.filePath, selection.base) : source.filePath
     const open = scope === 'file' ? source.filePath
-      : files.find(f => f.path === source.filePath)?.path ?? files.find(f => f.path === '/main.py')?.path ?? files[0].path
+      : files.find(f => f.path === editorPath)?.path ?? files.find(f => f.path === '/main.py')?.path ?? files[0].path
     const book = scope === 'file' && source.bookContext ? { book: source.bookContext } : {}
     void buildEmbeddedShareLink({ files, open, ...book, ...(bookEditMode ? { isBook: true } : {}) }).then(link => {
       if (!cancelled) setEmbedded({ link, verdict: judgeShareLinkLength(link) })
     })
     return () => { cancelled = true }
-  }, [fileMap, nonText, scope, source.filePath, source.bookContext, bookEditMode])
+  }, [fileMap, nonText, scope, selection, source.filePath, source.bookContext, bookEditMode])
 
   const shell = (body: React.ReactNode) => (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70" onClick={onClose}>
@@ -195,6 +212,10 @@ export function ShareCodeDialog({ source, bookEditMode, onOpenStudentLinks, onCo
       ?? (fsError ? `Could not read the files: ${fsError}`
         : fsFiles ? `${fsFiles.size} file${fsFiles.size === 1 ? '' : 's'} in “${source.filesystemLabel}”.`
           : 'Reading the files…')
+    const selectionDesc = fsError ? `Could not read the files: ${fsError}`
+      : !selFiles ? 'Reading the files…'
+        : selFiles.size === 0 ? 'The selected folders hold no files.'
+          : `${selFiles.size} file${selFiles.size === 1 ? '' : 's'}: ${[...selFiles.keys()].sort().slice(0, 3).map(p => p.slice(1)).join(', ')}${selFiles.size > 3 ? ', …' : ''}`
     return shell(
       <>
         <Header title="Share your code" subtitle="Make a link that opens your code in Coder for whoever you send it to. They get their own copy — nothing they do changes yours." step={stepLabel} />
@@ -203,6 +224,11 @@ export function ShareCodeDialog({ source, bookEditMode, onOpenStudentLinks, onCo
             title={source.fileName ? `This file — ${source.fileName}` : 'This file'}
             desc={source.fileUnavailable ?? `${lineCount(source.fileText)} lines, as it is in the editor now.`}
             onClick={() => { setScope('file'); setStep('how') }} />
+          {selection && (
+            <BigButton testId="share-scope-selection" icon={ICONS.folder} disabled={!selFiles || selFiles.size === 0}
+              title={`The ${selection.paths.length} selected items`} desc={selectionDesc}
+              onClick={() => { setScope('selection'); setStep('how') }} />
+          )}
           <BigButton testId="share-scope-filesystem" icon={ICONS.folder} disabled={!fsShareable || !fsFiles || fsFiles.size === 0}
             title="All my files" desc={fsDesc}
             onClick={() => { setScope('filesystem'); setStep('how') }} />
@@ -260,7 +286,9 @@ export function ShareCodeDialog({ source, bookEditMode, onOpenStudentLinks, onCo
     }
     return shell(
       <>
-        <Header title={scope === 'file' ? `Share ${fileName}` : `Share all files in “${source.filesystemLabel}”`}
+        <Header title={scope === 'file' ? `Share ${fileName}`
+          : scope === 'selection' ? `Share ${selection?.paths.length ?? 0} selected items`
+            : `Share all files in “${source.filesystemLabel}”`}
           subtitle="How would you like to share it?" step={stepLabel} />
         {scope === 'file' && source.inBookActivity && (
           <p className="text-slate-400 mb-2 leading-relaxed">

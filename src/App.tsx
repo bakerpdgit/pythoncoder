@@ -3927,8 +3927,11 @@ export default function App() {
    * Open the Share wizard. `path` shares that file (the file browser's
    * right-click); otherwise the file on offer is the one in the editor, as it
    * is now — unsaved changes included, since that is what the student sees.
+   * `selection` is several files and folders chosen together in the browser.
    */
-  const openShareDialog = async (opts: { scope?: ShareScope; path?: string } = {}) => {
+  const openShareDialog = async (opts: {
+    scope?: ShareScope; path?: string; selection?: { paths: string[]; base: string }
+  } = {}) => {
     if (bookEditSession) {
       // A book being edited is shared whole, from its own source filesystem.
       const srcFsId = bookEditSession.srcFsId
@@ -3993,6 +3996,7 @@ export default function App() {
         : undefined,
       inBookActivity,
       initialScope: opts.scope ?? (opts.path ? 'file' : undefined),
+      selection: opts.selection,
       loadFilesystem: async () => {
         const files = new Map<string, ArrayBuffer>()
         for (const file of await getAllFiles(fsId)) {
@@ -6253,7 +6257,7 @@ ${runProgramPython('exec(code_obj, globals())')}
                             onBeforeNewFile={handleBeforeNewFile}
                             onOpenNewFile={entry => void onOpenVFSFile(entry, { unsavedSettled: true })}
                             onPreviewHtml={entry => void handlePreviewHtml(entry)}
-                            onShare={(scope, path) => void openShareDialog({ scope, path })}
+                            onShare={(scope, path, selection) => void openShareDialog({ scope, path, selection })}
                             shareBook={isBookEditMode}
                             onResetToSource={activeFsRecord?.source || bookNavState?.activeChallengeId
                               ? () => void handleResetToSource() : undefined}

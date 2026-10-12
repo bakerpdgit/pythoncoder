@@ -10,7 +10,8 @@ import type { VFSEntry, VFSFilesystem } from '../../types'
 interface Props {
   /** The filesystem the entry is in — the one the File System panel shows. */
   sourceFsId: string
-  entry: VFSEntry
+  /** What to copy: one entry, or several siblings selected together. */
+  entries: VFSEntry[]
   /** Paths the panel hides in the source filesystem (a book activity's hidden files). */
   hiddenPaths?: string[]
   onCopied: (dstFsId: string, dstPath: string, written: PlannedCopy[]) => void
@@ -28,9 +29,13 @@ function destinationLabel(fs: VFSFilesystem, sourceFsId: string): string {
 /**
  * Copy to…: choose a filesystem, browse to a folder in it, and name the copy.
  * A name already taken there is refused with the chance to change it, never
- * overwritten.
+ * overwritten. Several entries keep their own names, and are refused together
+ * if any of them is taken.
  */
-export function CopyToDialog({ sourceFsId, entry, hiddenPaths, onCopied, onCancel }: Props) {
+export function CopyToDialog({ sourceFsId, entries, hiddenPaths, onCopied, onCancel }: Props) {
+  const entry = entries[0]
+  const single = entries.length === 1
+  const title = single ? entry.name : `${entries.length} items`
   const [filesystems, setFilesystems] = useState<VFSFilesystem[]>([])
   const [fsId, setFsId] = useState(sourceFsId)
   const [currentPath, setCurrentPath] = useState(getParentPath(entry.path))
@@ -102,7 +107,39 @@ export function CopyToDialog({ sourceFsId, entry, hiddenPaths, onCopied, onCance
     })
   }
 
+  const handleCopyMany = async () => {
+    if (fsId === sourceFsId) {
+      const intoItself = entries.find(e => e.type === 'folder'
+        && (joinVfsPath(currentPath, e.name) === e.path || copiesIntoItself(e.path, joinVfsPath(currentPath, e.name))))
+      if (intoItself) {
+        setError(`The folder "${intoItself.name}" cannot be copied into itself. Choose another folder.`)
+        return
+      }
+    }
+    setBusy(true)
+    try {
+      const taken: string[] = []
+      for (const e of entries) {
+        if (await getEntryByPath(fsId, joinVfsPath(currentPath, e.name))) taken.push(e.name)
+      }
+      if (taken.length) {
+        const names = taken.slice(0, 4).map(n => `"${n}"`).join(', ') + (taken.length > 4 ? `, and ${taken.length - 4} more` : '')
+        setError(`${names} already ${taken.length === 1 ? 'exists' : 'exist'} in ${folderLabel} of ${fsName(fsId)}. `
+          + 'Nothing was copied. Choose another folder, or make a new one.')
+        return
+      }
+      const written: PlannedCopy[] = []
+      for (const e of entries) written.push(...await copyEntry(sourceFsId, e.path, fsId, joinVfsPath(currentPath, e.name)))
+      onCopied(fsId, currentPath, written)
+    } catch (err) {
+      setError(`Could not copy: ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const handleCopy = async () => {
+    if (!single) { await handleCopyMany(); return }
     const trimmed = name.trim()
     if (!trimmed) { setError(`Give the copy a name.`); focusName(); return }
     if (trimmed.includes('/')) { setError('A name cannot contain "/".'); focusName(); return }
@@ -147,11 +184,11 @@ export function CopyToDialog({ sourceFsId, entry, hiddenPaths, onCopied, onCance
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
       onMouseDown={e => { if (e.target === e.currentTarget && !busy) onCancel() }}>
-      <div role="dialog" aria-modal="true" aria-label={`Copy ${entry.name} to`}
+      <div role="dialog" aria-modal="true" aria-label={`Copy ${title} to`}
         className="bg-slate-800 border border-slate-600 rounded-lg shadow-2xl w-full max-w-md mx-4 flex flex-col"
         style={{ maxHeight: '80vh' }}>
         <div className="px-5 py-4 border-b border-slate-700 flex items-center justify-between gap-3">
-          <span className="font-semibold text-slate-200 text-sm truncate">Copy “{entry.name}” to…</span>
+          <span className="font-semibold text-slate-200 text-sm truncate">Copy {single ? `“${title}”` : title} to…</span>
           <button type="button" onClick={onCancel} aria-label="Close" className="text-slate-400 hover:text-slate-200 transition-colors">
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
@@ -238,16 +275,24 @@ export function CopyToDialog({ sourceFsId, entry, hiddenPaths, onCopied, onCance
 
         <div className="px-4 py-4 border-t border-slate-700 flex flex-col gap-3">
           {error && <p role="alert" className="text-red-400 text-xs">{error}</p>}
-          <div className="flex gap-2 items-center">
-            <label htmlFor="copy-to-name" className="text-xs text-slate-400 flex-shrink-0">Name of copy:</label>
-            <input id="copy-to-name" ref={nameInputRef} value={name}
-              onChange={e => { setName(e.target.value); setError('') }}
-              onKeyDown={e => { if (e.key === 'Enter' && !busy) void handleCopy() }}
-              className="flex-1 min-w-0 bg-slate-900 border border-slate-600 rounded px-2 py-1 text-sm text-white focus:outline-none focus:ring-1 focus:ring-emerald-400" />
-          </div>
-          <p className="text-[11px] text-slate-500 truncate" title={`${fsName(fsId)} › ${joinVfsPath(currentPath, name.trim() || '…')}`}>
-            Copying to {fsName(fsId)} › {joinVfsPath(currentPath, name.trim() || '…')}
-          </p>
+          {single ? (
+            <>
+              <div className="flex gap-2 items-center">
+                <label htmlFor="copy-to-name" className="text-xs text-slate-400 flex-shrink-0">Name of copy:</label>
+                <input id="copy-to-name" ref={nameInputRef} value={name}
+                  onChange={e => { setName(e.target.value); setError('') }}
+                  onKeyDown={e => { if (e.key === 'Enter' && !busy) void handleCopy() }}
+                  className="flex-1 min-w-0 bg-slate-900 border border-slate-600 rounded px-2 py-1 text-sm text-white focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+              </div>
+              <p className="text-[11px] text-slate-500 truncate" title={`${fsName(fsId)} › ${joinVfsPath(currentPath, name.trim() || '…')}`}>
+                Copying to {fsName(fsId)} › {joinVfsPath(currentPath, name.trim() || '…')}
+              </p>
+            </>
+          ) : (
+            <p className="text-[11px] text-slate-500" title={entries.map(e => e.name).join('\n')}>
+              Copying {entries.map(e => e.name).slice(0, 3).join(', ')}{entries.length > 3 ? ` and ${entries.length - 3} more` : ''} to {fsName(fsId)} › {folderLabel}, keeping their names.
+            </p>
+          )}
           <div className="flex justify-end gap-3">
             <button type="button" onClick={onCancel} disabled={busy}
               className="px-4 py-2 rounded border border-slate-600 text-slate-300 text-sm hover:bg-slate-700 transition-colors">
