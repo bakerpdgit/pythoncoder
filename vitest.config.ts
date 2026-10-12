@@ -13,6 +13,10 @@ export default defineConfig({
     testTimeout: 20_000,
     hookTimeout: 20_000,
     setupFiles: ['./test/setup.ts'],
+    // Several suites import real .py files (the tkinter package, turtle.py,
+    // book modules) under native Python. Without this, every run writes
+    // __pycache__ beside those sources in the working tree.
+    env: { PYTHONDONTWRITEBYTECODE: '1' },
     include: ['src/**/*.{test,spec}.{ts,tsx}'],
     passWithNoTests: true,
     clearMocks: true,
