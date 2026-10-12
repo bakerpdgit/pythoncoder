@@ -62,7 +62,9 @@ Three layers, all of which should pass before a change is called done:
   tkinter) in the trace worker — animation visible mid-move, Trace stepping
   a drawing, keys and clicks, `textinput`, Stop in an endless loop, the replay
   slider, the service-worker rung — and on the main thread (with and without
-  JSPI), and checks each Settings choice lands on its own surface. `workflow.spec.ts` covers the keyboard shortcuts (font size, F5 / Ctrl+F5 /
+  JSPI), and checks each Settings choice lands on its own surface. `files.spec.ts` covers
+  the editor's Save / Save as split button and a file's Copy to… (into a folder
+  of another filesystem, a taken name refused and renamed). `workflow.spec.ts` covers the keyboard shortcuts (font size, F5 / Ctrl+F5 /
   Ctrl+Shift+F5, F11), Stay on run view, a reload mid-Run or on a held run
   view coming back to the editor, New file opening in the editor, and
   the tab group. `display.spec.ts` covers the Display pane across runs: emptied
@@ -220,13 +222,14 @@ src/
     dialogs/
       DialogProvider.tsx      # Promise-based styled confirm/choose/prompt/alert (useDialogs)
       ConfirmDialog.tsx       # Styled confirm dialog (with optional warning + checkbox)
-      SaveFileDialog.tsx      # Save-to-VFS path/name picker
+      SaveFileDialog.tsx      # Save-to-VFS path/name picker (also the editor's Save as)
+      CopyToDialog.tsx        # Copy to…: pick a filesystem, a folder in it, a name
       GitHubRepoBrowser.tsx   # Pick a book.json / ZIP / folder inside a repository
       ShareCodeDialog.tsx     # The Share my code wizard (share/: the Gist and repo steps)
       SimpleBookOption.tsx    # The (i) that explains a simple learning book
       ResourceFinder.tsx      # Find something online: GitHub / Google Drive / any address
     ui/
-      IconButton.tsx  FoldButton.tsx  ThemeToggleButton.tsx  ExecutionModeDialog.tsx
+      IconButton.tsx  SaveSplitButton.tsx  FoldButton.tsx  ThemeToggleButton.tsx  ExecutionModeDialog.tsx
       PanelVisibilityMenu.tsx  DiagramFontControls.tsx  SettingsDialog.tsx
       TabGroupDialog.tsx  PanelTabStrip.tsx
     diagrams/
@@ -1265,6 +1268,26 @@ https, isolated but no SharedArrayBuffer, a WebKit tab with no service worker
   of the student until it draws again — a changed turtle frame, a stdctx batch,
   a non-empty tkinter flush, a chart. pygame and the canvas turtle paint with
   nothing to hear, so their Display tab returns with the answer itself.
+
+### Save as, and Copy to…
+
+- The editor's save icon is a split button (`ui/SaveSplitButton.tsx`): the main
+  half does whichever of **Save** / **Save as…** was chosen last, and choosing
+  from its caret both switches it and does it. It starts on Save each session;
+  Ctrl+S is always Save. Book edit mode shows plain Save (that tab saves into
+  the book's own files).
+- **Save as** (`handleSaveAsDialogSave`) writes the editor's text to the new
+  path in the same filesystem and makes it the open file, *without* reloading
+  the editor — undo, cursor and breakpoints carry on, and the old file keeps its
+  last saved version. A taken name asks *Replace file?* first. Save with no file
+  open is Save as.
+- **Copy to…** on any file or folder's right-click (`dialogs/CopyToDialog.tsx`)
+  picks a filesystem (the student's own, plus the one on screen even when it is
+  a book activity's), browses its folders, and names the copy. A name already
+  taken there is never overwritten: the dialog says so and selects the name for
+  changing. `copyEntry` / `planEntryCopy` (`utils/virtualFS.ts`) copy a folder
+  with everything beneath it and refuse a folder copied into itself. It copies
+  what is saved, not the editor's unsaved changes.
 
 ### New file opens in the editor
 

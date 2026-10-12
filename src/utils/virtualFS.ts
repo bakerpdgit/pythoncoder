@@ -284,6 +284,64 @@ export async function renameEntry(fsId: string, path: string, newName: string): 
   await Promise.all(updates.map(u => idbPut(store, u)))
 }
 
+/** `/` + `a.py` → `/a.py`; `/data` + `a.py` → `/data/a.py`. */
+export function joinVfsPath(parentPath: string, name: string): string {
+  return parentPath === '/' ? `/${name}` : `${parentPath}/${name}`
+}
+
+/** One entry of a copy, already at the path it is copied to. */
+export interface PlannedCopy {
+  path: string
+  type: 'file' | 'folder'
+  content?: ArrayBuffer
+  mimeType?: string
+}
+
+/**
+ * What copying `srcPath` (a file, or a folder and everything in it) to
+ * `dstPath` writes, outermost first so every folder exists before its files.
+ * `entries` is the source filesystem; anything outside `srcPath` is ignored.
+ */
+export function planEntryCopy(entries: VFSEntry[], srcPath: string, dstPath: string): PlannedCopy[] {
+  return entries
+    .filter(e => e.path === srcPath || e.path.startsWith(srcPath + '/'))
+    .map(e => ({
+      path: dstPath + e.path.substring(srcPath.length),
+      type: e.type,
+      content: e.type === 'file' ? (e.content ?? new ArrayBuffer(0)) : undefined,
+      mimeType: e.type === 'file' ? e.mimeType : undefined,
+    }))
+    .sort((a, b) => a.path.split('/').length - b.path.split('/').length || a.path.localeCompare(b.path))
+}
+
+/** Would copying `srcPath` to `dstPath` within one filesystem put a folder inside itself? */
+export function copiesIntoItself(srcPath: string, dstPath: string): boolean {
+  return dstPath.startsWith(srcPath + '/')
+}
+
+/**
+ * Copy a file, or a folder and everything in it, to `dstPath` in `dstFsId`
+ * (which may be the same filesystem). The caller has already checked that
+ * nothing is at `dstPath`. Returns what was written, for mirroring to a
+ * connected local folder.
+ */
+export async function copyEntry(srcFsId: string, srcPath: string, dstFsId: string, dstPath: string): Promise<PlannedCopy[]> {
+  if (srcFsId === dstFsId && copiesIntoItself(srcPath, dstPath)) throw new Error('A folder cannot be copied into itself.')
+  const db = await openVFSDb()
+  const plan = planEntryCopy(await _getAllEntriesForFs(db, srcFsId), srcPath, dstPath)
+  if (plan.length === 0) throw new Error('Nothing to copy: the source no longer exists.')
+  for (const item of plan) {
+    if (item.type === 'file') {
+      // A copy of an untyped file stays untyped, as the original was.
+      await writeFile(dstFsId, item.path, item.content ?? new ArrayBuffer(0), item.mimeType)
+    } else if (!(await getEntryByPath(dstFsId, item.path))) {
+      await ensureAncestorFolders(dstFsId, item.path)
+      await createEntry(dstFsId, getParentPath(item.path), item.path.substring(item.path.lastIndexOf('/') + 1), 'folder')
+    }
+  }
+  return plan
+}
+
 export async function deleteEntry(fsId: string, path: string): Promise<void> {
   const db = await openVFSDb()
   const allEntries = await _getAllEntriesForFs(db, fsId)
