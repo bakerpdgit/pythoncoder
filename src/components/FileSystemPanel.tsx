@@ -10,8 +10,10 @@ import { isHtmlFile } from '../utils/htmlPreview'
 import { filesystemLabel } from '../utils/filesystemNames'
 import { ConfirmDialog } from './dialogs/ConfirmDialog'
 import { SaveFileDialog } from './dialogs/SaveFileDialog'
+import { CopyToDialog } from './dialogs/CopyToDialog'
 import { OpenResourceDialog } from './dialogs/OpenResourceDialog'
 import type { VFSEntry, VFSFilesystem, LocalFolderSyncOp } from '../types'
+import type { PlannedCopy } from '../utils/virtualFS'
 
 interface Props {
   activeFilesystemId: string
@@ -45,6 +47,8 @@ interface Props {
    */
   onResetToSource?: () => void
   onError: (msg: string) => void
+  /** A plain report of something done (a copy made), for the status line. */
+  onNotice?: (msg: string) => void
   onBookOpen?: (url: string) => void
   onLocalFileImport?: (fileMap: Map<string, ArrayBuffer>, sourceName: string) => Promise<void>
   onFolderConnect?: (handle: FileSystemDirectoryHandle) => Promise<void>
@@ -81,7 +85,7 @@ interface ImagePreview {
 export function FileSystemPanel({
   activeFilesystemId, currentWorkingDir, openFilePath, hiddenPaths, isChallengeMode,
   isBookOpen, onCloseBook, onOpenResourceUrl,
-  onFilesystemChange, onFilesystemForcedChange, onFilesystemCreated, onCwdChange, onOpenFile, onError, onBookOpen,
+  onFilesystemChange, onFilesystemForcedChange, onFilesystemCreated, onCwdChange, onOpenFile, onError, onNotice, onBookOpen,
   onBeforeNewFile, onOpenNewFile, onPreviewHtml, onShare, shareBook, onResetToSource, onLocalFileImport, onFolderConnect,
   isLocalFolderConnected, onLocalFolderSync, onReloadFolder, onDisconnectFolder, onCloseFolder,
   diskDeleteWarnDismissed, onDismissDiskDeleteWarn,
@@ -104,6 +108,7 @@ export function FileSystemPanel({
   const [showSaveDialog, setShowSaveDialog] = useState(false)
   const [pendingUpload, setPendingUpload] = useState<{ name: string; content: ArrayBuffer; mimeType: string; isNewFile?: boolean } | null>(null)
   const [imagePreview, setImagePreview] = useState<ImagePreview | null>(null)
+  const [copySource, setCopySource] = useState<VFSEntry | null>(null)
 
   // Single owner for the preview's blob URL: revoked when it is replaced and
   // when the panel unmounts, which closing alone used to miss.
@@ -228,6 +233,23 @@ export function FileSystemPanel({
         setConfirmConfig(null)
       },
     })
+  }
+
+  const handleCopied = async (dstFsId: string, dstPath: string, written: PlannedCopy[]) => {
+    const entry = copySource
+    setCopySource(null)
+    // Only the filesystem on screen can be the connected folder's.
+    if (dstFsId === activeFilesystemId && isLocalFolderConnected) {
+      for (const item of written) {
+        await onLocalFolderSync?.(item.type === 'folder'
+          ? { kind: 'mkdir', path: item.path }
+          : { kind: 'write', path: item.path, content: item.content ?? new ArrayBuffer(0) })
+      }
+    }
+    const where = dstFsId === activeFilesystemId ? dstPath
+      : `${dstPath} in ${filesystemLabel(filesystems.find(f => f.id === dstFsId) ?? { name: dstFsId })}`
+    onNotice?.(`Copied ${entry?.name ?? 'it'} to ${where}.`)
+    void reload()
   }
 
   const handleDownload = async (entry: VFSEntry) => {
@@ -705,6 +727,7 @@ export function FileSystemPanel({
             <CtxItem label="Preview HTML" onClick={() => { onPreviewHtml(contextMenu.entry); setContextMenu(null) }} />
           )}
           <CtxItem label="Rename" onClick={() => startRename(contextMenu.entry)} disabled={isProtected(contextMenu.entry)} />
+          <CtxItem label="Copy to…" onClick={() => { setCopySource(contextMenu.entry); setContextMenu(null) }} />
           <CtxItem label="Download" onClick={() => void handleDownload(contextMenu.entry)} />
           {onShare && !shareBook && contextMenu.entry.type === 'file' && (
             <CtxItem label="Share…" onClick={() => { onShare('file', contextMenu.entry.path); setContextMenu(null) }} />
@@ -736,6 +759,13 @@ export function FileSystemPanel({
           refuseExistingFile={pendingUpload?.isNewFile === true}
           onSave={(p, n) => void handleSaveDialogSave(p, n)}
           onCancel={() => { setShowSaveDialog(false); setPendingUpload(null) }} />
+      )}
+      {copySource && (
+        <CopyToDialog sourceFsId={activeFilesystemId}
+          entry={copySource}
+          hiddenPaths={hiddenPaths}
+          onCopied={(fsId, path, written) => void handleCopied(fsId, path, written)}
+          onCancel={() => setCopySource(null)} />
       )}
       {imagePreview && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80"

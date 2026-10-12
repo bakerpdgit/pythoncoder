@@ -248,6 +248,9 @@ html[data-theme="light"] .confirm-warning {
 }
 .icon-button:hover { border-color: #34d399; background: rgba(16, 185, 129, 0.12); color: #ffffff; }
 .icon-button:disabled { opacity: 0.45; cursor: not-allowed; }
+/* A split icon button: the action, then a narrow caret choosing which action. */
+.icon-button.split-main { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.icon-button.split-caret { width: 1.1rem; border-left-width: 0; border-top-left-radius: 0; border-bottom-left-radius: 0; }
 
 .insight-note-editor {
   width: 100%;

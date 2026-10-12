@@ -62,6 +62,7 @@ import { PanelVisibilityMenu } from './components/ui/PanelVisibilityMenu'
 import { LearningMenu, type LearningTutorial } from './components/ui/LearningMenu'
 import { DiagramFontControls } from './components/ui/DiagramFontControls'
 import { IconButton } from './components/ui/IconButton'
+import { SaveSplitButton, type SaveMode } from './components/ui/SaveSplitButton'
 import { FoldButton } from './components/ui/FoldButton'
 import { SettingsDialog } from './components/ui/SettingsDialog'
 import { TabGroupDialog } from './components/ui/TabGroupDialog'
@@ -376,6 +377,10 @@ export default function App() {
   const draftGateFsRef = useRef<string | null>(null)
   const [pendingCodeLoad, setPendingCodeLoad] = useState<{ content: string; name: string; rawBuffer: ArrayBuffer; mimeType: string } | null>(null)
   const [showCodeSaveDialog, setShowCodeSaveDialog] = useState(false)
+  // The editor's split save button: what its main half does. Starts on Save
+  // each session; choosing from its menu switches it.
+  const [saveMode, setSaveMode] = useState<SaveMode>('save')
+  const [showSaveAsDialog, setShowSaveAsDialog] = useState(false)
   const [htmlPreview, setHtmlPreview] = useState<{ fsId: string; path: string; name: string; url: string } | null>(null)
   const [diagramFontSize, setDiagramFontSize] = useState(DIAGRAM_FONT_DEFAULT)
   const [isPanelMenuOpen, setIsPanelMenuOpen] = useState(false)
@@ -1754,12 +1759,46 @@ export default function App() {
       setVfsReloadTrigger(t => t + 1)
       await syncToLocalFolder({ kind: 'write', path: openFilePath, content: content.buffer as ArrayBuffer })
     } else {
-      const name = codeFileName || DEFAULT_CODE_FILENAME
-      setPendingCodeLoad({ content: codeText, name, rawBuffer: new TextEncoder().encode(codeText).buffer as ArrayBuffer, mimeType: guessMimeType(name) })
-      setShowCodeSaveDialog(true)
+      // Nothing to save over yet: Save is Save as.
+      handleSaveCodeAs()
     }
   }
   saveCodeRef.current = () => { void handleSaveCode() }
+
+  const handleSaveCodeAs = () => {
+    if (!hasCode || isRunning) return
+    setShowSaveAsDialog(true)
+  }
+
+  /**
+   * Save as: the editor's text goes to a new file, which the editor then has
+   * open. The file it had open keeps its last saved version. The editor itself
+   * is untouched — undo, cursor and breakpoints all carry on.
+   */
+  const handleSaveAsDialogSave = async (parentPath: string, filename: string) => {
+    const path = parentPath === '/' ? `/${filename}` : `${parentPath}/${filename}`
+    const fsId = activeFilesystemId
+    try {
+      const existing = await getEntryByPath(fsId, path)
+      if (existing && path !== openFilePath && !(await dialogs.confirm({
+        title: 'Replace file?',
+        message: `"${filename}" already exists in ${parentPath === '/' ? 'Root' : parentPath}. Replace it with the editor's code?`,
+        confirmLabel: 'Replace', danger: true,
+      }))) return
+      const text = codeText
+      const content = new TextEncoder().encode(text).buffer as ArrayBuffer
+      await writeFile(fsId, path, content, guessMimeType(filename))
+      setOpenFilePath(path)
+      setCodeFileName(filename)
+      savedCodeRef.current = text
+      setIsUnsaved(false)
+      clearDraft(fsId)
+      setCodeStatus(`Saved as ${path}.`)
+      setShowSaveAsDialog(false)
+      setVfsReloadTrigger(t => t + 1)
+      await syncToLocalFolder({ kind: 'write', path, content })
+    } catch (err) { setCodeStatus(`Failed to save: ${String(err)}`) }
+  }
 
   const handleCloseFile = async () => {
     if (!canSwitchCodeSource()) return
@@ -6219,6 +6258,7 @@ ${runProgramPython('exec(code_obj, globals())')}
                             onResetToSource={activeFsRecord?.source || bookNavState?.activeChallengeId
                               ? () => void handleResetToSource() : undefined}
                             onError={msg => setCodeStatus(msg)}
+                            onNotice={msg => setCodeStatus(msg)}
                             onBookOpen={url => void handleBookOpen(url)}
                             onLocalFileImport={(m, n) => handleLocalFileImport(m, n)}
                             onFolderConnect={h => handleFolderConnect(h)}
@@ -6458,11 +6498,15 @@ ${runProgramPython('exec(code_obj, globals())')}
                     </div>
                     )}
                     {!isParsonsChallenge && (
-                    <IconButton title="Save to virtual filesystem" onClick={() => void handleSaveCode()} disabled={!hasCode || isRunning}>
-                      <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2zM17 21v-8H7v8M7 3v5h8" />
-                      </svg>
-                    </IconButton>
+                    <SaveSplitButton
+                      mode={saveMode}
+                      onModeChange={setSaveMode}
+                      onSave={() => void handleSaveCode()}
+                      onSaveAs={handleSaveCodeAs}
+                      disabled={!hasCode || isRunning}
+                      // Book edit mode saves into the book's own files: no new names there.
+                      saveOnly={isBookEditMode}
+                    />
                     )}
                     {!isBookEditMode && (
                     <IconButton title="Share your code" onClick={() => void openShareDialog({ scope: 'file' })}>
@@ -7041,6 +7085,18 @@ ${runProgramPython('exec(code_obj, globals())')}
           title={pendingCodeLoad.name ? `Save "${pendingCodeLoad.name}"` : 'Save File'}
           onSave={(p, n) => void handleCodeSaveDialogSave(p, n)}
           onCancel={() => { setShowCodeSaveDialog(false); setPendingCodeLoad(null) }}
+        />
+      )}
+
+      {/* Save as: a new name or folder for the editor's code */}
+      {showSaveAsDialog && (
+        <SaveFileDialog
+          fsId={activeFilesystemId}
+          initialPath={openFilePath ? openFilePath.substring(0, openFilePath.lastIndexOf('/')) || '/' : currentWorkingDir}
+          initialName={codeFileName || DEFAULT_CODE_FILENAME}
+          title="Save as"
+          onSave={(p, n) => void handleSaveAsDialogSave(p, n)}
+          onCancel={() => setShowSaveAsDialog(false)}
         />
       )}
 
