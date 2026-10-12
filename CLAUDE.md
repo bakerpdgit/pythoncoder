@@ -64,7 +64,9 @@ Three layers, all of which should pass before a change is called done:
   slider, the service-worker rung — and on the main thread (with and without
   JSPI), and checks each Settings choice lands on its own surface. `files.spec.ts` covers
   the editor's Save / Save as split button and a file's Copy to… (into a folder
-  of another filesystem, a taken name refused and renamed). `workflow.spec.ts` covers the keyboard shortcuts (font size, F5 / Ctrl+F5 /
+  of another filesystem, a taken name refused and renamed), selecting several
+  files with Ctrl/Shift+click (copied, refused, deleted and shared together),
+  and the New file menu staying inside a narrow sidebar. `workflow.spec.ts` covers the keyboard shortcuts (font size, F5 / Ctrl+F5 /
   Ctrl+Shift+F5, F11), Stay on run view, a reload mid-Run or on a held run
   view coming back to the editor, New file opening in the editor, and
   the tab group. `display.spec.ts` covers the Display pane across runs: emptied
@@ -198,6 +200,7 @@ src/
     workerBoot.ts             # starting a worker from a blob copy when its address is refused
     isolationSwitch.ts        # ?isolation=on|off: the cookie that asks the server for require-corp
     editorDraft.ts            # per-filesystem backup of the editor's unsaved changes
+    fileSelection.ts          # Ctrl/Shift+click selection in the file browser; keeping a menu on screen
     testMatcher.ts            # Challenge test evaluation
     download.ts               # File download helpers
     export.ts                 # Note/docstring export formatting
@@ -1288,6 +1291,34 @@ https, isolated but no SharedArrayBuffer, a WebKit tab with no service worker
   changing. `copyEntry` / `planEntryCopy` (`utils/virtualFS.ts`) copy a folder
   with everything beneath it and refuse a folder copied into itself. It copies
   what is saved, not the editor's unsaved changes.
+
+### Selecting several files
+
+- The File System panel selects as a file explorer does (`utils/fileSelection.ts`,
+  `clickSelection`, tested as rules): a plain click selects one and opens it as
+  before; **Ctrl/Cmd+click** adds or removes one and **Shift+click** selects a
+  run from the anchor (the last plain or Ctrl click), neither opening anything;
+  Ctrl+Shift adds the run. With the list focused, **Ctrl+A** selects all,
+  **Escape** clears, **Delete** deletes. A selection lives in the folder on
+  screen — navigating clears it, and a reload drops what is no longer listed.
+- Right-clicking inside a selection of several opens a shorter menu for all of
+  them: **Copy to…**, **Download as ZIP**, **Share…**, **Delete N items**.
+  Right-clicking anything else selects it alone first, as Explorer does.
+- **Delete** keeps what a single delete would refuse (Default's `main.py`, the
+  file open in the editor) and says so in the confirmation.
+- **Copy to…** (`CopyToDialog`, given `entries`) has no name box for several:
+  they keep their names, and if any is taken in the folder chosen, nothing is
+  copied and the taken names are listed.
+- **ZIP** and **Share** take the files under the selection *re-rooted at the
+  folder it is in* (`selectionFiles`): a selection in `/project` arrives at the
+  top of the ZIP, or of the recipient's filesystem. The Share wizard's `selection`
+  scope is cut from the same `loadFilesystem` read (so hidden activity files stay
+  out and unsaved editor changes go in), and is offered in a book activity, where
+  "all my files" is not — the student chose these files. Not in book edit mode.
+- **Menus stay on screen.** The New file / New folder menu hangs right-aligned
+  under its button and the panel clips it, so in a narrow sidebar it used to
+  start off the left edge; it and the right-click menu are measured as they
+  open and moved inside (`nudgeInside`) by a transform.
 
 ### New file opens in the editor
 
