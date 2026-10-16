@@ -15,7 +15,9 @@ import { TKINTER_SHIM_DIR } from './tkinterPaths'
  * `_coder_tk_fresh()` — a new tkinter and turtle for each test case and each
  * solution run, whose textinput()/numinput() take the test's inputs as
  * input() does (`_next_test_input`, from the tester's own setup); and
- * `_coder_turtle_svg(include_turtles)` — the drawing, or '' if there is none.
+ * `_coder_turtle_svg(include_turtles)` — the drawing, or '' if there is none;
+ * `_coder_p5_prepare(frames, mouse, pressed)` — a fresh p5 set up for a marked
+ * run; and `_coder_p5_capture()` — what its sketch drew (src/python/p5).
  */
 export const TKINTER_TEST_SETUP = String.raw`
 import sys as _ct_sys, os as _ct_os, json as _ct_json
@@ -47,7 +49,7 @@ _ct_importlib.invalidate_caches()
 
 def _coder_tk_fresh():
     for name in list(_ct_sys.modules):
-        if name in ('tkinter', 'Tkinter', 'turtle', '_coder_tk_host') or name.startswith('tkinter.'):
+        if name in ('tkinter', 'Tkinter', 'turtle', '_coder_tk_host', 'p5', 'pyp5js') or name.startswith('tkinter.'):
             del _ct_sys.modules[name]
     import tkinter
     import turtle
@@ -66,6 +68,25 @@ def _coder_tk_fresh():
 
     turtle.TurtleScreen.textinput = textinput
     turtle.TurtleScreen.numinput = numinput
+
+
+def _coder_p5_prepare(frames, mouse, pressed):
+    # A fresh p5 (with tkinter) for a marked run: draw() runs 'frames' times,
+    # the mouse is where the test says, and random() gives the same numbers to
+    # the student's sketch and to the solution.
+    _coder_tk_fresh()
+    import p5
+    p5._coder_test_config(frames=frames, mouse=mouse, pressed=pressed, seed=0)
+
+
+def _coder_p5_capture():
+    p5 = _ct_sys.modules.get('p5')
+    if p5 is None:
+        return ''
+    try:
+        return p5._coder_capture()
+    except Exception:
+        return ''
 
 
 def _coder_turtle_svg(include_turtles):

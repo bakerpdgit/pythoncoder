@@ -85,7 +85,7 @@ import { MATPLOTLIB_BOOTSTRAP, MATPLOTLIB_FLUSH_CODE } from './utils/matplotlib'
 import { PLOTLY_BOOTSTRAP, micropipInstallCode } from './utils/plotly'
 import {
   TKINTER_MAIN_THREAD_BOOTSTRAP, TKINTER_WORKER_AFTER_PROGRAM, TKINTER_WORKER_BOOTSTRAP, TKINTER_WORKER_SHUTDOWN,
-  codeUsesTkinter, detectTkinter, detectTurtle, loadCoderTkFiles, tkFilesForTesting,
+  codeUsesTkinter, detectP5, detectTkinter, detectTurtle, loadCoderTkFiles, tkFilesForTesting,
 } from './utils/tkinter'
 import { TkWorkerBridge } from './utils/tkWorkerBridge'
 import { TkRenderer } from './utils/tkinterRenderer'
@@ -4659,7 +4659,8 @@ export default function App() {
     const tkInWorker = turtleInWorker || tkinterInWorker
     if (turtleOnPage || (!tkInWorker && detectTkinter(capturedCode, programFiles))) {
       crashRetryRunRef.current = isCrashRetry
-      const pageNote = `[INFO] This program uses ${turtleOnPage ? 'turtle' : 'tkinter'}, which runs on the main thread: it runs normally, without stepping or the variable inspector.`
+      const pageLibrary = turtleOnPage ? 'turtle' : detectP5(capturedCode, programFiles) ? 'p5' : 'tkinter'
+      const pageNote = `[INFO] This program uses ${pageLibrary}, which runs on the main thread: it runs normally, without stepping or the variable inspector.`
       void startMainThreadRun(note ? `${pageNote}
 ${note}` : pageNote)
       return

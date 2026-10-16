@@ -1,0 +1,94 @@
+{
+  "name": "Python p5",
+  "id": "p5",
+  "children": [
+    { "id": "p5-first-sketch", "name": "1. Your first sketch", "guide": "01_first_sketch.md", "py": "01_first_sketch.py", "isExample": true },
+    {
+      "id": "p5-house",
+      "name": "2. Task: a house",
+      "guide": "02_house.md",
+      "py": "02_house.py",
+      "tests": [{ "in": [], "out": [{ "typ": "p5", "filename": "02_house_sol.py" }] }],
+      "additionalFiles": [{ "filename": "02_house_sol.py", "visible": false }]
+    },
+    { "id": "p5-colour", "name": "3. Colour", "guide": "03_colour.md", "py": "03_colour.py", "isExample": true },
+    {
+      "id": "p5-traffic-light",
+      "name": "4. Task: a traffic light",
+      "guide": "04_traffic_light.md",
+      "py": "04_traffic_light.py",
+      "tests": [{ "in": [], "out": [{ "typ": "p5", "filename": "04_traffic_light_sol.py" }] }],
+      "additionalFiles": [{ "filename": "04_traffic_light_sol.py", "visible": false }]
+    },
+    { "id": "p5-loops", "name": "5. Loops make patterns", "guide": "05_loops.md", "py": "05_loops.py", "isExample": true },
+    {
+      "id": "p5-checkerboard",
+      "name": "6. Task: a chessboard",
+      "guide": "06_checkerboard.md",
+      "py": "06_checkerboard.py",
+      "tests": [{ "in": [], "out": [{ "typ": "p5", "filename": "06_checkerboard_sol.py" }] }],
+      "additionalFiles": [{ "filename": "06_checkerboard_sol.py", "visible": false }]
+    },
+    { "id": "p5-animation", "name": "7. Animation", "guide": "07_animation.md", "py": "07_animation.py", "isExample": true },
+    {
+      "id": "p5-sunrise",
+      "name": "8. Task: sunrise",
+      "guide": "08_sunrise.md",
+      "py": "08_sunrise.py",
+      "tests": [
+        { "in": [], "out": [{ "typ": "p5", "filename": "08_sunrise_sol.py", "frames": 60 }] },
+        { "in": [], "out": [{ "typ": "p5", "filename": "08_sunrise_sol.py", "frames": 150 }] },
+        { "in": [], "out": [{ "typ": "p5", "filename": "08_sunrise_sol.py", "frames": 250 }] }
+      ],
+      "additionalFiles": [{ "filename": "08_sunrise_sol.py", "visible": false }]
+    },
+    { "id": "p5-mouse", "name": "9. The mouse", "guide": "09_mouse.md", "py": "09_mouse.py", "isExample": true },
+    {
+      "id": "p5-crosshair",
+      "name": "10. Task: a crosshair",
+      "guide": "10_crosshair.md",
+      "py": "10_crosshair.py",
+      "tests": [
+        { "in": [], "out": [{ "typ": "p5", "filename": "10_crosshair_sol.py", "mouse": [120, 90] }] },
+        { "in": [], "out": [{ "typ": "p5", "filename": "10_crosshair_sol.py", "mouse": [300, 250] }] },
+        { "in": [], "out": [{ "typ": "p5", "filename": "10_crosshair_sol.py", "mouse": [200, 320], "pressed": true }] }
+      ],
+      "additionalFiles": [{ "filename": "10_crosshair_sol.py", "visible": false }]
+    },
+    { "id": "p5-bouncing", "name": "11. Decisions: bouncing", "guide": "11_bouncing.md", "py": "11_bouncing.py", "isExample": true },
+    {
+      "id": "p5-bounce",
+      "name": "12. Task: bounce",
+      "guide": "12_bounce.md",
+      "py": "12_bounce.py",
+      "tests": [
+        { "in": [], "out": [{ "typ": "p5", "filename": "12_bounce_sol.py", "frames": 30 }] },
+        { "in": [], "out": [{ "typ": "p5", "filename": "12_bounce_sol.py", "frames": 75 }] },
+        { "in": [], "out": [{ "typ": "p5", "filename": "12_bounce_sol.py", "frames": 140 }] }
+      ],
+      "additionalFiles": [{ "filename": "12_bounce_sol.py", "visible": false }]
+    },
+    { "id": "p5-transformations", "name": "13. Moving, turning and scaling", "guide": "13_transformations.md", "py": "13_transformations.py", "isExample": true },
+    {
+      "id": "p5-flower",
+      "name": "14. Task: a flower",
+      "guide": "14_flower.md",
+      "py": "14_flower.py",
+      "tests": [{ "in": [], "out": [{ "typ": "p5", "filename": "14_flower_sol.py" }] }],
+      "additionalFiles": [{ "filename": "14_flower_sol.py", "visible": false }]
+    },
+    { "id": "p5-functions", "name": "15. Functions that draw", "guide": "15_functions.md", "py": "15_functions.py", "isExample": true },
+    {
+      "id": "p5-faces",
+      "name": "16. Task: faces",
+      "guide": "16_faces.md",
+      "py": "16_faces.py",
+      "tests": [{ "in": [], "out": [{ "typ": "p5", "filename": "16_faces_sol.py" }] }],
+      "additionalFiles": [{ "filename": "16_faces_sol.py", "visible": false }]
+    },
+    { "id": "p5-random-noise", "name": "17. Randomness and noise", "guide": "17_random_noise.md", "py": "17_random_noise.py", "isExample": true },
+    { "id": "p5-keyboard", "name": "18. The keyboard", "guide": "18_keyboard.md", "py": "18_keyboard.py", "isExample": true },
+    { "id": "p5-classes", "name": "19. Lists of objects", "guide": "19_classes.md", "py": "19_classes.py", "isExample": true },
+    { "id": "p5-catch-game", "name": "20. A whole game", "guide": "20_catch_game.md", "py": "20_catch_game.py", "isExample": true }
+  ]
+}

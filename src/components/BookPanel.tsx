@@ -94,9 +94,10 @@ function renderMarkdown(md: string, previewSvg: string | null, previewLoading: b
   const codeBlocks: string[] = []
   const inlineCodes: string[] = []
 
-  // Extract turtle preview tokens before HTML escaping. Supports markdown
-  // image syntax `![alt](turtlepreview)` and the legacy `{{turtle_preview}}`.
-  let text = md.replace(/!\[[^\]]*\]\(turtlepreview\)/g, '\x00TP\x00')
+  // Extract preview tokens before HTML escaping. Supports markdown image
+  // syntax `![alt](turtlepreview)` / `![alt](p5preview)` and the legacy
+  // `{{turtle_preview}}`.
+  let text = md.replace(/!\[[^\]]*\]\((?:turtle|p5)preview\)/g, '\x00TP\x00')
                 .replace(/\{\{turtle_preview\}\}/g, '\x00TP\x00')
 
   text = text.replace(/```(?:[^\n]*)?\n([\s\S]*?)```/g, (_, code: string) => {
@@ -149,9 +150,9 @@ function renderMarkdown(md: string, previewSvg: string | null, previewLoading: b
       return `<div class="my-2 flex justify-center"><div class="turtle-preview-wrapper">${previewSvg}</div></div>`
     }
     if (previewLoading) {
-      return '<div class="border border-slate-700 rounded p-3 my-2 text-center text-slate-500 italic text-xs">Generating turtle preview…</div>'
+      return '<div class="border border-slate-700 rounded p-3 my-2 text-center text-slate-500 italic text-xs">Generating preview…</div>'
     }
-    return '<div class="border border-slate-700 rounded p-3 my-2 text-center text-slate-500 italic text-xs">Turtle preview unavailable</div>'
+    return '<div class="border border-slate-700 rounded p-3 my-2 text-center text-slate-500 italic text-xs">Preview unavailable</div>'
   })
 
   return text
@@ -454,7 +455,9 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [navState.activeChallengeId, navState.currentBookUrl, activeGuidePath])
 
-  // Generate turtle preview SVG when a challenge with `![preview](turtlepreview)` loads
+  // Generate the preview when a challenge with `![preview](turtlepreview)` (an
+  // SVG of the solution's turtle drawing) or `![preview](p5preview)` (a picture
+  // of the solution's p5 sketch) loads
   useEffect(() => {
     if (previewWorkerRef.current) {
       previewWorkerRef.current.terminate()
@@ -466,20 +469,25 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
       setPreviewLoading(false)
       return
     }
-    const hasPreviewToken = /!\[[^\]]*\]\(turtlepreview\)|\{\{turtle_preview\}\}/.test(guideMarkdown)
+    const p5Preview = /!\[[^\]]*\]\(p5preview\)/.test(guideMarkdown)
+    const hasPreviewToken = p5Preview || /!\[[^\]]*\]\(turtlepreview\)|\{\{turtle_preview\}\}/.test(guideMarkdown)
     if (!hasPreviewToken) { setPreviewLoading(false); return }
 
     const challenge = findChallenge(manifest, navState.activeChallengeId)
     if (!challenge?.tests?.length) { setPreviewLoading(false); return }
 
-    // Find first test case with a 't' requirement that names a filename
+    // Find the first test case with a 't' (or, for a p5 preview, 'p5')
+    // requirement that names a filename
+    const previewTyp = p5Preview ? 'p5' : 't'
     let solutionFilename: string | undefined
+    let previewReq: BookTestOutputReq | undefined
     let firstInputs: Array<string | number> = []
     for (const tc of challenge.tests) {
       const reqs = Array.isArray(tc.out) ? (tc.out as BookTestOutputReq[]) : []
-      const tReq = reqs.find(r => r.typ === 't' && r.filename)
+      const tReq = reqs.find(r => r.typ === previewTyp && r.filename)
       if (tReq?.filename) {
         solutionFilename = tReq.filename
+        previewReq = tReq
         firstInputs = normalizeTestInputs(tc.in)
         break
       }
@@ -518,8 +526,14 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
         worker.onmessage = (e: MessageEvent) => {
           if (cancelled) return
           if (e.data.type === 'preview_done') {
-            const raw = String(e.data.svg ?? '')
-            setPreviewSvg(raw ? makeResponsiveSvg(raw) : '')
+            if (p5Preview) {
+              const png = String(e.data.png ?? '')
+              const width = Number(e.data.width) || 0
+              setPreviewSvg(png ? `<img src="${png}" alt="What the finished sketch draws" class="p5-preview" style="max-width:min(100%, ${width}px)">` : '')
+            } else {
+              const raw = String(e.data.svg ?? '')
+              setPreviewSvg(raw ? makeResponsiveSvg(raw) : '')
+            }
             setPreviewLoading(false)
             worker.terminate()
             if (previewWorkerRef.current === worker) previewWorkerRef.current = null
@@ -531,11 +545,12 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
           }
         }
         worker.postMessage({
-          type: 'preview_turtle',
+          type: p5Preview ? 'preview_p5' : 'preview_turtle',
           solutionCode,
           inputs: firstInputs,
           files: allFiles.map(f => ({ path: f.path, content: f.content })),
           tkFiles,
+          req: previewReq,
         })
       } catch {
         if (!cancelled) setPreviewLoading(false)

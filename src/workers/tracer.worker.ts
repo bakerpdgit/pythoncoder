@@ -1297,6 +1297,14 @@ def snapshot_state(frame):
 def flush_drawing_before_pause():
     # Coder's tkinter batches what it sends the page; a paused line must not
     # leave half its drawing in the batch. Nothing of the student's runs here.
+    # A p5 sketch holds a frame back until draw() returns; paused inside
+    # draw(), the student should see what the lines so far have drawn.
+    p5 = sys.modules.get("p5")
+    if p5 is not None and hasattr(p5, "_coder_flush_partial"):
+        try:
+            p5._coder_flush_partial()
+        except Exception:
+            pass
     tk = sys.modules.get("tkinter")
     app = getattr(tk, "_app", None)
     if app is not None:

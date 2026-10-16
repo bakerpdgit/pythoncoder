@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process'
 import { describe, expect, it } from 'vitest'
-import { TKINTER_MAIN_THREAD_BOOTSTRAP, codeUsesTkinter, detectTkinter } from './tkinter'
+import { TKINTER_MAIN_THREAD_BOOTSTRAP, TKINTER_WORKER_BOOTSTRAP, codeUsesP5, codeUsesTkinter, detectP5, detectTkinter, tkFilesForTesting } from './tkinter'
 import { TKINTER_SHIM_FILES } from './tkinterSources'
 
 const pythonAvailable = spawnSync('python', ['--version']).status === 0
@@ -43,7 +43,38 @@ describe('tkinter detection', () => {
   })
 })
 
+describe('p5 detection', () => {
+  it.each(['from p5 import *', 'import p5', 'from pyp5js import *', 'import math, p5'])('spots %s, and counts it as a tkinter program', source => {
+    // A sketch is drawn in a window of Coder's tkinter, so every runtime
+    // decision that asks about tkinter has to say yes to it too.
+    expect(codeUsesP5(source)).toBe(true)
+    expect(codeUsesTkinter(source)).toBe(true)
+  })
+
+  it.each(['# from p5 import *', 'import p5js', 'print("import p5")'])('ignores %s', source => {
+    expect(codeUsesP5(source)).toBe(false)
+  })
+
+  it('finds a sketch kept in a module the program imports', () => {
+    expect(detectP5('import shapes', [file('/shapes.py', 'from p5 import *\n')])).toBe(true)
+    expect(detectP5('print(1)', [file('/notes.txt', 'from p5 import *')])).toBe(false)
+  })
+
+  it('ships p5 with the package, and sends it to the tester for p5 tests and sketches', async () => {
+    expect(Object.keys(TKINTER_SHIM_FILES)).toEqual(expect.arrayContaining(['p5/__init__.py', 'pyp5js.py']))
+    expect(await tkFilesForTesting('print(1)', [], [{ out: [{ typ: 'p5', filename: 'sol.py' }] }])).not.toBeNull()
+    expect(await tkFilesForTesting('from p5 import *', [])).not.toBeNull()
+    expect(await tkFilesForTesting('print(1)', [], [{ out: 'hi' }])).toBeNull()
+  })
+})
+
 describe.skipIf(!pythonAvailable)('the tkinter bootstrap', () => {
+  it('compiles the worker bootstrap too', () => {
+    const result = spawnSync('python', ['-c', 'import sys; compile(sys.stdin.read(), "<bootstrap>", "exec"); print("ok")'], { input: TKINTER_WORKER_BOOTSTRAP, encoding: 'utf8' })
+    expect(result.stderr).toBe('')
+    expect(result.stdout.trim()).toBe('ok')
+  })
+
   it('compiles, top-level await and all', () => {
     const script = [
       'import ast, sys',

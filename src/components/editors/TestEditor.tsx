@@ -18,6 +18,7 @@ const REQ_TYPES: Array<{ value: string; label: string }> = [
   { value: 's+', label: 'statement result contains (s+)' },
   { value: 's-', label: "statement result doesn't (s-)" },
   { value: 't', label: 'turtle (t)' },
+  { value: 'p5', label: 'p5 drawing (p5)' },
 ]
 
 // Convert a test case's `in` to a display string (one input per line).
@@ -38,8 +39,13 @@ function cleanReq(r: BookTestOutputReq): BookTestOutputReq {
   if (r.typ && r.typ !== '+') out.typ = r.typ
   if (r.ignore) out.ignore = r.ignore
   if (r.count !== undefined && String(r.count) !== '' && Number(r.count) !== -1) out.count = r.count
-  if ((r.typ === 'f+' || r.typ === 'f-' || r.typ === 't') && r.filename) out.filename = r.filename
+  if ((r.typ === 'f+' || r.typ === 'f-' || r.typ === 't' || r.typ === 'p5') && r.filename) out.filename = r.filename
   if ((r.typ === 's+' || r.typ === 's-') && r.statement) out.statement = r.statement
+  if (r.typ === 'p5') {
+    if (r.frames !== undefined && String(r.frames) !== '' && Number(r.frames) !== 1) out.frames = Number(r.frames)
+    if (Array.isArray(r.mouse)) out.mouse = r.mouse
+    if (r.pressed === true) out.pressed = true
+  }
   return out
 }
 
@@ -68,8 +74,16 @@ function IgnoreToggle({ flags, onChange }: { flags: string; onChange: (f: string
 
 function AdvancedRow({ req, onChange, onDelete }: { req: BookTestOutputReq; onChange: (r: BookTestOutputReq) => void; onDelete: () => void }) {
   const typ = req.typ ?? '+'
-  const needsFilename = typ === 'f+' || typ === 'f-' || typ === 't'
+  const needsFilename = typ === 'f+' || typ === 'f-' || typ === 't' || typ === 'p5'
   const needsStatement = typ === 's+' || typ === 's-'
+  const isP5 = typ === 'p5'
+  const mouse = Array.isArray(req.mouse) ? req.mouse : null
+  const setMouse = (i: 0 | 1, text: string) => {
+    const next: [number, number] = [mouse?.[0] ?? 0, mouse?.[1] ?? 0]
+    next[i] = Number(text) || 0
+    const other = text === '' && (i === 0 ? mouse?.[1] : mouse?.[0]) === undefined
+    onChange({ ...req, mouse: other ? undefined : next })
+  }
   return (
     <div className="flex flex-col gap-1 p-1.5 rounded border border-slate-700 bg-slate-900/40">
       <div className="flex items-center gap-1">
@@ -82,20 +96,46 @@ function AdvancedRow({ req, onChange, onDelete }: { req: BookTestOutputReq; onCh
           <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" /></svg>
         </button>
       </div>
-      <input aria-label="Pattern (regex)" value={req.pattern ?? ''} placeholder="pattern (regex)"
-        onChange={e => onChange({ ...req, pattern: e.target.value })}
-        className="w-full bg-slate-950 border border-slate-700 rounded px-1.5 py-0.5 text-[11px] font-mono text-slate-200 focus:outline-none focus:ring-1 focus:ring-sky-400" />
+      {!isP5 && (
+        <input aria-label="Pattern (regex)" value={req.pattern ?? ''} placeholder="pattern (regex)"
+          onChange={e => onChange({ ...req, pattern: e.target.value })}
+          className="w-full bg-slate-950 border border-slate-700 rounded px-1.5 py-0.5 text-[11px] font-mono text-slate-200 focus:outline-none focus:ring-1 focus:ring-sky-400" />
+      )}
       {needsFilename && (
-        <input aria-label="Filename" value={req.filename ?? ''} placeholder="filename"
+        <input aria-label="Filename" value={req.filename ?? ''} placeholder={isP5 ? 'solution file, e.g. task_sol.py' : 'filename'}
           onChange={e => onChange({ ...req, filename: e.target.value })}
           className="w-full bg-slate-950 border border-slate-700 rounded px-1.5 py-0.5 text-[11px] font-mono text-slate-200 focus:outline-none focus:ring-1 focus:ring-sky-400" />
+      )}
+      {isP5 && (
+        <div className="flex flex-wrap items-center gap-2 text-[10px] text-slate-400" title="How the sketch is run before its picture is compared with the solution's">
+          <label className="flex items-center gap-1">
+            frames
+            <input aria-label="Frames" type="number" min={1} value={req.frames ?? ''} placeholder="1"
+              onChange={e => onChange({ ...req, frames: e.target.value === '' ? undefined : Number(e.target.value) })}
+              className="w-12 bg-slate-950 border border-slate-700 rounded px-1 py-0.5 text-[11px] text-slate-200 focus:outline-none" />
+          </label>
+          <label className="flex items-center gap-1">
+            mouse
+            <input aria-label="Mouse x" type="number" value={mouse?.[0] ?? ''} placeholder="x"
+              onChange={e => setMouse(0, e.target.value)}
+              className="w-12 bg-slate-950 border border-slate-700 rounded px-1 py-0.5 text-[11px] text-slate-200 focus:outline-none" />
+            <input aria-label="Mouse y" type="number" value={mouse?.[1] ?? ''} placeholder="y"
+              onChange={e => setMouse(1, e.target.value)}
+              className="w-12 bg-slate-950 border border-slate-700 rounded px-1 py-0.5 text-[11px] text-slate-200 focus:outline-none" />
+          </label>
+          <label className="flex items-center gap-1">
+            <input aria-label="Mouse pressed" type="checkbox" checked={req.pressed === true}
+              onChange={e => onChange({ ...req, pressed: e.target.checked || undefined })} />
+            pressed
+          </label>
+        </div>
       )}
       {needsStatement && (
         <input aria-label="Statement" value={req.statement ?? ''} placeholder="statement e.g. add(2,3)"
           onChange={e => onChange({ ...req, statement: e.target.value })}
           className="w-full bg-slate-950 border border-slate-700 rounded px-1.5 py-0.5 text-[11px] font-mono text-slate-200 focus:outline-none focus:ring-1 focus:ring-sky-400" />
       )}
-      <div className="flex items-center gap-2">
+      <div className={`flex items-center gap-2 ${isP5 ? 'hidden' : ''}`}>
         <IgnoreToggle flags={req.ignore ?? ''} onChange={f => onChange({ ...req, ignore: f })} />
         <label className="flex items-center gap-1 text-[10px] text-slate-400">
           count
