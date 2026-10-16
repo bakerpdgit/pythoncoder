@@ -32,4 +32,4 @@ time. Arrays only combine like this when their shapes fit - make `overnight_low`
 six numbers long and NumPy will tell you exactly why it cannot.
 
 **Try it:** print `celsius > 25`. You get an array of `True`/`False`, one per day.
-Example 4 shows what that is for.
+Page 7 shows what that is for.

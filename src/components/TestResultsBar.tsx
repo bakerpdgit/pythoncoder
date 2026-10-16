@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { OverallTestResult, TestCaseResult, BookTestOutputReq, P5Comparison } from '../types'
+import type { OverallTestResult, TestCaseResult, BookTestOutputReq, ChartComparison, P5Comparison } from '../types'
 
 interface Props {
   result: OverallTestResult | null
@@ -42,26 +42,58 @@ function formatExpected(out: string | BookTestOutputReq[]): string {
   if (typeof out === 'string') return out || '(any)'
   if (out.length === 0) return '(any)'
   if (out.length === 1 && out[0].typ === 'p5') return describeP5(out[0])
+  if (out.length === 1 && out[0].typ === 'chart') return 'same chart'
   if (out.length === 1 && out[0].pattern) return out[0].pattern
   return `${out.length} checks`
 }
 
 /** A p5 drawing that did not match: what the tester said, and the two pictures with their differences. */
 function P5Difference({ result }: { result: P5Comparison }) {
-  const pictures = [
-    { label: 'Expected', src: result.expected },
-    { label: 'Yours', src: result.actual },
-    { label: 'Differences', src: result.diff },
-  ].filter(p => p.src)
+  return (
+    <PictureDifference
+      what="drawing"
+      messages={[result.message]}
+      pictures={[
+        { label: 'Expected', src: result.expected },
+        { label: 'Yours', src: result.actual },
+        { label: 'Differences', src: result.diff },
+      ]}
+    />
+  )
+}
+
+/** A chart that did not match: each difference in words, and the two charts. */
+function ChartDifference({ result }: { result: ChartComparison }) {
+  const messages = result.differences?.length ? result.differences : [result.message]
+  return (
+    <PictureDifference
+      what="chart"
+      messages={messages}
+      pictures={[
+        { label: 'Expected', src: result.expected },
+        { label: 'Yours', src: result.actual },
+      ]}
+    />
+  )
+}
+
+function PictureDifference({ what, messages, pictures: offered }: {
+  what: string
+  messages: string[]
+  pictures: Array<{ label: string; src?: string }>
+}) {
+  const pictures = offered.filter(p => p.src)
   return (
     <tr className="border-t border-slate-700/50 bg-slate-900/40">
       <td colSpan={4} className="px-3 py-1.5 text-[10px]">
-        <div className="text-slate-300">{result.message}</div>
+        {messages.length === 1
+          ? <div className="text-slate-300">{messages[0]}</div>
+          : <ul className="list-disc pl-4 text-slate-300 space-y-0.5">{messages.map((m, i) => <li key={i}>{m}</li>)}</ul>}
         {pictures.length > 0 && (
           <div className="mt-1 flex gap-2">
             {pictures.map(p => (
               <figure key={p.label} className="flex-1 min-w-0 max-w-[160px]">
-                <img src={p.src} alt={p.label === 'Yours' ? 'Your drawing' : `${p.label} drawing`} className="block w-full h-auto rounded border border-slate-600 bg-white" />
+                <img src={p.src} alt={p.label === 'Yours' ? `Your ${what}` : `${p.label} ${what}`} className="block w-full h-auto rounded border border-slate-600 bg-white" />
                 <figcaption className="text-center text-slate-500 mt-0.5">{p.label}</figcaption>
               </figure>
             ))}
@@ -123,7 +155,8 @@ function TestCaseRow({ tc, index }: { tc: TestCaseResult; index: number }) {
         </tr>
       )}
       {!tc.passed && tc.reveal && tc.reqResults.map((rr, ri) => (rr.p5 && !rr.passed ? <P5Difference key={`p5-${ri}`} result={rr.p5} /> : null))}
-      {!tc.passed && tc.reveal && tc.output !== undefined && !(tc.output === '' && tc.reqResults.some(rr => rr.p5)) && (
+      {!tc.passed && tc.reveal && tc.reqResults.map((rr, ri) => (rr.chart && !rr.passed ? <ChartDifference key={`chart-${ri}`} result={rr.chart} /> : null))}
+      {!tc.passed && tc.reveal && tc.output !== undefined && !(tc.output === '' && tc.reqResults.some(rr => rr.p5 || rr.chart)) && (
         <tr className="border-t border-slate-700/50 bg-slate-900/40">
           <td colSpan={4} className="px-3 py-1.5 text-[10px]">
             <span className="text-slate-500">Actual output:</span>

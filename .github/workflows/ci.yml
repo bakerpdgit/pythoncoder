@@ -23,6 +23,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+      # chartCheck.test.ts and dataScienceBook.test.ts run the chart marking and
+      # every page of the Data Science book under this Python, and skip
+      # themselves without these.
+      - run: pip install numpy pandas matplotlib seaborn "plotly[express]"
       - run: npm ci
       - run: npx tsc -b
       - run: npm test

@@ -1,7 +1,7 @@
-# A chart the reader can interrogate
+# Plotly in detail, trace by trace
 
-Everything so far has produced a picture. Plotly produces a small web page, and
-the Display pane shows it - so this chart is **live**:
+Page 37 made a whole interactive chart in one call. This one builds it piece by
+piece, which is how you get control over every detail. It is still **live**:
 
 - **hover** a point to read its exact value,
 - **drag** across the chart to zoom into a range, double-click to zoom back out,
@@ -18,9 +18,10 @@ figure = go.Figure()
 figure.add_trace(go.Scatter(x=months, y=values, name="North", mode="lines+markers"))
 ```
 
-Each `add_trace` adds one series. `plotly.express` would draw the same chart in a
-single line from a DataFrame; `graph_objects` is the longer road that lets you set
-every detail, which is what this example is for.
+Each `add_trace` adds one series. `px.line` would draw the same chart in a single
+line from a DataFrame; `graph_objects` is the longer road that lets you set every
+detail, which is what this example is for. `update_layout` then sets everything
+that belongs to the chart as a whole: the title, the axis titles, the legend.
 
 ## The hover template is the interesting part
 

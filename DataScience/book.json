@@ -2,89 +2,45 @@
   "name": "Data Science",
   "id": "data-science",
   "children": [
-    {
-      "id": "ds-arrays",
-      "name": "1. Arrays: whole columns at a time",
-      "guide": "01_arrays.md",
-      "py": "01_arrays.py",
-      "isExample": true
-    },
-    {
-      "id": "ds-statistics",
-      "name": "2. Describing a column of numbers",
-      "guide": "02_statistics.md",
-      "py": "02_statistics.py",
-      "isExample": true
-    },
-    {
-      "id": "ds-tables",
-      "name": "3. Rows, columns and axis",
-      "guide": "03_tables.md",
-      "py": "03_tables.py",
-      "isExample": true
-    },
-    {
-      "id": "ds-filtering",
-      "name": "4. Filtering with masks",
-      "guide": "04_filtering.md",
-      "py": "04_filtering.py",
-      "isExample": true
-    },
-    {
-      "id": "ds-first-chart",
-      "name": "5. Your first chart",
-      "guide": "05_first_chart.md",
-      "py": "05_first_chart.py",
-      "isExample": true
-    },
-    {
-      "id": "ds-bar-chart",
-      "name": "6. Bars worth reading",
-      "guide": "06_bar_chart.md",
-      "py": "06_bar_chart.py",
-      "isExample": true
-    },
-    {
-      "id": "ds-subplots",
-      "name": "7. Four charts, one story",
-      "guide": "07_subplots.md",
-      "py": "07_subplots.py",
-      "isExample": true
-    },
-    {
-      "id": "ds-trend-line",
-      "name": "8. Fitting a trend line",
-      "guide": "08_trend_line.md",
-      "py": "08_trend_line.py",
-      "isExample": true
-    },
-    {
-      "id": "ds-seaborn-style",
-      "name": "9. Seaborn: style and distributions",
-      "guide": "09_seaborn_style.md",
-      "py": "09_seaborn_style.py",
-      "isExample": true
-    },
-    {
-      "id": "ds-seaborn-categories",
-      "name": "10. Comparing groups",
-      "guide": "10_seaborn_categories.md",
-      "py": "10_seaborn_categories.py",
-      "isExample": true
-    },
-    {
-      "id": "ds-heatmap",
-      "name": "11. Everything against everything",
-      "guide": "11_heatmap.md",
-      "py": "11_heatmap.py",
-      "isExample": true
-    },
-    {
-      "id": "ds-plotly-interactive",
-      "name": "12. An interactive chart",
-      "guide": "12_plotly_interactive.md",
-      "py": "12_plotly_interactive.py",
-      "isExample": true
-    }
+    {"id": "ds-arrays", "name": "1. Arrays: whole columns at a time", "guide": "01_arrays.md", "py": "01_arrays.py", "isExample": true},
+    {"id": "ds-task-running", "name": "2. Task: a week of running", "guide": "02_running.md", "py": "02_running.py", "tests": [{"in": [], "out": [{"pattern": "miles : \\[3\\.23, 1\\.86, 5\\.22, 0\\.0, 3\\.79, 6\\.21, 2\\.8\\]", "ignore": "w"}, {"pattern": "difference: \\[0\\.2, -2\\.0, 0\\.4, 0\\.0, 1\\.1, -2\\.0, -0\\.5\\]", "ignore": "w"}, {"pattern": "total km : 37\\.2", "ignore": "w"}, {"typ": "c-", "pattern": "\\bfor\\s+\\w+(\\s*,\\s*\\w+)*\\s+in\\b"}]}], "additionalFiles": [{"filename": "02_running_sol.py", "visible": false}]},
+    {"id": "ds-statistics", "name": "3. Describing a column of numbers", "guide": "03_statistics.md", "py": "03_statistics.py", "isExample": true},
+    {"id": "ds-task-reaction", "name": "4. Task: reaction times", "guide": "04_reaction.md", "py": "04_reaction.py", "tests": [{"in": [], "out": [{"pattern": "mean 280\\.4 ms", "ignore": "w"}, {"pattern": "median 270\\.5 ms", "ignore": "w"}, {"pattern": "std dev 48\\.3 ms", "ignore": "w"}, {"pattern": "fastest Ivy", "ignore": "w"}, {"pattern": "slowest Eli", "ignore": "w"}]}], "additionalFiles": [{"filename": "04_reaction_sol.py", "visible": false}]},
+    {"id": "ds-tables", "name": "5. Rows, columns and axis", "guide": "05_tables.md", "py": "05_tables.py", "isExample": true},
+    {"id": "ds-task-house-points", "name": "6. Task: house points", "guide": "06_house_points.md", "py": "06_house_points.py", "tests": [{"in": [], "out": [{"pattern": "Ash 70", "ignore": "w"}, {"pattern": "Beech 75", "ignore": "w"}, {"pattern": "Cedar 66", "ignore": "w"}, {"pattern": "Oak 83", "ignore": "w"}, {"pattern": "best each week: \\[18, 19, 21, 20, 22\\]", "ignore": "w"}, {"pattern": "week 3 : \\[9, 16, 21, 11\\]", "ignore": "w"}, {"pattern": "winner : Oak", "ignore": "w"}]}], "additionalFiles": [{"filename": "06_house_points_sol.py", "visible": false}]},
+    {"id": "ds-filtering", "name": "7. Filtering with masks", "guide": "07_filtering.md", "py": "07_filtering.py", "isExample": true},
+    {"id": "ds-task-wet-days", "name": "8. Task: wet days", "guide": "08_wet_days.md", "py": "08_wet_days.py", "tests": [{"in": [], "out": [{"pattern": "wet days : \\[2, 3, 5, 6, 9, 11, 12, 13\\]", "ignore": "w"}, {"pattern": "how many : 8", "ignore": "w"}, {"pattern": "rain on them : 46\\.4 mm", "ignore": "w"}, {"pattern": "drizzle days : \\[2, 9, 12\\]", "ignore": "w"}, {"pattern": "labels : \\['dry', 'wet', 'wet', 'dry', 'wet', 'wet', 'dry', 'dry', 'wet', 'dry', 'wet', 'wet', 'wet', 'dry'\\]", "ignore": "w"}]}], "additionalFiles": [{"filename": "08_wet_days_sol.py", "visible": false}]},
+    {"id": "ds-dataframes", "name": "9. Tables with names: pandas", "guide": "09_dataframes.md", "py": "09_dataframes.py", "isExample": true},
+    {"id": "ds-task-tuck-shop", "name": "10. Task: the tuck shop", "guide": "10_tuck_shop.md", "py": "10_tuck_shop.py", "tests": [{"in": [], "out": [{"pattern": "item price sold takings", "ignore": "w"}, {"pattern": "Pasta pot 2\\.5 37 92\\.5", "ignore": "w"}, {"pattern": "total takings: £399\\.70", "ignore": "w"}, {"pattern": "best seller : Pasta pot", "ignore": "w"}]}], "additionalFiles": [{"filename": "10_tuck_shop_sol.py", "visible": false}]},
+    {"id": "ds-read-csv", "name": "11. Reading a CSV file", "guide": "11_read_csv.md", "py": "11_read_csv.py", "isExample": true, "additionalFiles": [{"filename": "data/weather.csv", "visible": true}]},
+    {"id": "ds-task-survey", "name": "12. Task: a school survey", "guide": "12_survey.md", "py": "12_survey.py", "tests": [{"in": [], "out": [{"pattern": "students : 150", "ignore": "w"}, {"pattern": "mean sleep : 8\\.53 hours", "ignore": "w"}, {"pattern": "longest trip: 49 minutes", "ignore": "w"}]}], "additionalFiles": [{"filename": "data/survey.csv", "visible": true}, {"filename": "12_survey_sol.py", "visible": false}]},
+    {"id": "ds-choosing-rows", "name": "13. Choosing rows, and putting them in order", "guide": "13_choosing_rows.md", "py": "13_choosing_rows.py", "isExample": true, "additionalFiles": [{"filename": "data/weather.csv", "visible": true}]},
+    {"id": "ds-task-survey-questions", "name": "14. Task: questions for the survey", "guide": "14_survey_questions.md", "py": "14_survey_questions.py", "tests": [{"in": [], "out": [{"pattern": "short sleepers: 33", "ignore": "w"}, {"pattern": "their mean screen time: 3\\.6 hours", "ignore": "w"}, {"pattern": "quick cyclists: 11", "ignore": "w"}, {"pattern": "most screen time: student year_group screen_time S107 11 5\\.1", "ignore": "w"}, {"pattern": "S014 9 5\\.0", "ignore": "w"}, {"pattern": "S115 11 5\\.0", "ignore": "w"}]}], "additionalFiles": [{"filename": "data/survey.csv", "visible": true}, {"filename": "14_survey_questions_sol.py", "visible": false}]},
+    {"id": "ds-groupby", "name": "15. Groups: split, summarise, combine", "guide": "15_groupby.md", "py": "15_groupby.py", "isExample": true, "additionalFiles": [{"filename": "data/weather.csv", "visible": true}]},
+    {"id": "ds-task-by-year-group", "name": "16. Task: by year group", "guide": "16_by_year_group.md", "py": "16_by_year_group.py", "tests": [{"in": [], "out": [{"pattern": "Year 7: 9\\.14 hours of sleep", "ignore": "w"}, {"pattern": "Year 8: 8\\.82 hours of sleep", "ignore": "w"}, {"pattern": "Year 9: 8\\.56 hours of sleep", "ignore": "w"}, {"pattern": "Year 10: 8\\.30 hours of sleep", "ignore": "w"}, {"pattern": "Year 11: 7\\.91 hours of sleep", "ignore": "w"}, {"pattern": "Bus 27\\.6 minutes", "ignore": "w"}, {"pattern": "Car 16\\.9 minutes", "ignore": "w"}, {"pattern": "Cycle 14\\.1 minutes", "ignore": "w"}, {"pattern": "Train 34\\.7 minutes", "ignore": "w"}, {"pattern": "Walk 13\\.3 minutes", "ignore": "w"}, {"pattern": "Bus 47 students", "ignore": "w"}, {"pattern": "Walk 38 students", "ignore": "w"}, {"pattern": "Car 30 students", "ignore": "w"}, {"pattern": "Cycle 24 students", "ignore": "w"}, {"pattern": "Train 11 students", "ignore": "w"}]}], "additionalFiles": [{"filename": "data/survey.csv", "visible": true}, {"filename": "16_by_year_group_sol.py", "visible": false}]},
+    {"id": "ds-cleaning", "name": "17. Missing and messy data", "guide": "17_cleaning.md", "py": "17_cleaning.py", "isExample": true, "additionalFiles": [{"filename": "data/bakesale.csv", "visible": true}]},
+    {"id": "ds-task-reading-log", "name": "18. Task: a messy reading log", "guide": "18_reading_log.md", "py": "18_reading_log.py", "tests": [{"in": [], "out": [{"pattern": "reader 0", "ignore": "w"}, {"pattern": "genre 0", "ignore": "w"}, {"pattern": "pages 2", "ignore": "w"}, {"pattern": "minutes 4", "ignore": "w"}, {"pattern": "genres: \\['fantasy', 'mystery', 'non-fiction', 'sci-fi'\\]", "ignore": "w"}, {"pattern": "complete rows: 24", "ignore": "w"}, {"pattern": "fantasy 0\\.61 pages a minute", "ignore": "w"}, {"pattern": "mystery 0\\.73 pages a minute", "ignore": "w"}, {"pattern": "non-fiction 0\\.65 pages a minute", "ignore": "w"}, {"pattern": "sci-fi 0\\.64 pages a minute", "ignore": "w"}]}], "additionalFiles": [{"filename": "data/reading_log.csv", "visible": true}, {"filename": "18_reading_log_sol.py", "visible": false}]},
+    {"id": "ds-first-chart", "name": "19. Your first chart", "guide": "19_first_chart.md", "py": "19_first_chart.py", "isExample": true},
+    {"id": "ds-task-two-days", "name": "20. Task: two days on one chart", "guide": "20_two_days.md", "py": "20_two_days.py", "tests": [{"in": [], "out": [{"typ": "chart", "filename": "20_two_days_sol.py"}]}], "additionalFiles": [{"filename": "20_two_days_sol.py", "visible": false}]},
+    {"id": "ds-bar-chart", "name": "21. Bars worth reading", "guide": "21_bar_chart.md", "py": "21_bar_chart.py", "isExample": true},
+    {"id": "ds-task-favourite-subject", "name": "22. Task: favourite subjects", "guide": "22_favourite_subject.md", "py": "22_favourite_subject.py", "tests": [{"in": [], "out": [{"typ": "chart", "filename": "22_favourite_subject_sol.py", "colours": true}]}], "additionalFiles": [{"filename": "22_favourite_subject_sol.py", "visible": false}]},
+    {"id": "ds-hist-scatter", "name": "23. How values spread, and what moves together", "guide": "23_hist_scatter.md", "py": "23_hist_scatter.py", "isExample": true, "additionalFiles": [{"filename": "data/weather.csv", "visible": true}]},
+    {"id": "ds-task-sleep-screens", "name": "24. Task: sleep and screens", "guide": "24_sleep_and_screens.md", "py": "24_sleep_and_screens.py", "tests": [{"in": [], "out": [{"typ": "chart", "filename": "24_sleep_and_screens_sol.py"}]}], "additionalFiles": [{"filename": "data/survey.csv", "visible": true}, {"filename": "24_sleep_and_screens_sol.py", "visible": false}]},
+    {"id": "ds-subplots", "name": "25. Four charts, one story", "guide": "25_subplots.md", "py": "25_subplots.py", "isExample": true},
+    {"id": "ds-task-my-week", "name": "26. Task: my week", "guide": "26_my_week.md", "py": "26_my_week.py", "tests": [{"in": [], "out": [{"typ": "chart", "filename": "26_my_week_sol.py"}]}], "additionalFiles": [{"filename": "26_my_week_sol.py", "visible": false}]},
+    {"id": "ds-pandas-plots", "name": "27. A DataFrame can draw itself", "guide": "27_pandas_plots.md", "py": "27_pandas_plots.py", "isExample": true, "additionalFiles": [{"filename": "data/weather.csv", "visible": true}]},
+    {"id": "ds-task-screens-by-year", "name": "28. Task: screen time by year group", "guide": "28_screens_by_year.md", "py": "28_screens_by_year.py", "tests": [{"in": [], "out": [{"typ": "chart", "filename": "28_screens_by_year_sol.py"}]}], "additionalFiles": [{"filename": "data/survey.csv", "visible": true}, {"filename": "28_screens_by_year_sol.py", "visible": false}]},
+    {"id": "ds-trend-line", "name": "29. Fitting a trend line", "guide": "29_trend_line.md", "py": "29_trend_line.py", "isExample": true},
+    {"id": "ds-task-ice-creams", "name": "30. Task: does the weather sell ice creams?", "guide": "30_ice_creams.md", "py": "30_ice_creams.py", "tests": [{"in": [], "out": [{"pattern": "slope : 11\\.77 more ice creams for each degree warmer", "ignore": "w"}, {"pattern": "intercept : -110\\.2", "ignore": "w"}, {"pattern": "r = 0\\.994, r squared = 0\\.988", "ignore": "w"}, {"pattern": "a 25 degree day: about 184 ice creams", "ignore": "w"}, {"typ": "c+", "pattern": "polyfit"}, {"typ": "c+", "pattern": "corrcoef"}]}], "additionalFiles": [{"filename": "30_ice_creams_sol.py", "visible": false}]},
+    {"id": "ds-seaborn-style", "name": "31. Seaborn: style and distributions", "guide": "31_seaborn_style.md", "py": "31_seaborn_style.py", "isExample": true},
+    {"id": "ds-task-journey-histogram", "name": "32. Task: journey times, the seaborn way", "guide": "32_journey_histogram.md", "py": "32_journey_histogram.py", "tests": [{"in": [], "out": [{"typ": "chart", "filename": "32_journey_histogram_sol.py"}]}], "additionalFiles": [{"filename": "data/survey.csv", "visible": true}, {"filename": "32_journey_histogram_sol.py", "visible": false}]},
+    {"id": "ds-seaborn-categories", "name": "33. Comparing groups", "guide": "33_seaborn_categories.md", "py": "33_seaborn_categories.py", "isExample": true},
+    {"id": "ds-task-journey-boxes", "name": "34. Task: journey time by travel mode", "guide": "34_journey_boxes.md", "py": "34_journey_boxes.py", "tests": [{"in": [], "out": [{"typ": "chart", "filename": "34_journey_boxes_sol.py"}]}], "additionalFiles": [{"filename": "data/survey.csv", "visible": true}, {"filename": "34_journey_boxes_sol.py", "visible": false}]},
+    {"id": "ds-heatmap", "name": "35. Everything against everything", "guide": "35_heatmap.md", "py": "35_heatmap.py", "isExample": true},
+    {"id": "ds-task-survey-heatmap", "name": "36. Task: what goes with what?", "guide": "36_survey_heatmap.md", "py": "36_survey_heatmap.py", "tests": [{"in": [], "out": [{"typ": "chart", "filename": "36_survey_heatmap_sol.py"}]}], "additionalFiles": [{"filename": "data/survey.csv", "visible": true}, {"filename": "36_survey_heatmap_sol.py", "visible": false}]},
+    {"id": "ds-plotly-express", "name": "37. Interactive charts in one call", "guide": "37_plotly_express.md", "py": "37_plotly_express.py", "isExample": true, "additionalFiles": [{"filename": "data/survey.csv", "visible": true}]},
+    {"id": "ds-task-exercise-bars", "name": "38. Task: exercise by year group, interactive", "guide": "38_exercise_bars.md", "py": "38_exercise_bars.py", "tests": [{"in": [], "out": [{"typ": "chart", "filename": "38_exercise_bars_sol.py"}]}], "additionalFiles": [{"filename": "data/survey.csv", "visible": true}, {"filename": "38_exercise_bars_sol.py", "visible": false}]},
+    {"id": "ds-plotly-interactive", "name": "39. Plotly in detail, trace by trace", "guide": "39_plotly_detail.md", "py": "39_plotly_detail.py", "isExample": true},
+    {"id": "ds-task-two-towns", "name": "40. Task: two towns, trace by trace", "guide": "40_two_towns.md", "py": "40_two_towns.py", "tests": [{"in": [], "out": [{"typ": "chart", "filename": "40_two_towns_sol.py"}]}], "additionalFiles": [{"filename": "40_two_towns_sol.py", "visible": false}]}
   ]
 }

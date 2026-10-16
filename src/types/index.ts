@@ -306,7 +306,7 @@ export interface BookAdditionalFile {
 
 export interface BookTestOutputReq {
   pattern?: string
-  typ?: string        // '+' | '-' | 'c+' | 'c-' | 'f+' | 'f-' | 's+' | 's-' | 't' | 'p5'
+  typ?: string        // '+' | '-' | 'c+' | 'c-' | 'f+' | 'f-' | 's+' | 's-' | 't' | 'p5' | 'chart'
   ignore?: string     // flags: 'w'=whitespace 'c'=case 'p'=punctuation
   count?: number | string
   statement?: string
@@ -317,6 +317,8 @@ export interface BookTestOutputReq {
   mouse?: [number, number]
   /** p5: whether a mouse button is held down (mouse_is_pressed). */
   pressed?: boolean | string
+  /** chart: compare the series' colours too (off by default). */
+  colours?: boolean | string
 }
 
 export interface BookTestCase {
@@ -360,6 +362,20 @@ export interface TesterRunOutput {
   solutionTurtleSvgs?: Record<string, string>
   /** p5 comparisons, by p5ReqKey (utils/p5Compare.ts). */
   p5Results?: Record<string, P5Comparison>
+  /** Chart comparisons, by chartReqKey (utils/chartCheck.ts). */
+  chartResults?: Record<string, ChartComparison>
+}
+
+/** A program's charts compared with its solution's (src/python/coder_charts.py). */
+export interface ChartComparison {
+  passed: boolean
+  /** In words, for the student: the one difference, or how many there are. */
+  message: string
+  /** Each difference in words, most important first (a handful at most). */
+  differences: string[]
+  /** PNG data URLs of the first matplotlib chart, sent only for a failed comparison. */
+  expected?: string
+  actual?: string
 }
 
 /** A p5 sketch's drawing compared with its solution's (utils/p5Compare.ts). */
@@ -387,6 +403,7 @@ export interface TestReqResult {
   statement?: string
   filename?: string
   p5?: P5Comparison
+  chart?: ChartComparison
 }
 
 export interface TestCaseResult {

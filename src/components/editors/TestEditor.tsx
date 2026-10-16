@@ -19,6 +19,7 @@ const REQ_TYPES: Array<{ value: string; label: string }> = [
   { value: 's-', label: "statement result doesn't (s-)" },
   { value: 't', label: 'turtle (t)' },
   { value: 'p5', label: 'p5 drawing (p5)' },
+  { value: 'chart', label: 'same chart as (chart)' },
 ]
 
 // Convert a test case's `in` to a display string (one input per line).
@@ -39,7 +40,8 @@ function cleanReq(r: BookTestOutputReq): BookTestOutputReq {
   if (r.typ && r.typ !== '+') out.typ = r.typ
   if (r.ignore) out.ignore = r.ignore
   if (r.count !== undefined && String(r.count) !== '' && Number(r.count) !== -1) out.count = r.count
-  if ((r.typ === 'f+' || r.typ === 'f-' || r.typ === 't' || r.typ === 'p5') && r.filename) out.filename = r.filename
+  if ((r.typ === 'f+' || r.typ === 'f-' || r.typ === 't' || r.typ === 'p5' || r.typ === 'chart') && r.filename) out.filename = r.filename
+  if (r.typ === 'chart' && (r.colours === true || r.colours === 'true')) out.colours = true
   if ((r.typ === 's+' || r.typ === 's-') && r.statement) out.statement = r.statement
   if (r.typ === 'p5') {
     if (r.frames !== undefined && String(r.frames) !== '' && Number(r.frames) !== 1) out.frames = Number(r.frames)
@@ -74,9 +76,11 @@ function IgnoreToggle({ flags, onChange }: { flags: string; onChange: (f: string
 
 function AdvancedRow({ req, onChange, onDelete }: { req: BookTestOutputReq; onChange: (r: BookTestOutputReq) => void; onDelete: () => void }) {
   const typ = req.typ ?? '+'
-  const needsFilename = typ === 'f+' || typ === 'f-' || typ === 't' || typ === 'p5'
+  const needsFilename = typ === 'f+' || typ === 'f-' || typ === 't' || typ === 'p5' || typ === 'chart'
   const needsStatement = typ === 's+' || typ === 's-'
-  const isP5 = typ === 'p5'
+  const isChart = typ === 'chart'
+  // Compared with a solution file, so no pattern and no ignore flags.
+  const isP5 = typ === 'p5' || isChart
   const mouse = Array.isArray(req.mouse) ? req.mouse : null
   const setMouse = (i: 0 | 1, text: string) => {
     const next: [number, number] = [mouse?.[0] ?? 0, mouse?.[1] ?? 0]
@@ -106,7 +110,15 @@ function AdvancedRow({ req, onChange, onDelete }: { req: BookTestOutputReq; onCh
           onChange={e => onChange({ ...req, filename: e.target.value })}
           className="w-full bg-slate-950 border border-slate-700 rounded px-1.5 py-0.5 text-[11px] font-mono text-slate-200 focus:outline-none focus:ring-1 focus:ring-sky-400" />
       )}
-      {isP5 && (
+      {isChart && (
+        <label className="flex items-center gap-1 text-[10px] text-slate-400"
+          title="Titles, labels, legend, text and every plotted number are always compared; colours only when ticked">
+          <input aria-label="Compare colours" type="checkbox" checked={req.colours === true || req.colours === 'true'}
+            onChange={e => onChange({ ...req, colours: e.target.checked || undefined })} />
+          colours must match too
+        </label>
+      )}
+      {isP5 && !isChart && (
         <div className="flex flex-wrap items-center gap-2 text-[10px] text-slate-400" title="How the sketch is run before its picture is compared with the solution's">
           <label className="flex items-center gap-1">
             frames

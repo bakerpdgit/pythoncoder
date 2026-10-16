@@ -65,6 +65,11 @@ Three layers, all of which should pass before a change is called done:
   the shipped Python p5 book, and Submits every task twice — its starter code
   must fail with the three pictures shown, its solution must pass — which is
   the pixel marking run for real in the tester worker.
+  `datascience.spec.ts` runs every example of the shipped Data Science book
+  (its charts must appear) and Submits every task twice — starter fails, with
+  the differences in words and the expected chart; solution passes — which is
+  the `chart` marking and the tester's seaborn/plotly installs run for real.
+  (`dataScienceBook.test.ts` does the same under native Python in vitest.)
   `turtle.spec.ts` drives the Python turtle (CPython's turtle.py on that
   tkinter) in the trace worker — animation visible mid-move, Trace stepping
   a drawing, keys and clicks, `textinput`, Stop in an endless loop, the replay
@@ -172,6 +177,7 @@ src/
     turtle.py                 # CPython 3.13's turtle.py, unmodified, run on that package
     p5/                       # Coder's p5: sketches drawn on a canvas in a tkinter window
     pyp5js.py                 # `from pyp5js import *` as `from p5 import *`
+    coder_charts.py           # marks a chart: describes figures as facts, compares two programs'
   workers/
     tracer.worker.ts          # Pyodide trace worker (imported via ?worker)
     workerSync.ts             # how that worker blocks on the page: shared memory, or a held request
@@ -200,6 +206,7 @@ src/
     tkinterRenderer.ts        # draws tkinter windows as DOM in the Display pane
     p5Draw.ts                 # paints a p5 sketch's operations onto a 2D canvas (page and tester)
     p5Compare.ts              # marks a p5 sketch: the student's picture against the solution's
+    chartCheck.ts             # the `chart` test requirement's key (the comparing is coder_charts.py)
     vfsMediaUrl.ts            # deduped blob URLs for VFS-backed media (stdaud, drawImage)
     pyodideFs.ts              # which Pyodide MEMFS dirs are off-limits when syncing back
     pyodideReset.ts           # Python-side reset that makes a reused Pyodide look fresh
@@ -1434,7 +1441,10 @@ https, isolated but no SharedArrayBuffer, a WebKit tab with no service worker
   statistics layer over pyplot, so `detectPlottingLibs` sets `matplotlib` too and
   everything below applies unchanged.
 - The shipped **Data Science** book (`DataScience/`, in the tutorial catalog) is
-  twelve worked examples across all four libraries. All are `isExample: true`.
+  forty pages: twenty worked examples, each followed by a small marked task
+  (fill in the `____`, or add the few lines that draw). Its data is in
+  `DataScience/data/`; `DataScience/README.md` has the progression. Output tasks
+  check printed lines; chart tasks use the `chart` requirement (below).
 
 ### matplotlib has no screen, so it is given a picture frame
 
@@ -1458,9 +1468,11 @@ https, isolated but no SharedArrayBuffer, a WebKit tab with no service worker
   built but never shown — forgetting `plt.show()` is a beginner's mistake, and an
   empty Display pane teaches nothing. On the main thread it runs in the `finally`,
   so a run that failed halfway still shows what it drew.
-- The tester worker installs the same bootstrap with a bridge that discards the
-  figures: a plotting challenge still has to import and run under test, and there
-  is nowhere in a tester to show a chart.
+- The tester worker installs the same bootstrap, then points `plt.show()` at
+  `coder_charts.capture_open_figures()`: each figure is *described* and closed,
+  never rendered (see *Marking a chart by what it shows*). It installs seaborn
+  and plotly with micropip as a run does — before, a seaborn challenge could not
+  even import under test.
 - Figures are cleared at the start of each run. Unlike the canvases (latched so a
   drawing outlives its program) they are a list, which would otherwise grow
   without bound across runs.
@@ -1484,6 +1496,42 @@ https, isolated but no SharedArrayBuffer, a WebKit tab with no service worker
   anything built on them.
 - `PlotFigure` (`types/index.ts`) is the union the Display pane's Plot surface
   renders: `{kind:'image'}` for an Agg PNG, `{kind:'html'}` for plotly.
+
+### Marking a chart by what it shows
+
+- A test requirement `{"typ": "chart", "filename": "sol.py"}` (optionally
+  `"colours": true`) passes when the student's program draws the same chart(s)
+  as the solution file. Pixels would fail a student for a different default
+  font or a title one letter out with no way to say why, so the tester compares
+  **facts** instead (`src/python/coder_charts.py`, installed in the tester as
+  `_coder_charts`): per figure, its grid of axes and suptitle; per axes, title,
+  axis labels, legend entries, text on it, inverted axes, log scales, and every
+  series — lines (data, markers yes/no, solid/dashed), bars (categories or
+  positions, values, orientation), scatter points, heatmap squares (masked ones
+  as None), shaded areas, other patches counted (boxes). Plotly: title, axis
+  titles, each trace's type, name, mode and data.
+- Text ignores case and spacing; numbers are `isclose` to ~1e-6, so a mean
+  computed by hand passes. Series of a kind are matched **by label** when all
+  are labelled and the label sets agree (drawing order does not matter),
+  otherwise in order. Colours only with `colours: true`.
+- The verdict is a `ChartComparison`: up to four differences **in words**
+  ("The line 'Monday' should have markers at its points"), and on failure small
+  PNGs of the first matplotlib chart of each side. `TestResultsBar` lists them
+  with the two pictures (`PictureDifference`, shared with p5).
+- In the tester each run (student, then each solution once per test case) is
+  `runAndCaptureCharts`: close figures, `reset()`, run, capture what was never
+  shown, `take()`. Results travel as `chartResults` keyed by `chartReqKey`.
+- `![preview](chartpreview)` in a guide shows the solution's first chart
+  (`preview_chart`): a PNG, or plotly's HTML in a sandboxed iframe (no
+  `allow-same-origin`, as in the Display pane).
+- Tests: `chartCheck.test.ts` (the comparisons and their wording, under native
+  Python), `dataScienceBook.test.ts` (every book page; every task's starter
+  fails and solution passes through the real `evaluateAll`), both through
+  `chartCheck.harness.ts`, which mimics the tester. They need numpy, pandas,
+  matplotlib, seaborn and plotly on `python` and skip themselves, saying why,
+  without them; CI installs them. Pyodide 0.29.3 has numpy 2.2.5, pandas 2.3.3
+  and matplotlib 3.8.4 — a Python 3.12 venv with those versions is the
+  faithful local check.
 
 ### Getting console output out of the page
 
