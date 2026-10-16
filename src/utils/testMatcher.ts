@@ -1,5 +1,7 @@
 import type { BookTestCase, BookTestOutputReq, TesterRunOutput, TestReqResult, TestCaseResult, OverallTestResult } from '../types'
 import { normalizeTestInputs } from './testInputs'
+import { p5ReqKey } from './p5Compare'
+import type { P5Comparison } from '../types'
 
 // ── Normalisation helpers ──────────────────────────────────────────────────
 
@@ -104,6 +106,7 @@ function evalRequirement(
   fileContents: Record<string, string | null>,
   turtleSvg: string,
   solutionTurtleSvgs: Record<string, string>,
+  p5Results: Record<string, P5Comparison> = {},
 ): TestReqResult {
   const typ = req.typ ?? '+'
   const pattern = req.pattern ?? ''
@@ -174,6 +177,14 @@ function evalRequirement(
       break
     }
 
+    case 'p5': {
+      // Compared in the tester, where the pictures can be painted.
+      const result = req.filename ? p5Results[p5ReqKey(req)] : undefined
+      if (result) rr.p5 = result
+      rr.passed = !!result?.passed
+      break
+    }
+
     default:
       rr.passed = false
   }
@@ -192,7 +203,7 @@ export function evaluateTestCase(
   const reveal = testCase.reveal !== false
   const inputs = normalizeTestInputs(testCase.in)
   const out = testCase.out ?? ''
-  const { output, error, statementResults, fileContents, turtleSvg = '', solutionTurtleSvgs = {} } = runOut
+  const { output, error, statementResults, fileContents, turtleSvg = '', solutionTurtleSvgs = {}, p5Results = {} } = runOut
 
   const reqResults: TestReqResult[] = []
 
@@ -203,7 +214,7 @@ export function evaluateTestCase(
     reqResults.push({ passed: re.test(textToTest), typ: '+', pattern: out, ignore: '', count: -1 })
   } else if (Array.isArray(out)) {
     for (const req of out as BookTestOutputReq[]) {
-      reqResults.push(evalRequirement(req, output, sourceCode, statementResults, fileContents, turtleSvg, solutionTurtleSvgs))
+      reqResults.push(evalRequirement(req, output, sourceCode, statementResults, fileContents, turtleSvg, solutionTurtleSvgs, p5Results))
     }
   }
 

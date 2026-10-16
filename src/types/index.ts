@@ -306,11 +306,17 @@ export interface BookAdditionalFile {
 
 export interface BookTestOutputReq {
   pattern?: string
-  typ?: string        // '+' | '-' | 'c+' | 'c-' | 'f+' | 'f-' | 's+' | 's-' | 't'
+  typ?: string        // '+' | '-' | 'c+' | 'c-' | 'f+' | 'f-' | 's+' | 's-' | 't' | 'p5'
   ignore?: string     // flags: 'w'=whitespace 'c'=case 'p'=punctuation
   count?: number | string
   statement?: string
   filename?: string
+  /** p5: how many times draw() runs before the pictures are compared (default 1). */
+  frames?: number | string
+  /** p5: where the mouse is (mouse_x, mouse_y) while the sketch runs. */
+  mouse?: [number, number]
+  /** p5: whether a mouse button is held down (mouse_is_pressed). */
+  pressed?: boolean | string
 }
 
 export interface BookTestCase {
@@ -352,6 +358,24 @@ export interface TesterRunOutput {
   fileContents: Record<string, string | null>
   turtleSvg?: string
   solutionTurtleSvgs?: Record<string, string>
+  /** p5 comparisons, by p5ReqKey (utils/p5Compare.ts). */
+  p5Results?: Record<string, P5Comparison>
+}
+
+/** A p5 sketch's drawing compared with its solution's (utils/p5Compare.ts). */
+export interface P5Comparison {
+  passed: boolean
+  /** How the pictures were compared. */
+  method: 'pixels' | 'operations'
+  /** Pixels that differ (method 'pixels'). */
+  mismatched?: number
+  total?: number
+  /** In words, for the student: what went wrong, if it did. */
+  message: string
+  /** PNG data URLs, sent only for a failed comparison so the student can see the difference. */
+  expected?: string
+  actual?: string
+  diff?: string
 }
 
 export interface TestReqResult {
@@ -362,6 +386,7 @@ export interface TestReqResult {
   count: number
   statement?: string
   filename?: string
+  p5?: P5Comparison
 }
 
 export interface TestCaseResult {

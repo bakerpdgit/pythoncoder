@@ -7,6 +7,8 @@ import { detectMatplotlib, detectSpongeLibs } from '../utils/codeAnalysis'
 import { programPythonFiles, type ProgramFile } from '../utils/importGraph'
 import { normalizeTestInputs } from '../utils/testInputs'
 import { TKINTER_TEST_SETUP } from '../utils/tkinterHeadless'
+import { canvasToDataUrl, compareP5Captures, p5ReqKey, p5RunSettings, parseP5Capture, rasterizeP5, type P5RunSettings } from '../utils/p5Compare'
+import type { BookTestOutputReq, P5Comparison } from '../types'
 
 const PYODIDE_BASE_URL = 'https://cdn.jsdelivr.net/pyodide/v0.29.3/full'
 const PYODIDE_URL = `${PYODIDE_BASE_URL}/pyodide.js`
@@ -45,6 +47,11 @@ def _run_test_case(code_str, inputs_list):
     _test_error = None
     try:
         exec(compile(code_str, '<student>', 'exec'), _test_namespace)
+        # A p5 sketch that defined setup() and draw() but never called run()
+        # is started after its last line, as on the page.
+        _p5m = sys.modules.get('p5')
+        if _p5m is not None and hasattr(_p5m, '_coder_autorun'):
+            _p5m._coder_autorun(_test_namespace)
     except SystemExit:
         pass
     except Exception:
@@ -202,6 +209,29 @@ function runCodeAndCaptureSvg(srcCode: string, inputs: Array<string | number>, i
   return capturedSvg(includeTurtles)
 }
 
+/**
+ * One headless run of a p5 sketch, set up as a test says (frames, mouse), and
+ * what its canvas ended up showing (p5._coder_capture), or '' if it drew nothing.
+ */
+function runP5AndCapture(
+  srcCode: string,
+  inputs: Array<string | number>,
+  settings: P5RunSettings,
+  files: Array<{ path: string; content: ArrayBuffer }>,
+): string {
+  if (files?.length) mountFiles(files)
+  try { pyodide.runPython('import os; os.chdir("/")') } catch { /* ignore */ }
+  pyodide.globals.set('_tc_frames', settings.frames)
+  // undefined, not null: Pyodide turns null into JsNull rather than None.
+  pyodide.globals.set('_tc_mouse', settings.mouse ? pyodide.toPy(settings.mouse) : undefined)
+  pyodide.globals.set('_tc_pressed', settings.pressed)
+  pyodide.runPython('_coder_p5_prepare(_tc_frames, _tc_mouse, _tc_pressed)')
+  pyodide.globals.set('_tc_code', srcCode)
+  pyodide.globals.set('_tc_inputs', pyodide.toPy(inputs))
+  pyodide.runPython('_run_test_case(_tc_code, _tc_inputs)')
+  return String(pyodide.runPython('_coder_p5_capture()') ?? '')
+}
+
 self.onmessage = async (e: MessageEvent) => {
   if (e.data.type === 'prewarm') {
     try {
@@ -234,6 +264,27 @@ self.onmessage = async (e: MessageEvent) => {
     return
   }
 
+  if (e.data.type === 'preview_p5') {
+    const { solutionCode, inputs, files, tkFiles, req } = e.data as {
+      solutionCode: string
+      inputs: Array<string | number>
+      files: Array<{ path: string; content: ArrayBuffer }>
+      tkFiles?: Record<string, string> | null
+      req: BookTestOutputReq
+    }
+    try {
+      await initPyodide(solutionCode, programPythonFiles(solutionCode, null, files ?? []))
+      if (tkFiles) installCoderTk(tkFiles)
+      const capture = parseP5Capture(runP5AndCapture(solutionCode, inputs, p5RunSettings(req ?? {}), files ?? []))
+      const raster = capture?.started ? await rasterizeP5(capture) : null
+      const png = raster ? await canvasToDataUrl(raster.canvas) : ''
+      self.postMessage({ type: 'preview_done', png, width: raster?.width ?? 0, height: raster?.height ?? 0 })
+    } catch (err) {
+      self.postMessage({ type: 'preview_error', error: String(err) })
+    }
+    return
+  }
+
   if (e.data.type !== 'run_tests') return
 
   const { code, files, tests, tkFiles } = e.data as {
@@ -242,7 +293,7 @@ self.onmessage = async (e: MessageEvent) => {
     tkFiles?: Record<string, string> | null
     tests: Array<{
       in?: string | Array<string | number>
-      out?: string | Array<{ typ?: string; statement?: string; filename?: string }>
+      out?: string | BookTestOutputReq[]
     }>
   }
 
@@ -271,6 +322,7 @@ self.onmessage = async (e: MessageEvent) => {
       fileContents: Record<string, string | null>
       turtleSvg: string
       solutionTurtleSvgs: Record<string, string>
+      p5Results: Record<string, P5Comparison>
     }> = []
 
     for (let i = 0; i < tests.length; i++) {
@@ -328,7 +380,25 @@ self.onmessage = async (e: MessageEvent) => {
         }
       }
 
-      results.push({ caseIndex: i, output, error, statementResults, fileContents, turtleSvg, solutionTurtleSvgs })
+      // Third pass: p5 sketches, run again as each requirement says and
+      // compared with the solution by the pictures they draw.
+      const p5Results: Record<string, P5Comparison> = {}
+      for (const req of reqs) {
+        if (req.typ !== 'p5' || !req.filename) continue
+        const key = p5ReqKey(req)
+        if (key in p5Results) continue
+        if (!coderTkInstalled) {
+          p5Results[key] = { passed: false, method: 'pixels', message: 'p5 was not available to the tester.' }
+          continue
+        }
+        const settings = p5RunSettings(req)
+        const solCode = readFileFromFs(req.filename)
+        const actual = runP5AndCapture(code, inputs, settings, files ?? [])
+        const expected = solCode ? runP5AndCapture(solCode, inputs, settings, files ?? []) : ''
+        p5Results[key] = await compareP5Captures(actual, expected)
+      }
+
+      results.push({ caseIndex: i, output, error, statementResults, fileContents, turtleSvg, solutionTurtleSvgs, p5Results })
     }
 
     self.postMessage({ type: 'done', results })

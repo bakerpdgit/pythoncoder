@@ -57,7 +57,14 @@ Three layers, all of which should pass before a change is called done:
   main thread (`?tk=main`), plus a GUI in an imported module under Debug, a
   breakpoint in a button callback, and the no-JSPI fallback; and runs every
   page of the shipped Tkinter book in the worker on shared memory, in the
-  worker on the service worker, and on the main thread.
+  worker on the service worker, and on the main thread. `p5.spec.ts` drives
+  p5 sketches (the canvas follows the mouse, read back pixel by pixel) in the
+  worker on shared memory, on the service worker and on the main thread (and
+  without JSPI there), plus keys, an error in `draw()`, a sketch finishing by
+  itself, a Debug breakpoint inside `draw()` and Trace; then runs every page of
+  the shipped Python p5 book, and Submits every task twice — its starter code
+  must fail with the three pictures shown, its solution must pass — which is
+  the pixel marking run for real in the tester worker.
   `turtle.spec.ts` drives the Python turtle (CPython's turtle.py on that
   tkinter) in the trace worker — animation visible mid-move, Trace stepping
   a drawing, keys and clicks, `textinput`, Stop in an endless loop, the replay
@@ -163,6 +170,8 @@ src/
   python/
     tkinter/                  # Coder's own tkinter package (real .py files, ?raw-imported)
     turtle.py                 # CPython 3.13's turtle.py, unmodified, run on that package
+    p5/                       # Coder's p5: sketches drawn on a canvas in a tkinter window
+    pyp5js.py                 # `from pyp5js import *` as `from p5 import *`
   workers/
     tracer.worker.ts          # Pyodide trace worker (imported via ?worker)
     workerSync.ts             # how that worker blocks on the page: shared memory, or a held request
@@ -189,6 +198,8 @@ src/
     tkinterSources.ts         # the package and turtle.py as text: a lazy chunk
     tkinterHeadless.ts        # the package in the tester worker: headless turtle for marking and previews
     tkinterRenderer.ts        # draws tkinter windows as DOM in the Display pane
+    p5Draw.ts                 # paints a p5 sketch's operations onto a 2D canvas (page and tester)
+    p5Compare.ts              # marks a p5 sketch: the student's picture against the solution's
     vfsMediaUrl.ts            # deduped blob URLs for VFS-backed media (stdaud, drawImage)
     pyodideFs.ts              # which Pyodide MEMFS dirs are off-limits when syncing back
     pyodideReset.ts           # Python-side reset that makes a reused Pyodide look fresh
@@ -1750,6 +1761,96 @@ https, isolated but no SharedArrayBuffer, a WebKit tab with no service worker
   Python: centring, op traffic, pauses, errors, dialogs, the idle rule, replay
   marks, every Turtle book page); `tkinterRenderer.test.ts` (rebuilding steps
   across whole-state blocks); `e2e/turtle.spec.ts`.
+
+### p5 is drawn on Coder's tkinter
+
+- `src/python/p5` is Coder's own p5, pure Python. A sketch defines `setup()`
+  and `draw()` and calls `run()` — or does not, and is started after the
+  program's last line (`_coder_autorun`, called by the tkinter bootstraps and
+  the tester), as pyp5js does. Both spellings work: the Raspberry Pi / p5py
+  snake_case (`no_stroke`, `mouse_x`) that the book uses, and p5.js camelCase
+  (`noStroke`, `mouseX`). `pyp5js.py` re-exports it.
+- **It is a tkinter program to every runtime decision.** The sketch's window
+  is a `Tk()` holding one private widget, kind `canvas2d` (`_SketchCanvas`),
+  which `tkinterRenderer.ts` makes as a real `<canvas>` painted by
+  `utils/p5Draw.ts`. So `codeUsesTkinter` says yes to `from p5 import *`
+  (`P5_IMPORT_REGEX`), and a sketch gets everything a tkinter program has: the
+  trace worker by default (Run, Debug with breakpoints inside `draw()`, Trace),
+  the main thread with or without JSPI, both transports, Stop, the window's ✕
+  (which ends `run()`, so a book example ticks), Display zoom. The package is
+  small, so it rides in `TKINTER_SHIM_FILES` rather than a chunk of its own;
+  it is evicted by name between runs (`p5`, `pyp5js`) with tkinter.
+- **The frame loop is tkinter's timers.** `run()` calls `setup()`, books
+  `_tick` with `root.after()` and calls `mainloop()`; each tick draws a frame
+  and books the next for `1/frame_rate` after the last one started. Without
+  JSPI on the main thread mainloop() returns at once and Coder's keepalive
+  runs the same timers. `tkinter._app.idle_exit` is set, and the sketch binds
+  the mouse and keys only while it loops or defines an event function
+  (`_sync_bindings`), so a sketch that calls `no_loop()` and listens for
+  nothing ends its run by itself.
+- **Everything is worked out in Python.** Colour modes and names (Tk's own
+  table, `tkinter/_colors.py`), `rect_mode`, `push`/`pop`, the matrix, arc
+  angles measured as p5 does on a squashed ellipse, curve vertices (as
+  Béziers), text lines and alignment. What goes to the page is a list of
+  final-form operations per frame (documented at the top of `p5Draw.ts`):
+  state ops (`tf` matrix, `fs`/`ss` colours…) only when they change since last
+  sent, then shapes. The frame goes as one `ctx2d` tkinter op when `draw()`
+  returns; the page applies it on top of the last, as a canvas keeps what was
+  drawn. Before every debugger pause `flush_drawing_before_pause` sends the
+  frame so far (`_coder_flush_partial`), so stepping through `draw()` shows
+  each line's shape appear.
+- **p5's variables are variables**, so `from p5 import *` gave the program
+  copies. `_publish` writes `mouse_x`, `frame_count`, `width`… into the
+  module and into the sketch's namespace before `setup()`, every `draw()` and
+  every event — but only names whose value is still the one p5 last put there,
+  so a program's own `key = ...` is left alone.
+- **Names that would hide Python's own**: `map()` is p5's with numbers and
+  Python's with a function; `random` is p5's `random()` *and* forwards
+  attributes to the random module, so `import random` before the star import
+  keeps `random.randint`. `min`, `max`, `abs`, `round`, `pow`, `set`,
+  `filter` are not defined at all.
+- Errors: an exception in `draw()` or an event function stops the sketch and
+  is re-raised from `run()` with p5's own frames taken off the traceback;
+  where there is no loop to return through (no JSPI) it is printed instead.
+- Images: `load_image()` reads the file in Python (its size from its header)
+  and the first `image()` sends it as `imgdef`; the page decodes it once
+  (`P5ImageStore`) and holds every later operation of that canvas until it is
+  decoded, so a `no_loop()` sketch is never painted with a hole in it.
+- Tests: `p5Shim.test.ts` (the package under native Python, headless and with
+  a fake 'sync' host: frames, events, errors), `p5Draw.test.ts` (operations to
+  canvas calls), `p5Compare.test.ts`, `e2e/p5.spec.ts`.
+
+### Marking a p5 sketch by its picture
+
+- A test requirement `{"typ": "p5", "filename": "sol.py", "frames": 30,
+  "mouse": [x, y], "pressed": true}` (all but `filename` optional) passes when
+  the student's sketch draws the same picture as the solution file. The Test
+  editor offers it; `![preview](p5preview)` in a guide shows the solution's
+  picture from the first `p5` test (`preview_p5` in the tester).
+- The tester (`runP5AndCapture`) runs each sketch headless, fresh
+  (`_coder_p5_prepare`): `setup()`, then `draw()` `frames` times, with the mouse
+  where the test says and `random()`, `noise()` and Python's `random` seeded
+  alike. p5 keeps the operations instead of sending them, dropping whatever an
+  opaque `background()`, `clear()` or `size()` painted over
+  (`_cut_capture`), and `_coder_capture()` returns them. A requirement is run
+  once per distinct `p5ReqKey` (file + settings), the student's code again too.
+- Both captures are painted onto OffscreenCanvases by the same `P5Painter` the
+  page uses, over white, and compared (`comparePixels`): a pixel differs only if
+  its colour (within 24 per channel) is not found within a pixel of it in the
+  other picture, which forgives anti-aliasing and equivalent strokes meeting
+  differently. `p5PicturesMatch` then allows slivers — up to
+  max(50, 1/2000 of the canvas) — but not a solid patch (more than 8 pixels
+  whose eight neighbours all differ). A missing 6×6 shape, a shape moved 2px or
+  a wrong colour fails; `rect` for `square`, shapes reordered where they do not
+  overlap, a loop for separate calls pass.
+- A failed comparison carries PNGs of the expected picture, the student's and
+  the differences in red; `TestResultsBar` shows them under the test.
+  Comparisons travel as `p5Results` (keyed by `p5ReqKey`) and `evalRequirement`
+  only reads the verdict. Without OffscreenCanvas the fallback compares the
+  operations themselves, numbers within 0.5 (`sameOperations`).
+- The shipped **Python p5** book (`P5/`, in the catalog) alternates example and
+  marked task up to page 16 (eight tasks), then four examples whose subject —
+  randomness, the keyboard, objects, a game — has no single picture to mark.
 
 ### stdctx canvas and stdaud audio
 

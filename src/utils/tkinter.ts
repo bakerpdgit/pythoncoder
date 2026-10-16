@@ -38,9 +38,23 @@ export { TKINTER_SHIM_DIR }
 // and Python 2's `import Tkinter`, which the bootstrap aliases.
 export const TKINTER_IMPORT_REGEX = /^\s*(?:import\s+(?:[\w.]+\s*,\s*)*(?:tkinter|Tkinter)\b|from\s+(?:tkinter|Tkinter)\b)/m
 
+// `from p5 import *`, `import p5`, and pyp5js's `from pyp5js import *`.
+export const P5_IMPORT_REGEX = /^\s*(?:import\s+(?:[\w.]+\s*,\s*)*(?:p5|pyp5js)\b|from\s+(?:p5|pyp5js)\b)/m
+
 const clean = (s: string) => (s || '').replace(/\r\n?/g, '\n')
 
-export const codeUsesTkinter = (source: string): boolean => TKINTER_IMPORT_REGEX.test(clean(source))
+export const codeUsesP5 = (source: string): boolean => P5_IMPORT_REGEX.test(clean(source))
+
+/**
+ * Whether a source needs Coder's tkinter: it imports tkinter, or p5 — whose
+ * sketches are drawn in a tkinter window (src/python/p5), so a p5 program is
+ * a tkinter program to every runtime decision: worker or main thread, the
+ * package sent with the run, the Display pane's window surface.
+ */
+export const codeUsesTkinter = (source: string): boolean => {
+  const text = clean(source)
+  return TKINTER_IMPORT_REGEX.test(text) || P5_IMPORT_REGEX.test(text)
+}
 
 /**
  * Whether a whole program reaches for tkinter: the open file, or any module it
@@ -73,9 +87,28 @@ export async function tkFilesForTesting(
   tests: Array<{ out?: unknown }> = [],
 ): Promise<Record<string, string> | null> {
   const list = [...files]
-  const turtleTests = tests.some(test => Array.isArray(test.out) && test.out.some(req => (req as { typ?: unknown })?.typ === 't'))
-  if (!turtleTests && !detectTurtle(code, list) && !detectTkinter(code, list)) return null
+  const drawingTests = tests.some(test => Array.isArray(test.out) && test.out.some(req => {
+    const typ = (req as { typ?: unknown })?.typ
+    return typ === 't' || typ === 'p5'
+  }))
+  if (!drawingTests && !detectTurtle(code, list) && !detectTkinter(code, list)) return null
   return loadCoderTkFiles({ turtle: true })
+}
+
+/** Whether a program uses p5: the open file, or any module it can import. */
+export const detectP5 = (
+  editorSource: string,
+  files: Iterable<{ path: string; content: ArrayBuffer }> = [],
+): boolean => {
+  if (codeUsesP5(editorSource)) return true
+  const decoder = new TextDecoder()
+  for (const file of files) {
+    if (!/\.py$/i.test(file.path)) continue
+    try {
+      if (codeUsesP5(decoder.decode(file.content))) return true
+    } catch { /* not text */ }
+  }
+  return false
 }
 
 /**
@@ -136,9 +169,9 @@ while _tk_root in _tk_sys.path:
     _tk_sys.path.remove(_tk_root)
 _tk_sys.path.insert(1 if _tk_sys.path and _tk_sys.path[0] in ('', _tk_os.getcwd()) else 0, _tk_root)
 
-# A reused runtime may hold the last run's windows and timers in these modules.
+# A reused runtime may hold the last run's windows, timers and sketch in these modules.
 for _tk_name in list(_tk_sys.modules):
-    if _tk_name in ('tkinter', 'Tkinter', 'turtle', '_coder_tk_host', 'PIL.ImageTk') or _tk_name.startswith('tkinter.'):
+    if _tk_name in ('tkinter', 'Tkinter', 'turtle', '_coder_tk_host', 'PIL.ImageTk', 'p5', 'pyp5js') or _tk_name.startswith('tkinter.'):
         del _tk_sys.modules[_tk_name]
 
 _tk_host = _tk_types.ModuleType('_coder_tk_host')
@@ -171,6 +204,14 @@ class _CoderImageTkFinder:
 
 _tk_sys.meta_path[:] = [f for f in _tk_sys.meta_path if type(f).__name__ != '_CoderImageTkFinder']
 _tk_sys.meta_path.insert(0, _CoderImageTkFinder())
+
+
+def _coder_p5_autorun(ns):
+    # A p5 sketch that defined setup() and draw() but never called run()
+    # starts once the program's last line has run, as pyp5js does.
+    _tk_p5 = _tk_sys.modules.get('p5')
+    if _tk_p5 is not None and hasattr(_tk_p5, '_coder_autorun'):
+        _tk_p5._coder_autorun(ns)
 `
 
 /**
@@ -191,6 +232,7 @@ __coder_tk_ns = {'__name__': '__main__', '__builtins__': _tk_builtins}
 try:
     __coder_tk_code = compile(__coder_user_code__, 'simulation.py', 'exec')
 ${runProgramPython('exec(__coder_tk_code, __coder_tk_ns)').split('\n').map(line => (line ? '    ' + line : line)).join('\n')}
+${runProgramPython('_coder_p5_autorun(__coder_tk_ns)').split('\n').map(line => (line ? '    ' + line : line)).join('\n')}
     # The program has ended; a window it left open keeps working until closed.
     try:
         await _coder_tkinter._coder_keepalive()
@@ -229,10 +271,25 @@ def _coder_tk_should_stop():
     return bool(js_trace_stop_requested())
 
 
-_tk_host.should_stop = _coder_tk_should_stop`)
+_tk_host.should_stop = _coder_tk_should_stop
 
-/** Run after the program, still under the debugger, so a window it left open keeps working — and its handlers can be stepped. */
-export const TKINTER_WORKER_AFTER_PROGRAM = '_coder_tkinter._coder_keepalive_sync()'
+
+def _coder_tk_after_program(ns):
+    try:
+        _coder_p5_autorun(ns)
+    except SystemExit as _tk_exit:
+        # exit() inside draw(): the program chose to end, as it would have inside run().
+        if _tk_exit.code is not None and not isinstance(_tk_exit.code, int):
+            print(_tk_exit.code, file=_tk_sys.stderr)
+        return
+    _coder_tkinter._coder_keepalive_sync()`)
+
+/**
+ * Run after the program, still under the debugger, so a window it left open
+ * keeps working — and its handlers can be stepped — and a p5 sketch that never
+ * called run() starts.
+ */
+export const TKINTER_WORKER_AFTER_PROGRAM = '_coder_tk_after_program(user_namespace)'
 
 /** Run however the program ended: nothing is left to answer the windows. */
 export const TKINTER_WORKER_SHUTDOWN = '_coder_tkinter._coder_shutdown()'

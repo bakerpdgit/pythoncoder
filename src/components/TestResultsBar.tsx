@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { OverallTestResult, TestCaseResult, BookTestOutputReq } from '../types'
+import type { OverallTestResult, TestCaseResult, BookTestOutputReq, P5Comparison } from '../types'
 
 interface Props {
   result: OverallTestResult | null
@@ -29,11 +29,47 @@ function formatInputs(inputs: Array<string | number>): string {
   return inputs.join('\n')
 }
 
+/** A p5 check in words: the drawing, and how the sketch was run to get it. */
+function describeP5(req: BookTestOutputReq): string {
+  const parts: string[] = []
+  const frames = Number(req.frames ?? 1) || 1
+  if (frames > 1) parts.push(`after ${frames} frames`)
+  if (Array.isArray(req.mouse)) parts.push(`mouse at (${req.mouse[0]}, ${req.mouse[1]})${req.pressed === true ? ', pressed' : ''}`)
+  return parts.length ? `same drawing, ${parts.join(', ')}` : 'same drawing'
+}
+
 function formatExpected(out: string | BookTestOutputReq[]): string {
   if (typeof out === 'string') return out || '(any)'
   if (out.length === 0) return '(any)'
+  if (out.length === 1 && out[0].typ === 'p5') return describeP5(out[0])
   if (out.length === 1 && out[0].pattern) return out[0].pattern
   return `${out.length} checks`
+}
+
+/** A p5 drawing that did not match: what the tester said, and the two pictures with their differences. */
+function P5Difference({ result }: { result: P5Comparison }) {
+  const pictures = [
+    { label: 'Expected', src: result.expected },
+    { label: 'Yours', src: result.actual },
+    { label: 'Differences', src: result.diff },
+  ].filter(p => p.src)
+  return (
+    <tr className="border-t border-slate-700/50 bg-slate-900/40">
+      <td colSpan={4} className="px-3 py-1.5 text-[10px]">
+        <div className="text-slate-300">{result.message}</div>
+        {pictures.length > 0 && (
+          <div className="mt-1 flex gap-2">
+            {pictures.map(p => (
+              <figure key={p.label} className="flex-1 min-w-0 max-w-[160px]">
+                <img src={p.src} alt={p.label === 'Yours' ? 'Your drawing' : `${p.label} drawing`} className="block w-full h-auto rounded border border-slate-600 bg-white" />
+                <figcaption className="text-center text-slate-500 mt-0.5">{p.label}</figcaption>
+              </figure>
+            ))}
+          </div>
+        )}
+      </td>
+    </tr>
+  )
 }
 
 function TestCaseRow({ tc, index }: { tc: TestCaseResult; index: number }) {
@@ -86,7 +122,8 @@ function TestCaseRow({ tc, index }: { tc: TestCaseResult; index: number }) {
           </td>
         </tr>
       )}
-      {!tc.passed && tc.reveal && tc.output !== undefined && (
+      {!tc.passed && tc.reveal && tc.reqResults.map((rr, ri) => (rr.p5 && !rr.passed ? <P5Difference key={`p5-${ri}`} result={rr.p5} /> : null))}
+      {!tc.passed && tc.reveal && tc.output !== undefined && !(tc.output === '' && tc.reqResults.some(rr => rr.p5)) && (
         <tr className="border-t border-slate-700/50 bg-slate-900/40">
           <td colSpan={4} className="px-3 py-1.5 text-[10px]">
             <span className="text-slate-500">Actual output:</span>

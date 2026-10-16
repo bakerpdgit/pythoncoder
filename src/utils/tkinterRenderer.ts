@@ -20,6 +20,8 @@
 // Everything is styled to look like a Tk window on Windows, whatever the app's
 // own theme: a tkinter program chooses its own colours, and they assume Tk's.
 
+import { P5ImageStore, P5Painter } from './p5Draw'
+
 type Props = Record<string, any>
 type Manager = 'pack' | 'grid' | 'place' | 'notebook' | 'canvas' | null
 
@@ -77,6 +79,8 @@ interface Widget {
   currentTab?: number | null
   tree?: any
   treeTable?: HTMLTableElement
+  /** A p5 sketch's canvas (Coder's p5, utils/p5Draw.ts): what is still to paint, held while an image decodes. */
+  p5?: { canvas: HTMLCanvasElement; painter: P5Painter; queue: any[]; waiting: boolean }
 }
 
 interface Dialog { el: HTMLElement; resolve: (value: string) => void; cancel: () => void }
@@ -312,6 +316,7 @@ const TK_STYLES = String.raw`
 .tkx-spinbtns button { flex: 1; border: 1px outset #f0f0f0; background: #f0f0f0; font-size: 7px; line-height: 1; padding: 0; margin: 0; cursor: default; color: #000; }
 .tkx-canvas { position: relative; overflow: hidden; display: block; }
 .tkx-canvas svg { display: block; overflow: hidden; }
+.tkx-p5 { display: block; background: #fff; }
 .tkx-overlay { position: absolute; inset: 0; pointer-events: none; }
 .tkx-overlay > * { pointer-events: auto; }
 .tkx-labelframe { position: relative; }
@@ -446,6 +451,8 @@ export class TkRenderer {
   private historyStopped = false
   /** Canvases showing a past step instead of their live drawing. */
   private showing = new Map<number, { layer: SVGGElement; bg: string }>()
+  /** Every p5 sketch's pictures, decoded once. */
+  private p5Images = new P5ImageStore()
 
   constructor(host: HTMLElement, options: TkRendererOptions = {}) {
     ensureStyles()
@@ -737,6 +744,7 @@ export class TkRenderer {
       case 'cvlower': this.canvasLower(op[1], op[2] ?? [], op[3] ?? null); break
       case 'cvview': this.canvasView(op[1], op[2], op[3]); break
       case 'mark': this.recordFrame(op[1]); break
+      case 'ctx2d': this.paintCanvas2d(op[1], op[2] ?? []); break
       case 'raise': this.raise(op[1]); break
       case 'lower': this.lower(op[1]); break
       case 'grab': this.setGrab(op[1] ?? null); break
@@ -829,6 +837,7 @@ export class TkRenderer {
       case 'scale': w = this.createScale(id, parent, props); break
       case 'spinbox': w = this.createSpinbox(id, parent, props); break
       case 'canvas': w = this.createCanvas(id, parent, props); break
+      case 'canvas2d': w = this.createCanvas2d(id, parent, props); break
       case 'scrollbar': { const el = h('span'); el.style.display = 'none'; w = this.newWidget(id, kind, parent, props, el, null); break }
       case 'menubutton': {
         const el = h('button', 'tkx-mbutton tkx-nofocus')
@@ -1045,6 +1054,81 @@ export class TkRenderer {
     return w
   }
 
+  /**
+   * A p5 sketch's canvas: a real <canvas>, painted by P5Painter at the
+   * screen's own resolution. Its size comes in as props when it is made, and
+   * after that in its drawing (`size`), in order with what is drawn.
+   */
+  private createCanvas2d(id: number, parent: number | null, props: Props): Widget {
+    const el = h('canvas', 'tkx-p5')
+    const w = this.newWidget(id, 'canvas2d', parent, props, el, null)
+    const ctx = el.getContext('2d')
+    if (!ctx) return w
+    const scale = Math.min(3, Math.max(1, (typeof window !== 'undefined' && window.devicePixelRatio) || 1))
+    const width = Math.max(1, Number(props.width) || 100)
+    const height = Math.max(1, Number(props.height) || 100)
+    el.width = Math.round(width * scale)
+    el.height = Math.round(height * scale)
+    const painter = new P5Painter(ctx, this.p5Images, width, height, {
+      scale,
+      onResize: (pw, ph) => this.sizeCanvas2d(w, pw, ph),
+      onCursor: css => { el.style.cursor = css },
+    })
+    w.p5 = { canvas: el, painter, queue: [], waiting: false }
+    return w
+  }
+
+  private styleCanvas2d(w: Widget) {
+    const p5 = w.p5
+    if (!p5) return
+    const width = Math.max(1, Number(w.props.width) || 100)
+    const height = Math.max(1, Number(w.props.height) || 100)
+    // Normally the drawing's own `size` got here first; the bitmap is only
+    // resized (and so wiped) when it did not.
+    if (p5.painter.width !== width || p5.painter.height !== height) p5.painter.resize(width, height)
+    else this.sizeCanvas2d(w, width, height)
+    if (w.props.cursor) p5.canvas.style.cursor = String(w.props.cursor)
+  }
+
+  private sizeCanvas2d(w: Widget, width: number, height: number) {
+    w.el.style.width = `${width}px`
+    w.el.style.height = `${height}px`
+    w.req.width = `${width}px`
+    w.req.height = `${height}px`
+    this.applySize(w)
+    const master = w.master ?? w.parent
+    if (master !== null) this.layoutDirty.add(master)
+  }
+
+  /** A frame of a sketch's drawing; anything after a picture still being decoded waits for it. */
+  private paintCanvas2d(id: number, ops: any[]) {
+    const w = this.widgets.get(id)
+    const p5 = w?.p5
+    if (!w || !p5 || !Array.isArray(ops)) return
+    if (p5.queue.length) {
+      p5.queue.push(...ops)
+      return
+    }
+    const done = p5.painter.apply(ops)
+    if (done < ops.length) this.holdCanvas2d(w, ops.slice(done))
+  }
+
+  private holdCanvas2d(w: Widget, rest: any[]) {
+    const p5 = w.p5!
+    p5.queue = rest
+    if (p5.waiting) return
+    p5.waiting = true
+    void this.p5Images.ready(String(rest[0]?.[1])).then(() => {
+      p5.waiting = false
+      if (!this.widgets.has(w.id)) return
+      const queue = p5.queue
+      p5.queue = []
+      const done = p5.painter.apply(queue)
+      if (done < queue.length) this.holdCanvas2d(w, queue.slice(done))
+      this.relayoutDirty()
+    })
+  }
+
   private createTree(id: number, parent: number | null, props: Props): Widget {
     const el = h('div', 'tkx-tree')
     el.tabIndex = 0
@@ -1115,6 +1199,7 @@ export class TkRenderer {
       case 'spinbox': this.styleEntry(w, w.el, w.field!); break
       case 'combobox': this.styleEntry(w, w.el, w.field!); w.el.classList.toggle('tkx-disabled', props.state === 'disabled'); break
       case 'canvas': this.styleCanvas(w); break
+      case 'canvas2d': this.styleCanvas2d(w); break
       case 'menubutton': this.styleMenubutton(w); break
       case 'optionmenu': this.styleOptionMenu(w); break
       case 'progressbar': this.styleProgress(w); break

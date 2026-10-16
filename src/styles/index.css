@@ -369,6 +369,9 @@ html[data-theme="light"] .hover\:text-slate-100:hover { color: #0f172a !importan
   height: auto;
 }
 html[data-theme="light"] .turtle-preview-wrapper { border-color: #cbd5e1; }
+/* A p5 sketch's preview is a picture at its own size (or the panel's, if smaller). */
+.turtle-preview-wrapper:has(> .p5-preview) { width: auto; }
+.turtle-preview-wrapper .p5-preview { display: block; width: 100%; height: auto; }
 
 /* WYSIWYG guide editor (TipTap) content */
 .guide-prose { font-size: 13px; line-height: 1.55; color: #cbd5e1; }

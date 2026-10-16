@@ -15,8 +15,14 @@ import commondialogSource from '../python/tkinter/commondialog.py?raw'
 import fontSource from '../python/tkinter/font.py?raw'
 import scrolledtextSource from '../python/tkinter/scrolledtext.py?raw'
 import imagetkSource from '../python/tkinter/_pil_imagetk.py?raw'
+import p5Source from '../python/p5/__init__.py?raw'
+import pyp5jsSource from '../python/pyp5js.py?raw'
 
-/** Coder's tkinter package, by path under the shim directory. */
+/**
+ * Coder's tkinter package, by path under the shim directory — and Coder's p5,
+ * which draws its sketches in a tkinter window (src/python/p5). p5 is small
+ * beside tkinter, so it always comes along rather than having a chunk of its own.
+ */
 export const TKINTER_SHIM_FILES: Record<string, string> = {
   'tkinter/__init__.py': initSource,
   'tkinter/_colors.py': colorsSource,
@@ -31,6 +37,8 @@ export const TKINTER_SHIM_FILES: Record<string, string> = {
   'tkinter/font.py': fontSource,
   'tkinter/scrolledtext.py': scrolledtextSource,
   'tkinter/_pil_imagetk.py': imagetkSource,
+  'p5/__init__.py': p5Source,
+  'pyp5js.py': pyp5jsSource,
 }
 
 /**
