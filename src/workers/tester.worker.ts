@@ -3,12 +3,15 @@
 import { SVG_TURTLE_WORKER_SETUP } from '../utils/mainThread'
 import { STDCTX_TEST_BOOTSTRAP } from '../utils/stdctx'
 import { MATPLOTLIB_BOOTSTRAP } from '../utils/matplotlib'
-import { detectMatplotlib, detectSpongeLibs } from '../utils/codeAnalysis'
+import { micropipInstallCode } from '../utils/plotly'
+import { detectPlottingLibs, detectSpongeLibs, micropipPackagesFor, pyodidePackagesFor, type PlottingLibs } from '../utils/codeAnalysis'
+import { chartComparesColours, chartReqKey } from '../utils/chartCheck'
+import coderChartsSource from '../python/coder_charts.py?raw'
 import { programPythonFiles, type ProgramFile } from '../utils/importGraph'
 import { normalizeTestInputs } from '../utils/testInputs'
 import { TKINTER_TEST_SETUP } from '../utils/tkinterHeadless'
 import { canvasToDataUrl, compareP5Captures, p5ReqKey, p5RunSettings, parseP5Capture, rasterizeP5, type P5RunSettings } from '../utils/p5Compare'
-import type { BookTestOutputReq, P5Comparison } from '../types'
+import type { BookTestOutputReq, ChartComparison, P5Comparison } from '../types'
 
 const PYODIDE_BASE_URL = 'https://cdn.jsdelivr.net/pyodide/v0.29.3/full'
 const PYODIDE_URL = `${PYODIDE_BASE_URL}/pyodide.js`
@@ -156,13 +159,89 @@ function installStdctxForTests(): void {
   pyodide.runPython(STDCTX_TEST_BOOTSTRAP)
 }
 
-// A plotting challenge still has to import and run under test. Agg needs no
-// screen, so the figures are simply rendered and dropped — the assertions are
-// about the program's output, and there is nowhere here to show a chart.
-function installMatplotlibForTests(): void {
-  pyodide.globals.set('js_matplotlib_figure', () => undefined)
-  pyodide.globals.set('js_plotly_figure', () => undefined)
-  try { pyodide.runPython(MATPLOTLIB_BOOTSTRAP) } catch { /* no matplotlib in this build */ }
+// A plotting challenge has to import and run under test, so seaborn and plotly
+// are installed here as they are for a run. Nothing is drawn: plt.show() and
+// fig.show() describe each chart instead (src/python/coder_charts.py), which is
+// what a 'chart' requirement compares with its solution's, and costs far less
+// than rendering a picture nobody sees.
+const plottingInstalled = { matplotlib: false, plotly: false, seaborn: false }
+async function installPlottingForTests(libs: PlottingLibs): Promise<void> {
+  if (!libs.matplotlib && !libs.plotly) return
+  if (!pyodide.runPython("'_coder_charts' in globals()")) {
+    pyodide.globals.set('_tc_charts_src', coderChartsSource)
+    pyodide.runPython(`
+import sys as _tc_sys, types as _tc_types
+_coder_charts = _tc_types.ModuleType('_coder_charts')
+exec(compile(_tc_charts_src, 'coder_charts.py', 'exec'), _coder_charts.__dict__)
+_tc_sys.modules['_coder_charts'] = _coder_charts
+`)
+  }
+  const micropip = micropipPackagesFor(libs).filter(pkg =>
+    pkg === 'seaborn' ? !plottingInstalled.seaborn : !plottingInstalled.plotly)
+  const extra = pyodidePackagesFor(libs)
+  try {
+    if (extra.length) await pyodide.loadPackage(extra)
+    if (micropip.length) {
+      self.postMessage({ type: 'status', message: `Installing ${micropip.join(', ')}…` })
+      await pyodide.loadPackage('micropip')
+      await pyodide.runPythonAsync(micropipInstallCode(micropip))
+    }
+  } catch { /* the program's own import reports it */ }
+  if (libs.seaborn) plottingInstalled.seaborn = true
+  if (libs.matplotlib && !plottingInstalled.matplotlib) {
+    pyodide.globals.set('js_matplotlib_figure', () => undefined)
+    try {
+      pyodide.runPython(MATPLOTLIB_BOOTSTRAP)
+      pyodide.runPython(`
+import matplotlib.pyplot as _tc_plt
+_tc_plt.show = lambda *_a, **_k: _coder_charts.capture_open_figures()
+`)
+      plottingInstalled.matplotlib = true
+    } catch { /* no matplotlib in this build */ }
+  }
+  if (libs.plotly && !plottingInstalled.plotly) {
+    try {
+      pyodide.runPython(`
+import plotly.io as _tc_pio
+_tc_pio.show = lambda fig, *_a, **_k: _coder_charts.capture_plotly(fig)
+`)
+      plottingInstalled.plotly = true
+    } catch { /* plotly would not install */ }
+  }
+}
+
+/** Run a program as a test does and keep the charts it drew (in Python, as `name`). */
+function runAndCaptureCharts(srcCode: string, inputs: Array<string | number>, name: string): void {
+  if (plottingInstalled.matplotlib) pyodide.runPython('_tc_plt.close("all")')
+  if (pyodide.runPython("'_coder_charts' in globals()")) pyodide.runPython('_coder_charts.reset()')
+  pyodide.globals.set('_tc_code', srcCode)
+  pyodide.globals.set('_tc_inputs', pyodide.toPy(inputs))
+  pyodide.runPython('_run_test_case(_tc_code, _tc_inputs)')
+  keepCharts(name)
+}
+
+/** Figures built but never shown count as drawn, as on the page; then keep them as `name`. */
+function keepCharts(name: string): void {
+  if (!pyodide.runPython("'_coder_charts' in globals()")) {
+    pyodide.runPython(`${name} = []`)
+    return
+  }
+  if (plottingInstalled.matplotlib) pyodide.runPython('_coder_charts.capture_open_figures()')
+  pyodide.runPython(`${name} = _coder_charts.take()`)
+}
+
+/** The solution files a challenge's chart requirements name, from the files sent with it. */
+function chartSolutionFiles(
+  tests: Array<{ out?: string | BookTestOutputReq[] }>,
+  files: ProgramFile[],
+): ProgramFile[] {
+  const wanted = new Set<string>()
+  for (const test of tests) {
+    for (const req of Array.isArray(test.out) ? test.out : []) {
+      if (req.typ === 'chart' && req.filename) wanted.add('/' + req.filename.replace(/^\//, ''))
+    }
+  }
+  return files.filter(file => wanted.has('/' + file.path.replace(/^\//, '')))
 }
 
 function readFileFromFs(filename: string): string {
@@ -285,6 +364,28 @@ self.onmessage = async (e: MessageEvent) => {
     return
   }
 
+  if (e.data.type === 'preview_chart') {
+    const { solutionCode, inputs, files } = e.data as {
+      solutionCode: string
+      inputs: Array<string | number>
+      files: Array<{ path: string; content: ArrayBuffer }>
+    }
+    try {
+      const programFiles = programPythonFiles(solutionCode, null, files ?? [])
+      await initPyodide(solutionCode, programFiles)
+      if (files?.length) mountFiles(files)
+      try { pyodide.runPython('import os; os.chdir("/")') } catch { /* ignore */ }
+      await installPlottingForTests(detectPlottingLibs(solutionCode, programFiles))
+      runAndCaptureCharts(solutionCode, inputs, '_tc_preview_charts')
+      const preview = pyodide.runPython("_coder_charts.preview(_tc_preview_charts) if '_coder_charts' in globals() else '{}'")
+      const { png = '', html = '' } = JSON.parse(String(preview ?? '{}')) as { png?: string; html?: string }
+      self.postMessage({ type: 'preview_done', png, html })
+    } catch (err) {
+      self.postMessage({ type: 'preview_error', error: String(err) })
+    }
+    return
+  }
+
   if (e.data.type !== 'run_tests') return
 
   const { code, files, tests, tkFiles } = e.data as {
@@ -312,7 +413,8 @@ self.onmessage = async (e: MessageEvent) => {
 
     const spongeLibs = detectSpongeLibs(code, programFiles)
     if (spongeLibs.usesStdctx || spongeLibs.usesStdaud) installStdctxForTests()
-    if (detectMatplotlib(code, programFiles)) installMatplotlibForTests()
+    // A chart's solution may need a library the student has not imported yet.
+    await installPlottingForTests(detectPlottingLibs(code, [...programFiles, ...chartSolutionFiles(tests, files ?? [])]))
 
     const results: Array<{
       caseIndex: number
@@ -323,6 +425,7 @@ self.onmessage = async (e: MessageEvent) => {
       turtleSvg: string
       solutionTurtleSvgs: Record<string, string>
       p5Results: Record<string, P5Comparison>
+      chartResults: Record<string, ChartComparison>
     }> = []
 
     for (let i = 0; i < tests.length; i++) {
@@ -338,9 +441,8 @@ self.onmessage = async (e: MessageEvent) => {
 
       const inputs = normalizeTestInputs(test.in)
 
-      pyodide.globals.set('_tc_code', code)
-      pyodide.globals.set('_tc_inputs', pyodide.toPy(inputs))
-      pyodide.runPython('_run_test_case(_tc_code, _tc_inputs)')
+      // The student's run, keeping the charts it draws for any 'chart' requirement.
+      runAndCaptureCharts(code, inputs, '_tc_student_charts')
 
       const output: string = String(pyodide.globals.get('_test_output') ?? '')
       const errorVal = pyodide.globals.get('_test_error')
@@ -398,7 +500,34 @@ self.onmessage = async (e: MessageEvent) => {
         p5Results[key] = await compareP5Captures(actual, expected)
       }
 
-      results.push({ caseIndex: i, output, error, statementResults, fileContents, turtleSvg, solutionTurtleSvgs, p5Results })
+      // Fourth pass: charts, each solution run once and compared by what its
+      // charts show (src/python/coder_charts.py).
+      const chartResults: Record<string, ChartComparison> = {}
+      const solutionsRun = new Set<string>()
+      for (const req of reqs) {
+        if (req.typ !== 'chart' || !req.filename) continue
+        const key = chartReqKey(req)
+        if (key in chartResults) continue
+        const solName = `_tc_sol_charts_${solutionsRun.size}`
+        const solCode = readFileFromFs(req.filename)
+        if (!solCode) {
+          chartResults[key] = { passed: false, message: `The solution file ${req.filename} is missing.`, differences: [] }
+          continue
+        }
+        if (!solutionsRun.has(req.filename)) {
+          runAndCaptureCharts(solCode, inputs, solName)
+          solutionsRun.add(req.filename)
+          pyodide.runPython(`_tc_sol_by_file = globals().setdefault('_tc_sol_by_file', {}); _tc_sol_by_file[${JSON.stringify(req.filename)}] = ${solName}`)
+        }
+        const options = `{'colours': ${chartComparesColours(req) ? 'True' : 'False'}}`
+        const verdict = pyodide.runPython(
+          `_coder_charts.compare(_tc_sol_by_file[${JSON.stringify(req.filename)}], _tc_student_charts, ${options}) `
+          + `if '_coder_charts' in globals() else '{"passed": false, "message": "No chart library was found to mark this.", "differences": []}'`)
+        chartResults[key] = JSON.parse(String(verdict)) as ChartComparison
+      }
+      if (solutionsRun.size) pyodide.runPython('_tc_sol_by_file = {}')
+
+      results.push({ caseIndex: i, output, error, statementResults, fileContents, turtleSvg, solutionTurtleSvgs, p5Results, chartResults })
     }
 
     self.postMessage({ type: 'done', results })

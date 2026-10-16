@@ -1,7 +1,8 @@
 import type { BookTestCase, BookTestOutputReq, TesterRunOutput, TestReqResult, TestCaseResult, OverallTestResult } from '../types'
 import { normalizeTestInputs } from './testInputs'
 import { p5ReqKey } from './p5Compare'
-import type { P5Comparison } from '../types'
+import type { ChartComparison, P5Comparison } from '../types'
+import { chartReqKey } from './chartCheck'
 
 // ── Normalisation helpers ──────────────────────────────────────────────────
 
@@ -107,6 +108,7 @@ function evalRequirement(
   turtleSvg: string,
   solutionTurtleSvgs: Record<string, string>,
   p5Results: Record<string, P5Comparison> = {},
+  chartResults: Record<string, ChartComparison> = {},
 ): TestReqResult {
   const typ = req.typ ?? '+'
   const pattern = req.pattern ?? ''
@@ -185,6 +187,14 @@ function evalRequirement(
       break
     }
 
+    case 'chart': {
+      // Compared in the tester, where both programs' figures exist.
+      const result = req.filename ? chartResults[chartReqKey(req)] : undefined
+      if (result) rr.chart = result
+      rr.passed = !!result?.passed
+      break
+    }
+
     default:
       rr.passed = false
   }
@@ -203,7 +213,7 @@ export function evaluateTestCase(
   const reveal = testCase.reveal !== false
   const inputs = normalizeTestInputs(testCase.in)
   const out = testCase.out ?? ''
-  const { output, error, statementResults, fileContents, turtleSvg = '', solutionTurtleSvgs = {}, p5Results = {} } = runOut
+  const { output, error, statementResults, fileContents, turtleSvg = '', solutionTurtleSvgs = {}, p5Results = {}, chartResults = {} } = runOut
 
   const reqResults: TestReqResult[] = []
 
@@ -214,7 +224,7 @@ export function evaluateTestCase(
     reqResults.push({ passed: re.test(textToTest), typ: '+', pattern: out, ignore: '', count: -1 })
   } else if (Array.isArray(out)) {
     for (const req of out as BookTestOutputReq[]) {
-      reqResults.push(evalRequirement(req, output, sourceCode, statementResults, fileContents, turtleSvg, solutionTurtleSvgs, p5Results))
+      reqResults.push(evalRequirement(req, output, sourceCode, statementResults, fileContents, turtleSvg, solutionTurtleSvgs, p5Results, chartResults))
     }
   }
 

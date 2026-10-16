@@ -13,6 +13,7 @@ import { useDialogs } from './dialogs/DialogProvider'
 import TesterWorker from '../workers/tester.worker.ts?worker'
 import { normalizeTestInputs } from '../utils/testInputs'
 import { loadCoderTkFiles } from '../utils/tkinter'
+import { CHART_PREVIEW_TOKEN } from '../utils/chartCheck'
 
 interface Props {
   navState: BookNavState
@@ -95,9 +96,9 @@ function renderMarkdown(md: string, previewSvg: string | null, previewLoading: b
   const inlineCodes: string[] = []
 
   // Extract preview tokens before HTML escaping. Supports markdown image
-  // syntax `![alt](turtlepreview)` / `![alt](p5preview)` and the legacy
-  // `{{turtle_preview}}`.
-  let text = md.replace(/!\[[^\]]*\]\((?:turtle|p5)preview\)/g, '\x00TP\x00')
+  // syntax `![alt](turtlepreview)` / `![alt](p5preview)` / `![alt](chartpreview)`
+  // and the legacy `{{turtle_preview}}`.
+  let text = md.replace(/!\[[^\]]*\]\((?:turtle|p5|chart)preview\)/g, '\x00TP\x00')
                 .replace(/\{\{turtle_preview\}\}/g, '\x00TP\x00')
 
   text = text.replace(/```(?:[^\n]*)?\n([\s\S]*?)```/g, (_, code: string) => {
@@ -456,8 +457,9 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
   }, [navState.activeChallengeId, navState.currentBookUrl, activeGuidePath])
 
   // Generate the preview when a challenge with `![preview](turtlepreview)` (an
-  // SVG of the solution's turtle drawing) or `![preview](p5preview)` (a picture
-  // of the solution's p5 sketch) loads
+  // SVG of the solution's turtle drawing), `![preview](p5preview)` (a picture
+  // of the solution's p5 sketch) or `![preview](chartpreview)` (the solution's
+  // chart: a matplotlib picture, or a live plotly chart) loads
   useEffect(() => {
     if (previewWorkerRef.current) {
       previewWorkerRef.current.terminate()
@@ -470,15 +472,16 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
       return
     }
     const p5Preview = /!\[[^\]]*\]\(p5preview\)/.test(guideMarkdown)
-    const hasPreviewToken = p5Preview || /!\[[^\]]*\]\(turtlepreview\)|\{\{turtle_preview\}\}/.test(guideMarkdown)
+    const chartPreview = CHART_PREVIEW_TOKEN.test(guideMarkdown)
+    const hasPreviewToken = p5Preview || chartPreview || /!\[[^\]]*\]\(turtlepreview\)|\{\{turtle_preview\}\}/.test(guideMarkdown)
     if (!hasPreviewToken) { setPreviewLoading(false); return }
 
     const challenge = findChallenge(manifest, navState.activeChallengeId)
     if (!challenge?.tests?.length) { setPreviewLoading(false); return }
 
-    // Find the first test case with a 't' (or, for a p5 preview, 'p5')
-    // requirement that names a filename
-    const previewTyp = p5Preview ? 'p5' : 't'
+    // Find the first test case with a 't' (or, for a p5 preview, 'p5'; for a
+    // chart preview, 'chart') requirement that names a filename
+    const previewTyp = chartPreview ? 'chart' : p5Preview ? 'p5' : 't'
     let solutionFilename: string | undefined
     let previewReq: BookTestOutputReq | undefined
     let firstInputs: Array<string | number> = []
@@ -518,7 +521,7 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
 
         const allFiles = await getAllFiles(fs.id)
         // Drawn with the real turtle, headless, as the student's own run is.
-        const tkFiles = await loadCoderTkFiles({ turtle: true })
+        const tkFiles = chartPreview ? null : await loadCoderTkFiles({ turtle: true })
         if (cancelled) return
 
         const worker = new TesterWorker()
@@ -526,7 +529,17 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
         worker.onmessage = (e: MessageEvent) => {
           if (cancelled) return
           if (e.data.type === 'preview_done') {
-            if (p5Preview) {
+            if (chartPreview) {
+              const png = String(e.data.png ?? '')
+              const html = String(e.data.html ?? '')
+              // A plotly chart stays live, sandboxed as in the Display pane:
+              // no allow-same-origin, so it can touch nothing of ours.
+              setPreviewSvg(png
+                ? `<img src="${png}" alt="The chart your program should draw" class="chart-preview" style="max-width:100%">`
+                : html
+                  ? `<iframe title="The chart your program should draw" sandbox="allow-scripts" class="chart-preview" style="width:640px;max-width:100%;height:380px;border:0;background:#fff" srcdoc="${html.replace(/&/g, '&amp;').replace(/"/g, '&quot;')}"></iframe>`
+                  : '')
+            } else if (p5Preview) {
               const png = String(e.data.png ?? '')
               const width = Number(e.data.width) || 0
               setPreviewSvg(png ? `<img src="${png}" alt="What the finished sketch draws" class="p5-preview" style="max-width:min(100%, ${width}px)">` : '')
@@ -545,7 +558,7 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
           }
         }
         worker.postMessage({
-          type: p5Preview ? 'preview_p5' : 'preview_turtle',
+          type: chartPreview ? 'preview_chart' : p5Preview ? 'preview_p5' : 'preview_turtle',
           solutionCode,
           inputs: firstInputs,
           files: allFiles.map(f => ({ path: f.path, content: f.content })),
