@@ -1,11 +1,14 @@
-# Parsons problems
+# Parsons problems with fixed code
 
-You can use #start and #end markers in Parsons problems to mark the code that is rearrangeable.
+Some lines of a puzzle can be **fixed**: they stay where they are while the student arranges the rest. Here the import, the turtle and `turtle.done()` are fixed, and only the loop moves.
 
-You are only allowed one #start and #end block per problem.
+A puzzle can have several movable blocks, separated by fixed lines. A line only moves within its own block. In the file, each block sits between a `# start` and a `# end` comment. The role buttons write these for you.
 
-There must be a #start marker to use this setting but the #end marker is optional.
+**Indentation** is the teacher's choice, set above the code:
 
-This example also demonstrates using the turtle within a Parsons problem.
+- **given**: every line appears at its correct indentation, so the student only has to order the lines.
+- **student sets it**: lines start unindented, and the student indents them too (‹ ›, ← / →, or drag sideways).
+
+This puzzle leaves indentation to the student. It also shows the turtle working inside a Parsons problem.
 
 **Rearrange this code to draw a square by repeating four times the instruction to 'first move forward and then turn left'.**

@@ -40,6 +40,16 @@
       "typ": "parsons"
     },
     {
+      "id": "7c1f3a52-9d4e-4b8a-a6f1-2e5d0c8b9f41",
+      "name": "Parsons Blocks",
+      "guide": "parsonsblocks.md",
+      "py": "parsonsblocks.py",
+      "typ": "parsons",
+      "parsons": {
+        "indent": "given"
+      }
+    },
+    {
       "id": "5bee80c3-f4da-46b8-89cf-915f381ca5c3",
       "name": "Advanced Test Cases",
       "guide": "advancedtests.md",

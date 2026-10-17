@@ -305,20 +305,61 @@ export async function deleteChallengeWorkingFs(challengeId: string): Promise<voi
 const NEW_EX_PY = `# Write your solution here\n`
 const NEW_EX_GUIDE = (name: string) => `# ${name}\n\nDescribe the task here.\n`
 
-/** Add a new (task) exercise after the given id (or at the end), renumber, seed files, persist. */
+const NEW_EXAMPLE_PY = `# An example: the student runs it and reads it.\nprint("Hello, world!")\n`
+const NEW_EXAMPLE_GUIDE = (name: string) => `# ${name}\n\nExplain what this example shows, then ask the student to run it.\n`
+// A Parsons puzzle's file is its answer. The markers say what the student
+// arranges; the role buttons in the editor write them, so a teacher rarely types one.
+const NEW_PARSONS_PY = [
+  '# Lines outside the block stay where they are.',
+  'total = 0',
+  '# start',
+  'for n in range(1, 4):',
+  '    total = total + n',
+  'print(total)',
+  'print(n) #distractor',
+  '# end',
+  '',
+].join('\n')
+const NEW_PARSONS_GUIDE = (name: string) =>
+  `# ${name}\n\nPut the lines in order so the program adds up 1, 2 and 3 and prints the total.\n\n` +
+  `One line does not belong: strike it out with ✕. Then press **Submit**.\n`
+
+/** What an exercise is to the student: read and run, tested, or a Parsons puzzle. */
+export type ExerciseKind = 'example' | 'task' | 'parsons'
+
+export function exerciseKind(c: BookChallenge): ExerciseKind {
+  if (c.typ === 'parsons') return 'parsons'
+  return c.isExample === true || c.isExample === 'True' ? 'example' : 'task'
+}
+
+/** The challenge as another kind. Tests go when it stops being a task; a Parsons
+ *  puzzle starts with indentation given. Its files are the caller's business. */
+export function withExerciseKind(c: BookChallenge, kind: ExerciseKind): BookChallenge {
+  const next: BookChallenge = { ...c }
+  delete next.isExample
+  delete next.typ
+  delete next.parsons
+  if (kind === 'example') { next.isExample = true; next.tests = [] }
+  if (kind === 'parsons') { next.typ = 'parsons'; next.parsons = { indent: 'given', ...c.parsons }; delete next.tests }
+  if (kind === 'task' && !next.tests) next.tests = []
+  return next
+}
+
+/** Add a new exercise after the given id (or at the end), renumber, seed files, persist. */
 export async function addExercise(
-  srcFsId: string, manifest: BookManifest, afterId?: string,
+  srcFsId: string, manifest: BookManifest, afterId?: string, kind: ExerciseKind = 'task',
 ): Promise<{ manifest: BookManifest; newId: string }> {
   const newId = crypto.randomUUID()
   const num = nextExerciseNumber(manifest)
-  const newChild: BookChallenge = {
+  const name = kind === 'parsons' ? `Puzzle ${num}` : kind === 'example' ? `Example ${num}` : `Exercise ${num}`
+  const newChild: BookChallenge = withExerciseKind({
     id: newId,
-    name: `Exercise ${num}`,
+    name,
     guide: `ex${pad2(num)}.md`,
     py: `ex${pad2(num)}.py`,
     tests: [],
     additionalFiles: [],
-  }
+  }, kind)
   const children = [...manifest.children]
   const idx = afterId ? children.findIndex(c => !isBookRef(c) && (c as BookChallenge).id === afterId) : -1
   if (idx >= 0) children.splice(idx + 1, 0, newChild)
@@ -326,8 +367,10 @@ export async function addExercise(
   const draft: BookManifest = { ...manifest, children }
 
   // Seed the new files before renumber (renumber may rename them into position).
-  await writeBookFile(srcFsId, newChild.py!, NEW_EX_PY)
-  await writeBookFile(srcFsId, newChild.guide!, NEW_EX_GUIDE(newChild.name))
+  const py = kind === 'parsons' ? NEW_PARSONS_PY : kind === 'example' ? NEW_EXAMPLE_PY : NEW_EX_PY
+  const guide = kind === 'parsons' ? NEW_PARSONS_GUIDE : kind === 'example' ? NEW_EXAMPLE_GUIDE : NEW_EX_GUIDE
+  await writeBookFile(srcFsId, newChild.py!, py)
+  await writeBookFile(srcFsId, newChild.guide!, guide(newChild.name))
 
   const { manifest: renumbered, renames } = renumberExercises(draft)
   await applyRenames(srcFsId, renames)

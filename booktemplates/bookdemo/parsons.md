@@ -1,13 +1,21 @@
 # Parsons problems
 
-You can also set Parsons drag & drop problems with thanks to the js-parsons library which we build upon here.
+A Parsons problem gives the student the lines of a working program, shuffled, and asks them to put them back in order.
 
-To do this you simply write your correct code in the code editor and then add a typ attribute in the JSON with the value "parsons". 
+To make one in the book editor, choose **Parsons puzzle** when you add an exercise, or click an exercise's icon and change its kind. Then write the correct program in the code editor. That code *is* the answer.
 
-Lave instructions in the guide about what the code should do when correctly arranged e.g. 
+Select lines and press **Fixed**, **Movable** or **Distractor** above the code (they are on the right-click menu too):
+
+- **Movable** lines are shuffled, and the student puts them in order.
+- **Fixed** lines stay where they are.
+- **Distractors** are wrong lines mixed in with the rest. The student should strike them out with ✕.
+
+The editor marks each line with its role. Press **Preview as student** to try the puzzle.
+
+Leave instructions in the guide about what the code should do when it is arranged correctly, e.g.
 
 **Sequence the first four lines of the well known children's song**
 
-When the challenge is viewed, the lines will be arranged randomly each time for correct drag & drop including adding indentation. The sequenced code can then also be run to interact with it.
+The student sees one program, not a separate bank of lines. They drag each line by its ⠿ handle (or use Alt+↑ / Alt+↓), and Submit checks the order. The arranged code can be run, debugged and traced like any other.
 
-To add distractors, you can add lines of code with the comment #distractor at the end of the line as shown.
+Behind the scenes the roles are plain comments in the `.py` file, so an older book still works: `#distractor` at the end of a line, and `# start` / `# end` around the movable lines.
