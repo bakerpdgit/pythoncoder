@@ -6621,7 +6621,7 @@ ${runProgramPython('exec(code_obj, globals())')}
                     </div>
                     <div className="normal-case tracking-normal text-[11px] text-slate-500 truncate">
                       {isParsonsChallenge
-                        ? 'Put the lines in order, strike out any that do not belong, then Submit'
+                        ? 'Put the lines in order, hide any that do not belong, then Submit'
                         : codeStatus}
                     </div>
                   </div>
@@ -6735,7 +6735,7 @@ ${runProgramPython('exec(code_obj, globals())')}
                         {([
                           { role: 'fixed' as const, label: 'Fixed', title: 'Fixed — the line stays where it is', cls: 'parsons-role-btn-fixed' },
                           { role: 'movable' as const, label: 'Movable', title: 'Movable — the student puts it in order', cls: 'parsons-role-btn-movable' },
-                          { role: 'distractor' as const, label: 'Distractor', title: 'Distractor — a wrong line the student should strike out', cls: 'parsons-role-btn-distractor' },
+                          { role: 'distractor' as const, label: 'Distractor', title: 'Distractor — a wrong line the student should hide', cls: 'parsons-role-btn-distractor' },
                         ]).map(b => (
                           <button key={b.role} type="button" title={`${b.title} (also on the right-click menu)`}
                             onMouseDown={e => e.preventDefault()}

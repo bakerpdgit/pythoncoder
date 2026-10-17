@@ -19,7 +19,7 @@
  *     "student", as Sponge did. An answer with nothing indented is always given.
  *
  * There is no separate bank: every fragment, distractors included, starts in its
- * block, shuffled, and the student strikes out the ones that do not belong.
+ * block, shuffled, and the student hides the ones that do not belong.
  */
 
 import { detectIndentUnit } from './indentation'
@@ -74,7 +74,7 @@ export interface ParsonsProblem {
 export interface ParsonsBlockArrangement {
   /** Every fragment of the block, in the order shown. */
   order: string[]
-  /** The fragments struck out — shown in place, left out of the program. */
+  /** The fragments hidden — shown struck out below the program, left out of it. */
   removed: string[]
   /** Student-set nesting levels (student indentation only). */
   indents: Record<string, number>
@@ -290,7 +290,7 @@ export function arrangementMatchesProblem(
 /**
  * A saved arrangement as this problem can use it: v2 as it stands, Coder's
  * first (two-panel) shape converted — what was still in the bank becomes
- * struck out at the end — or null when it no longer fits.
+ * hidden at the end — or null when it no longer fits.
  */
 export function migrateArrangement(problem: ParsonsProblem, stored: unknown): ParsonsArrangement | null {
   if (arrangementMatchesProblem(problem, stored)) return stored
@@ -325,7 +325,7 @@ export type ParsonsRow =
       level: number
       /** Each of its lines as it goes into the program, indentation included. */
       text: string[]
-      /** Program line of its first line, or null when struck out. */
+      /** Program line of its first line, or null when hidden. */
       lineNumber: number | null
     }
 
@@ -374,7 +374,7 @@ export interface AssembledParsons {
   rowAt: Record<number, string>
 }
 
-/** The program the student's arrangement makes, struck-out lines left out. */
+/** The program the student's arrangement makes, hidden lines left out. */
 export function assembleCode(problem: ParsonsProblem, arrangement: ParsonsArrangement): AssembledParsons {
   const out: string[] = []
   const rowAt: Record<number, string> = {}

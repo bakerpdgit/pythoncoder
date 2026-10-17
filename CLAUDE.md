@@ -85,7 +85,7 @@ Three layers, all of which should pass before a change is called done:
   at every run's start, the console folding for a drawing and opening on the
   first print, and input() borrowing the Console tab until the next drawing.
   `parsons.spec.ts` covers Parsons puzzles: a given-indentation puzzle with two
-  blocks arranged by Alt+↑ and by drag, its distractor struck out, Submit and
+  blocks arranged by Alt+↑ and by drag, its distractor hidden, Submit and
   Run; student indentation with ←/→; the arrangement surviving a reload, and a
   saved two-panel one migrating; the traced line highlighted; and a teacher
   adding a puzzle, marking a line Movable and previewing it.
@@ -946,8 +946,14 @@ https, isolated but no SharedArrayBuffer, a WebKit tab with no service worker
 - **One view, no bank** (`components/ParsonsView.tsx`). The puzzle shows as the
   program it is: fixed lines in place, movable lines with a `⠿` handle on a
   tinted band per block, and every fragment — distractors included — in its
-  block from the start. A line the student thinks does not belong is **struck
-  out in place** (✕, Delete) and left out of the program; ↺ puts it back. The
+  block from the start. Each movable row's controls are on its **left**: the
+  handle, an **eye** that hides the line (Delete does too), and under student
+  indentation ‹ ›; then a separator, then the code. A **hidden** line is left
+  out of the program and waits, struck out, in a section after a blank line
+  below the program, where it can be neither dragged nor indented; shown again
+  it returns to the end of its own block. A block's order is kept as shown
+  lines then hidden ones (`moveShown` / `setHidden`), which is how they are
+  laid out. The
   line numbers are the assembled program's, so a traceback's line 7 is row 7.
   The row the debugger is on is highlighted (`activeLine` through `rowAt`),
   which is what lets Debug and Trace step through a puzzle. Drag works only
@@ -977,7 +983,7 @@ https, isolated but no SharedArrayBuffer, a WebKit tab with no service worker
   persists in `pythoncoder-parsons-state` under `${rootUrl}::${challengeId}`,
   like completions. `migrateArrangement` keeps a saved one only while its ids
   still fit the parsed problem; the old two-panel shape becomes "what was left
-  in the bank is struck out". A fresh shuffle is never already solved.
+  in the bank is hidden". A fresh shuffle is never already solved.
   **Reset challenge** and **Reset book** clear it, and opening a different book
   clears the active challenge, so its puzzle does not linger.
 - **`codeText` stays the source of truth.** Every arrangement change reassembles

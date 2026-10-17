@@ -322,7 +322,7 @@ const NEW_PARSONS_PY = [
 ].join('\n')
 const NEW_PARSONS_GUIDE = (name: string) =>
   `# ${name}\n\nPut the lines in order so the program adds up 1, 2 and 3 and prints the total.\n\n` +
-  `One line does not belong: strike it out with ✕. Then press **Submit**.\n`
+  `One line does not belong: hide it with its eye. Then press **Submit**.\n`
 
 /** What an exercise is to the student: read and run, tested, or a Parsons puzzle. */
 export type ExerciseKind = 'example' | 'task' | 'parsons'
