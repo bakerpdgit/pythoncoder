@@ -348,7 +348,14 @@ export interface BookChallenge {
   tests?: BookTestCase[]
   additionalFiles?: BookAdditionalFile[]
   typ?: string
+  /** A Parsons puzzle's settings (`typ: 'parsons'`); see utils/parsons.ts. */
+  parsons?: BookParsonsSettings
   sol?: BookSolution
+}
+
+export interface BookParsonsSettings {
+  /** Who sets indentation: the answer's own, or the student (the default). */
+  indent?: 'given' | 'student'
 }
 
 // ── Test runner result types ───────────────────────────────────────────────

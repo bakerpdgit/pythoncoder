@@ -84,6 +84,11 @@ Three layers, all of which should pass before a change is called done:
   the tab group. `display.spec.ts` covers the Display pane across runs: emptied
   at every run's start, the console folding for a drawing and opening on the
   first print, and input() borrowing the Console tab until the next drawing.
+  `parsons.spec.ts` covers Parsons puzzles: a given-indentation puzzle with two
+  blocks arranged by Alt+↑ and by drag, its distractor struck out, Submit and
+  Run; student indentation with ←/→; the arrangement surviving a reload, and a
+  saved two-panel one migrating; the traced line highlighted; and a teacher
+  adding a puzzle, marking a line Movable and previewing it.
   `indent.spec.ts` covers per-file indentation (a four-space exercise after a
   two-space one, Enter after a colon, re-indenting from the cog menu).
   `recovery.spec.ts` covers the unsaved-changes backup (offered after a reload,
@@ -919,58 +924,111 @@ https, isolated but no SharedArrayBuffer, a WebKit tab with no service worker
   `instance/database.db` leaves an empty `instance` folder on show. A folder
   with anything visible beneath it stays.
 
-### Parsons problems (drag-and-drop activities)
+### Parsons puzzles
 
-- A challenge with `"typ": "parsons"` is a **Parsons problem**: its `py` file is
-  the *answer*, split into fragments, shuffled, and reassembled by dragging.
-  The authoring contract is inherited verbatim from Python Sponge so existing
-  books keep working — a line ending `#distractor` is a wrong fragment, an
-  optional single `# start` … `# end` region fences the draggable body (the rest
-  becomes fixed header/footer code), a two-character backslash-n escape inside a
-  line makes one multi-line fragment, and blank lines are dropped. Parsons
-  activities carry **no `tests`**.
-- The logic is a native port of js-parsons in `utils/parsons.ts` (parsing,
-  distractors, indent normalisation, an LIS-based line grader, code assembly);
-  `components/ParsonsPane.tsx` is the UI. Nothing from `oldpythongsponge/` runs —
-  no jQuery, no jQuery-UI, no prettify. Fragments are syntax-highlighted with
-  `monaco.editor.colorize` (Monaco is already loaded, so they match the editor in
-  both themes); `colorize` appends a trailing `<br>` that has to be stripped.
-  Highlighting is skipped unless `py` ends `.py` — tutorial 4's Parsons files
-  are maths proofs in `.md`/`.txt`.
+- A challenge with `"typ": "parsons"` is a **Parsons puzzle**: its `py` file is
+  the *answer*, and the student puts its shuffled lines back in order. Parsons
+  activities carry **no `tests`**. The file format is Python Sponge's, widened:
+  - a line ending `#distractor` is a wrong line;
+  - `# start` … `# end` fences a **block** of movable lines and everything
+    outside every block is fixed. There can be **any number of blocks**, and a
+    line moves only within its own: fixed lines are walls. A `# start` with no
+    `# end` runs to the end of the file, and a file with no markers is one block.
+    Markers match `^\s*#\s*(start|end)\b`, so `# starting values` is code, not a
+    marker (Sponge's prefix match took it);
+  - a two-character backslash-n inside a line makes one multi-line fragment;
+  - blank lines inside a block are dropped.
+- **Indentation is the teacher's choice**: `"parsons": { "indent": "given" | "student" }`.
+  When it is absent it is `"student"`, as in Sponge, so old puzzles are not made
+  easier; a new puzzle starts as `"given"`. An answer with nothing indented
+  within its blocks is always given (`canIndent`). Tutorial 4's proofs indent
+  with U+2800, which is not `\s`, so they land here.
+- **One view, no bank** (`components/ParsonsView.tsx`). The puzzle shows as the
+  program it is: fixed lines in place, movable lines with a `⠿` handle on a
+  tinted band per block, and every fragment — distractors included — in its
+  block from the start. A line the student thinks does not belong is **struck
+  out in place** (✕, Delete) and left out of the program; ↺ puts it back. The
+  line numbers are the assembled program's, so a traceback's line 7 is row 7.
+  The row the debugger is on is highlighted (`activeLine` through `rowAt`),
+  which is what lets Debug and Trace step through a puzzle. Drag works only
+  within a row's block; Alt+↑/↓ move a line, ↑/↓ move focus, ←/→ and ‹ ›
+  indent under student indentation (at most one level deeper than the kept
+  line above, `maxIndentAt`). Focus follows a moved line through a layout
+  effect, not `requestAnimationFrame`, which a hidden tab never runs.
+- **Highlighting is Monaco's tokenizer with our colours** (`.parsons-tok-*`,
+  copied from `MONACO_*_THEME`), not `colorize()`. colorize's `mtk` classes are
+  styled by whichever Monaco theme stylesheet loaded last. In the dev server a
+  second Monaco instance appears (App.tsx's `loader.config` switches to the
+  local package after start-up, so a later `loader.init` returns another
+  instance), and its default light theme turned a puzzle black — and, through
+  `useMonaco()`, the real editor white. So the view is handed the editor's own
+  instance (`monaco={monacoRef.current}`) and never makes one.
+- `utils/parsons.ts` is the pure half, tested in `parsons.test.ts`:
+  `parseParsonsSource` → segments of fixed lines and blocks. A block's levels
+  count from its **base indent**, so a block inside a `def` assembles inside the
+  `def` (the old port wrote it at column 0), and in the answer's own indent
+  unit (`detectIndentUnit`, not a hard-coded two spaces). `parsonsRows` /
+  `assembleCode` give the rows and the program; `gradeParsons` runs the
+  js-parsons LIS grader per block (messages say "Block 2:" when there are
+  several). In given mode a line's identity is indent + code, so identical
+  lines at different depths are graded by order, never by an indentation
+  message the student could not act on.
+- **The arrangement** (`{ v: 2, blocks: { b0: { order, removed, indents } } }`)
+  persists in `pythoncoder-parsons-state` under `${rootUrl}::${challengeId}`,
+  like completions. `migrateArrangement` keeps a saved one only while its ids
+  still fit the parsed problem; the old two-panel shape becomes "what was left
+  in the bank is struck out". A fresh shuffle is never already solved.
+  **Reset challenge** and **Reset book** clear it, and opening a different book
+  clears the active challenge, so its puzzle does not linger.
 - **`codeText` stays the source of truth.** Every arrangement change reassembles
   the program and pushes it through `replaceProgrammaticEditorCode`, so Run,
-  Debug, Trace and the runtime switches all work on a Parsons puzzle without a
-  single branch of their own.
+  Debug, Trace and the runtime switches work on a puzzle without a branch of
+  their own.
 - **`openFilePath` deliberately stays null.** `handleEnterChallenge` skips
-  `loadCodeText` for a Parsons activity, which makes `saveCurrentToVFS` a no-op
-  (`App.tsx`), so a shuffled arrangement can never overwrite the pristine model
-  solution — every re-entry re-parses the puzzle from it. The `py` file is also
-  added to the challenge filesystem's `hiddenPaths` (`parsonsHiddenPaths` in
-  `utils/bookLoader.ts`); it must stay *in* the filesystem, just out of the
-  file browser, or the student is looking at the answer in order.
-- **Indentation is auto-disabled** when no model line is indented (`canIndent`).
-  Tutorial 4's proofs indent with U+2800 BRAILLE PATTERN BLANK, which is not
-  `\s`, so every line normalises to level 0; offering indentation there would
-  let the student only lose. Student indents are re-normalised before grading,
-  so an over-indented but structurally correct answer still passes.
-- Submit has no tester worker: `submitParsons` grades in-process and writes a
-  single synthetic `TestCaseResult` with `reveal: false`, so `TestResultsBar`
-  shows only pass/fail and hides its Input/Expected table — the real feedback
-  (message list plus per-fragment highlighting) lives in the pane. Completion
-  ticks go through the same `persistCompletion` path as tested challenges, which
-  is why `isTaskChallenge` has to accept a challenge with no `tests`.
-- The student's arrangement persists (`pythoncoder-parsons-state` in
-  `utils/storage.ts`, keyed `${rootUrl}::${challengeId}` exactly like
-  completions). A saved arrangement is discarded unless its fragment ids still
-  match the freshly parsed pool, so editing the source file cannot strand a
-  student. **Reset challenge** and **Reset book** clear it; opening a different
-  book clears the active challenge so its puzzle does not linger.
-- `isParsonsChallenge` is gated on the *parsed problem*, not just on
-  `activeBookChallenge.typ` — `activeBookChallenge` outlives a walk back to the
-  book contents, and the panel header must not keep claiming a Parsons problem
-  once the pane has gone.
-- In **book edit mode** a Parsons node falls back to the plain Monaco editor so
-  the teacher can author the source.
+  `loadCodeText` for a Parsons activity, which makes `saveCurrentToVFS` a no-op,
+  so an arrangement can never overwrite the answer. The `py` file is also in the
+  challenge filesystem's `hiddenPaths` (`parsonsHiddenPaths` in
+  `utils/bookLoader.ts`): it stays *in* the filesystem, just out of the file
+  browser, or the student would be looking at the answer in order.
+- Submit has no tester worker: `submitParsons` grades in-process and writes one
+  synthetic `TestCaseResult` with `reveal: false`, so `TestResultsBar` shows only
+  pass/fail. The real feedback (messages and per-line tints) is in the view.
+  Ticks go through `persistCompletion`, which is why `isTaskChallenge` accepts a
+  challenge with no `tests`.
+- `isParsonsChallenge` is gated on the *parsed problem*, not just
+  `activeBookChallenge.typ`: `activeBookChallenge` outlives a walk back to the
+  contents.
+
+#### Authoring a puzzle in the book editor
+
+- An exercise has three kinds (`ExerciseKind` in `utils/bookEditStore.ts`):
+  **Example · Task · Parsons puzzle**, chosen from the icon on its row (a puzzle
+  piece for Parsons, in the student's contents too) and from **Add exercise**.
+  `withExerciseKind` does the manifest side; `handleSetExerciseType` (App.tsx)
+  confirms before tests are dropped, and offers a task's solution file as the
+  new puzzle's answer.
+- A Parsons activity in edit mode shows the answer in Monaco with a bar above it
+  in place of Starter/Solution:
+  - **Answer | Preview as student**;
+  - **Fixed / Movable / Distractor** for the selected lines, also on the
+    right-click menu (`editor.addAction`, shown only under the
+    `coderParsonsAuthoring` context key). They call `setParsonsRole`, which
+    rewrites the markers as one undoable edit and keeps the selection on the
+    same lines;
+  - **Indentation: given / student sets it**, saved to the manifest;
+  - the counts and warnings from `parsonsSummary` (no lines to place, a block
+    with one line or only distractors, a distractor identical to an answer line,
+    a block whose first line is deeper than its others).
+- Each line is marked by role (`parsonsLineRoles`): a lock, a handle with a
+  blue tint, or a red ✗ in `linesDecorationsClassName` (the glyph margin is
+  breakpoints'), with the marker comments faded. So the file stays the marker
+  format, round-trips, and can still be typed by hand.
+- **Preview as student** saves the answer, empties the editor
+  (`clearEditorForSwitch`, so `openFilePath` is null exactly as for a student)
+  and shows the puzzle shuffled, unpersisted. Submit grades it with edit mode's
+  transient tick. **Answer** reloads the file. Nothing in a preview can be saved
+  over the answer.
+- The Tests tab of a Parsons activity explains that it needs no tests.
 
 ### Turning the page stops the run
 

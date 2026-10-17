@@ -219,7 +219,9 @@ export const clearCompletionsForBook = (bookRootUrl: string): void => {
  */
 const PARSONS_STATE_KEY = 'pythoncoder-parsons-state'
 
-const readParsonsStore = (): Record<string, ParsonsArrangement> => {
+// Values are whatever shape was saved — Coder's first two-panel arrangement
+// included; migrateArrangement (utils/parsons.ts) decides what still fits.
+const readParsonsStore = (): Record<string, unknown> => {
   try {
     const raw = localStorage.getItem(PARSONS_STATE_KEY)
     const parsed = raw ? JSON.parse(raw) : {}
@@ -227,11 +229,11 @@ const readParsonsStore = (): Record<string, ParsonsArrangement> => {
   } catch { return {} }
 }
 
-const writeParsonsStore = (store: Record<string, ParsonsArrangement>): void => {
+const writeParsonsStore = (store: Record<string, unknown>): void => {
   try { localStorage.setItem(PARSONS_STATE_KEY, JSON.stringify(store)) } catch { /* ignore */ }
 }
 
-export const getStoredParsonsState = (bookRootUrl: string, challengeId: string): ParsonsArrangement | null =>
+export const getStoredParsonsState = (bookRootUrl: string, challengeId: string): unknown =>
   readParsonsStore()[`${bookRootUrl}::${challengeId}`] ?? null
 
 export const persistParsonsState = (bookRootUrl: string, challengeId: string, arrangement: ParsonsArrangement): void => {

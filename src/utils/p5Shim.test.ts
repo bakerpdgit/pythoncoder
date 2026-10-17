@@ -46,10 +46,14 @@ function py(body: string, options: RunOptions = {}) {
     '    print(json.dumps(values if len(values) != 1 else values[0], default=str))',
   ].join('\n')
   const result = spawnSync('python', ['-c', `${preamble}\n${body}`], { encoding: 'utf8', timeout: 20_000 })
-  const lines = result.stdout.split('\n').filter(Boolean).map(line => {
+  // Python on Windows ends every printed line with "\r\n"; what is checked
+  // here is what the sketch printed, not how that platform spells a newline.
+  const stdout = result.stdout.replace(/\r\n/g, '\n')
+  const stderr = result.stderr.replace(/\r\n/g, '\n')
+  const lines = stdout.split('\n').filter(Boolean).map(line => {
     try { return JSON.parse(line) } catch { return line }
   })
-  return { status: result.status, lines, stdout: result.stdout, stderr: result.stderr }
+  return { status: result.status, lines, stdout, stderr }
 }
 
 const src = (...lines: string[]) => JSON.stringify(lines.join('\n'))

@@ -34,11 +34,11 @@ import {
 } from './utils/virtualFS'
 import { buildVfsPreviewUrl, ensureVfsPreviewServiceWorker, isHtmlFile } from './utils/htmlPreview'
 import {
-  parseParsonsSource, shuffledArrangement, arrangementMatchesProblem,
-  solutionLines, assembleCode, gradeParsons,
+  parseParsonsSource, shuffledArrangement, migrateArrangement, assembleCode, gradeParsons,
+  parsonsLineRoles, setParsonsRole, parsonsSummary, isParsonsMarker,
 } from './utils/parsons'
-import type { ParsonsArrangement, ParsonsFeedback, ParsonsProblem } from './utils/parsons'
-import { ParsonsPane } from './components/ParsonsPane'
+import type { ParsonsArrangement, ParsonsFeedback, ParsonsProblem, ParsonsSettableRole } from './utils/parsons'
+import { ParsonsView } from './components/ParsonsView'
 import { FileSystemPanel } from './components/FileSystemPanel'
 import { BookPanel } from './components/BookPanel'
 import { TeacherToolsPanel } from './components/TeacherToolsPanel'
@@ -358,11 +358,13 @@ export default function App() {
   const captureRunRef = useRef(false)                          // a "capture test case" run is in progress
   const captureInputsRef = useRef<string[]>([])                // inputs consumed during a capture run
   const [testResult, setTestResult] = useState<OverallTestResult | null>(null)
-  // Parsons (drag-and-drop) activities: the parsed puzzle, where the student
-  // has put the fragments, and the last grading result.
+  // Parsons activities: the parsed puzzle, where the student has put the
+  // lines, and the last grading result.
   const [parsonsProblem, setParsonsProblem] = useState<ParsonsProblem | null>(null)
   const [parsonsArrangement, setParsonsArrangement] = useState<ParsonsArrangement | null>(null)
   const [parsonsFeedback, setParsonsFeedback] = useState<ParsonsFeedback | null>(null)
+  // Book edit mode: the teacher is trying a Parsons activity as a student would.
+  const [parsonsPreview, setParsonsPreview] = useState(false)
   const [isTestRunning, setIsTestRunning] = useState(false)
   const [testRunnerStatus, setTestRunnerStatus] = useState('')
   const [challengeHiddenPaths, setChallengeHiddenPaths] = useState<string[]>([])
@@ -542,6 +544,11 @@ export default function App() {
   const editorDecorationsRef = useRef<MonacoEditor.IEditorDecorationsCollection | null>(null)
   const breakpointDecorationsRef = useRef<MonacoEditor.IEditorDecorationsCollection | null>(null)
   const traceValueDecorationsRef = useRef<MonacoEditor.IEditorDecorationsCollection | null>(null)
+  // Authoring a Parsons answer: each line's role, marked in the editor.
+  const parsonsDecorationsRef = useRef<MonacoEditor.IEditorDecorationsCollection | null>(null)
+  const parsonsAuthoringKeyRef = useRef<MonacoEditor.IContextKey<boolean> | null>(null)
+  // The editor's right-click role actions call the latest handler, like saveCodeRef.
+  const parsonsRoleRef = useRef<(role: ParsonsSettableRole) => void>(() => {})
   const prevTraceLineRef = useRef<number>(-1)
   const applyingEditorValueRef = useRef(false)
   const outputRef = useRef<HTMLDivElement | null>(null)
@@ -863,12 +870,14 @@ export default function App() {
 
   // In edit mode the teacher can run tests against any challenge that has tests
   // (including examples); normally only non-example task challenges show Submit.
-  // A Parsons activity replaces the editor with the drag-and-drop pane. In book
-  // edit mode it falls back to plain Monaco so the teacher can author the source.
+  // A Parsons activity replaces the editor with the puzzle. In book edit mode
+  // the teacher authors the answer in Monaco, its lines marked by role, and
+  // sees the puzzle only in Preview.
   // Gated on the parsed puzzle, not just the challenge: activeBookChallenge
   // outlives a walk back to the book contents, and the header must not keep
-  // calling itself a Parsons problem once the pane has gone.
-  const isParsonsChallenge = activeBookChallenge?.typ === 'parsons' && !isBookEditMode && parsonsProblem !== null
+  // calling itself a Parsons problem once the puzzle has gone.
+  const isParsonsChallenge = activeBookChallenge?.typ === 'parsons' && (!isBookEditMode || parsonsPreview) && parsonsProblem !== null
+  const isParsonsAuthoring = isBookEditMode && activeBookChallenge?.typ === 'parsons' && !parsonsPreview
 
   // A Parsons activity carries no `tests` — its grading is the widget itself —
   // so it must still count as a task, or it could never be submitted or ticked.
@@ -876,7 +885,44 @@ export default function App() {
     (isBookEditMode || !(activeBookChallenge.isExample === 'True' || activeBookChallenge.isExample === true)) &&
     ((activeBookChallenge.tests?.length ?? 0) > 0 || isParsonsChallenge)
 
+  // The authoring bar's counts and warnings: the answer on screen, or the puzzle being previewed.
+  const parsonsIndentSetting = activeBookChallenge?.parsons?.indent
+  const parsonsAuthoringSummary = useMemo(() => {
+    if (isParsonsAuthoring) return parsonsSummary(parseParsonsSource(codeText, { indent: parsonsIndentSetting }))
+    if (isBookEditMode && parsonsPreview && parsonsProblem) return parsonsSummary(parsonsProblem)
+    return null
+  }, [isParsonsAuthoring, isBookEditMode, parsonsPreview, parsonsProblem, codeText, parsonsIndentSetting])
+
   // ── Effects ──────────────────────────────────────────────────────────────
+
+  // A Parsons answer being authored shows each line's role in the editor: a
+  // mark beside the line number (not the glyph margin, which is breakpoints'),
+  // a tint for the lines the student arranges, and the marker comments faded.
+  useEffect(() => {
+    parsonsAuthoringKeyRef.current?.set(isParsonsAuthoring)
+    const decorations = parsonsDecorationsRef.current
+    const model = editorRef.current?.getModel()
+    if (!decorations) return
+    if (!isParsonsAuthoring || !model) { decorations.clear(); return }
+    const roles = parsonsLineRoles(model.getValue())
+    decorations.set(roles.flatMap((role, i): MonacoEditor.IModelDeltaDecoration[] => {
+      const line = i + 1
+      if (line > model.getLineCount()) return []
+      const range = { startLineNumber: line, startColumn: 1, endLineNumber: line, endColumn: model.getLineMaxColumn(line) }
+      switch (role) {
+        case 'fixed':
+          return [{ range, options: { isWholeLine: true, linesDecorationsClassName: 'parsons-mark parsons-mark-fixed', hoverMessage: { value: 'Fixed: stays where it is' } } }]
+        case 'movable':
+          return [{ range, options: { isWholeLine: true, className: 'parsons-line-movable', linesDecorationsClassName: 'parsons-mark parsons-mark-movable', hoverMessage: { value: 'Movable: the student puts it in order' } } }]
+        case 'distractor':
+          return [{ range, options: { isWholeLine: true, className: 'parsons-line-distractor', linesDecorationsClassName: 'parsons-mark parsons-mark-distractor', hoverMessage: { value: 'Distractor: the student should strike it out' } } }]
+        case 'marker':
+          return [{ range, options: { isWholeLine: true, inlineClassName: 'parsons-marker-text' } }]
+        default:
+          return []
+      }
+    }))
+  }, [codeText, isParsonsAuthoring])
 
   // Clear test results whenever the user navigates to a different challenge
   useEffect(() => {
@@ -1477,6 +1523,20 @@ export default function App() {
     editorDecorationsRef.current = editor.createDecorationsCollection()
     breakpointDecorationsRef.current = editor.createDecorationsCollection()
     traceValueDecorationsRef.current = editor.createDecorationsCollection()
+    parsonsDecorationsRef.current = editor.createDecorationsCollection()
+    parsonsAuthoringKeyRef.current = editor.createContextKey('coderParsonsAuthoring', false)
+    // Shown on the right-click menu only while a Parsons answer is being authored.
+    ;([['fixed', 'Fixed (stays in place)'], ['movable', 'Movable (the student arranges it)'], ['distractor', 'Distractor (does not belong)']] as const)
+      .forEach(([role, label], i) => {
+        editor.addAction({
+          id: `parsons-role-${role}`,
+          label: `Parsons: mark as ${label}`,
+          precondition: 'coderParsonsAuthoring',
+          contextMenuGroupId: '0_parsons',
+          contextMenuOrder: i + 1,
+          run: () => parsonsRoleRef.current(role),
+        })
+      })
     // Restore breakpoint glyphs: the editor may be remounting after a run that
     // hid the code panel, and the [breakpoints] effect won't re-fire on remount.
     breakpointDecorationsRef.current.set(buildBreakpointDecorations(breakpointsRef.current))
@@ -3133,7 +3193,7 @@ export default function App() {
   ) => {
     setParsonsArrangement(arrangement)
     setParsonsFeedback(null)
-    replaceProgrammaticEditorCode(assembleCode(problem, solutionLines(problem, arrangement)), false)
+    replaceProgrammaticEditorCode(assembleCode(problem, arrangement).code, false)
     const key = parsonsKeyRef.current
     if (persist && key) persistParsonsState(key.rootUrl, key.id, arrangement)
   }
@@ -3148,6 +3208,90 @@ export default function App() {
     setParsonsProblem(null)
     setParsonsArrangement(null)
     setParsonsFeedback(null)
+    setParsonsPreview(false)
+  }
+
+  // Book edit mode: try the puzzle as a student would. The answer is saved
+  // first, and the editor then holds no file (openFilePath null), exactly as a
+  // student's does, so the assembled arrangement can never be saved over the
+  // answer. Nothing is persisted; Submit gives the transient tick edit mode uses.
+  const showParsonsPreview = async (challenge: BookChallenge) => {
+    if (!challenge.py) return
+    const entry = await getEntryByPath(activeFilesystemId, '/' + flatName(challenge.py))
+    const text = entry?.content ? new TextDecoder().decode(entry.content) : ''
+    const problem = parseParsonsSource(text, { indent: challenge.parsons?.indent })
+    parsonsKeyRef.current = null
+    setParsonsProblem(problem)
+    setParsonsPreview(true)
+    setTestResult(null)
+    applyParsonsArrangement(problem, shuffledArrangement(problem), false)
+  }
+
+  const enterParsonsPreview = async () => {
+    const challenge = activeBookChallengeRef.current
+    if (!challenge?.py || parsonsPreview || !canSwitchCodeSource()) return
+    if (!(await saveCurrentToVFS())) return
+    if (!clearEditorForSwitch()) return
+    await showParsonsPreview(challenge)
+  }
+
+  const leaveParsonsPreview = async () => {
+    if (!parsonsPreview || !canSwitchCodeSource()) return false
+    clearParsonsChallenge()
+    setTestResult(null)
+    return loadStarterBuffer()
+  }
+
+  // Mark the selected lines Fixed / Movable / Distractor: the markers are
+  // rewritten as one undoable edit, and the selection kept on the same lines.
+  const applyParsonsRole = (role: ParsonsSettableRole) => {
+    const editor = editorRef.current
+    const model = editor?.getModel()
+    const selection = editor?.getSelection()
+    if (!editor || !model || !selection || isRunning || !isParsonsAuthoring) return
+    let last = selection.endLineNumber
+    // A selection ending at the start of a line does not take that line.
+    if (last > selection.startLineNumber && selection.endColumn === 1) last -= 1
+    const before = model.getValue()
+    const after = setParsonsRole(before, selection.startLineNumber, last, role)
+    if (after === before) return
+    // Where a line went: markers above it may have come or gone, but the
+    // lines that are not markers keep their order.
+    const beforeLines = before.split(/\r?\n/)
+    const afterLines = after.split(/\r?\n/)
+    const relocate = (line: number) => {
+      if (isParsonsMarker(beforeLines[line - 1] ?? '')) return Math.min(line, afterLines.length)
+      const k = beforeLines.slice(0, line).filter(l => !isParsonsMarker(l)).length
+      let seen = 0
+      for (let i = 0; i < afterLines.length; i++) {
+        if (!isParsonsMarker(afterLines[i])) seen++
+        if (seen === k) return i + 1
+      }
+      return afterLines.length
+    }
+    const start = relocate(selection.startLineNumber)
+    const end = relocate(last)
+    editor.pushUndoStop()
+    editor.executeEdits('parsons-role', [{ range: model.getFullModelRange(), text: after }])
+    editor.pushUndoStop()
+    editor.setSelection({ startLineNumber: start, startColumn: 1, endLineNumber: end, endColumn: model.getLineMaxColumn(end) })
+    editor.focus()
+  }
+  parsonsRoleRef.current = applyParsonsRole
+
+  const handleParsonsIndentChange = async (indent: 'given' | 'student') => {
+    const challenge = activeBookChallengeRef.current
+    if (!challenge || !editManifest) return
+    const parsons = { ...challenge.parsons, indent }
+    const manifest: BookManifest = {
+      ...editManifest,
+      children: editManifest.children.map(c => (!isBookRef(c) && c.id === challenge.id) ? { ...c, parsons } : c),
+    }
+    await commitManifest(manifest)
+    const updated = { ...challenge, parsons }
+    setActiveBookChallenge(updated); activeBookChallengeRef.current = updated
+    // A preview starts again under the new rule.
+    if (parsonsPreview && canSwitchCodeSource()) await showParsonsPreview(updated)
   }
 
   const handleEnterChallenge = async (bookUrl: string, rootBookUrl: string, challenge: BookChallenge, forceReset = false) => {
@@ -3192,11 +3336,9 @@ export default function App() {
             // saveCurrentToVFS can never write the student's shuffled
             // arrangement over the pristine model solution, which every
             // re-entry re-parses the puzzle from.
-            const problem = parseParsonsSource(text)
-            const saved = getStoredParsonsState(rootBookUrl, challenge.id)
-            const arrangement = arrangementMatchesProblem(problem, saved)
-              ? saved
-              : shuffledArrangement(problem)
+            const problem = parseParsonsSource(text, { indent: challenge.parsons?.indent })
+            const arrangement = migrateArrangement(problem, getStoredParsonsState(rootBookUrl, challenge.id))
+              ?? shuffledArrangement(problem)
             parsonsKeyRef.current = { rootUrl: rootBookUrl, id: challenge.id }
             setParsonsProblem(problem)
             applyParsonsArrangement(problem, arrangement, false)
@@ -3504,10 +3646,10 @@ export default function App() {
 
   // ── Teacher Tools: exercise-list editing ──────────────────────────────────
 
-  const handleAddExercise = async (afterId?: string) => {
+  const handleAddExercise = async (afterId?: string, kind: bookEdit.ExerciseKind = 'task') => {
     if (!bookEditSession || !editManifest) return
     try {
-      const { manifest } = await bookEdit.addExercise(bookEditSession.srcFsId, editManifest, afterId)
+      const { manifest } = await bookEdit.addExercise(bookEditSession.srcFsId, editManifest, afterId, kind)
       setEditManifest(manifest)
     } catch (e) { setCodeStatus(`Could not add exercise: ${e instanceof Error ? e.message : String(e)}`) }
   }
@@ -3537,34 +3679,69 @@ export default function App() {
     void commitManifest(manifest)
   }
 
-  const handleToggleExample = async (id: string) => {
-    if (!editManifest) return
+  // Example / task / Parsons puzzle. Only a task has tests, so leaving one
+  // discards them; a task becoming a puzzle may take its solution as the answer.
+  const handleSetExerciseType = async (id: string, kind: bookEdit.ExerciseKind) => {
+    if (!editManifest || !bookEditSession) return
     const target = bookEdit.getChallenges(editManifest).find(c => c.id === id)
     if (!target) return
-    const wasExample = target.isExample === true || target.isExample === 'True'
-    // Converting a task → example discards its test cases (which examples ignore).
-    if (!wasExample && (target.tests?.length ?? 0) > 0) {
+    const from = bookEdit.exerciseKind(target)
+    if (from === kind) return
+    const testCount = target.tests?.length ?? 0
+    if (kind !== 'task' && testCount > 0) {
       const ok = await dialogs.confirm({
-        title: 'Convert to example',
-        message: `"${target.name}" has ${target.tests!.length} test case${target.tests!.length === 1 ? '' : 's'}. Examples don't use tests, so they will be deleted. Continue?`,
+        title: kind === 'parsons' ? 'Make a Parsons puzzle' : 'Convert to example',
+        message: `"${target.name}" has ${testCount} test case${testCount === 1 ? '' : 's'}. ${
+          kind === 'parsons' ? 'A Parsons puzzle is marked by the order of its lines' : "Examples don't use tests"
+        }, so they will be deleted. Continue?`,
         confirmLabel: 'Delete tests & convert', danger: true,
       })
       if (!ok) return
     }
+    let answer: string | null = null
+    if (kind === 'parsons' && target.sol?.file && target.py) {
+      const sol = await bookEdit.readBookFile(bookEditSession.srcFsId, target.sol.file)
+      // The placeholder a Solution tab writes when first opened is no answer.
+      if (sol.trim() && !/^# Solution to ".*"$/.test(sol.trim())) {
+        const choice = await dialogs.choose({
+          title: 'Make a Parsons puzzle',
+          message: "A Parsons puzzle's code is its answer, in order. Start from this exercise's solution, or from its starter code?",
+          buttons: [
+            { label: 'Use the solution', value: 'solution', tone: 'primary' },
+            { label: 'Keep the starter code', value: 'starter', tone: 'neutral' },
+          ],
+        })
+        if (choice === null) return
+        if (choice === 'solution') answer = sol
+      }
+    }
+    const isActive = activeBookChallengeRef.current?.id === id
+    if (isActive) {
+      if (!canSwitchCodeSource()) return
+      // The file on screen is the one converted: leave a preview or the
+      // Solution tab, and save, first.
+      if (parsonsPreview) await leaveParsonsPreview()
+      else if (editorTab === 'solution') await switchEditorTab('starter')
+      await saveCurrentToVFS()
+    }
+    if (answer !== null && target.py) {
+      await bookEdit.writeBookFile(bookEditSession.srcFsId, target.py, answer)
+      if (isActive) {
+        const name = flatName(target.py)
+        await writeFile(activeFilesystemId, '/' + name, new TextEncoder().encode(answer).buffer as ArrayBuffer, guessMimeType(name))
+      } else {
+        await bookEdit.deleteChallengeWorkingFs(id)
+      }
+    }
     const manifest: BookManifest = {
       ...editManifest,
-      children: editManifest.children.map(c => {
-        if (isBookRef(c) || c.id !== id) return c
-        const next = { ...c }
-        if (wasExample) { delete next.isExample }         // example → task
-        else { next.isExample = true; next.tests = [] }   // task → example (drop tests)
-        return next
-      }),
+      children: editManifest.children.map(c => (isBookRef(c) || c.id !== id) ? c : bookEdit.withExerciseKind(c, kind)),
     }
     await commitManifest(manifest)
-    if (activeBookChallengeRef.current?.id === id) {
+    if (isActive) {
       const updated = bookEdit.getChallenges(manifest).find(c => c.id === id) ?? null
       setActiveBookChallenge(updated); activeBookChallengeRef.current = updated
+      if (answer !== null) await loadStarterBuffer()
     }
   }
 
@@ -3762,7 +3939,7 @@ export default function App() {
   // just reports pass/fail, so its Input/Expected table stays hidden.
   const submitParsons = () => {
     if (!parsonsProblem || !parsonsArrangement) return
-    const feedback = gradeParsons(parsonsProblem.solution, solutionLines(parsonsProblem, parsonsArrangement))
+    const feedback = gradeParsons(parsonsProblem, parsonsArrangement)
     setParsonsFeedback(feedback)
     setTestResult({
       allPassed: feedback.success,
@@ -6444,7 +6621,7 @@ ${runProgramPython('exec(code_obj, globals())')}
                     </div>
                     <div className="normal-case tracking-normal text-[11px] text-slate-500 truncate">
                       {isParsonsChallenge
-                        ? 'Drag the fragments into order, then Submit'
+                        ? 'Put the lines in order, strike out any that do not belong, then Submit'
                         : codeStatus}
                     </div>
                   </div>
@@ -6537,8 +6714,65 @@ ${runProgramPython('exec(code_obj, globals())')}
                     )}
                   </div>
                 </div>
+                {/* Parsons authoring (book edit mode): the answer, its lines' roles, a preview */}
+                {isBookEditMode && activeBookChallenge?.typ === 'parsons' && (
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 mt-1.5 pt-1.5 border-t border-slate-700/60 normal-case tracking-normal">
+                    <div className="flex items-center rounded overflow-hidden border border-slate-700" role="group" aria-label="Parsons view">
+                      <button type="button" onClick={() => void leaveParsonsPreview()} disabled={isCodeSourceLocked} aria-pressed={!parsonsPreview}
+                        title="The answer: the program in order, its lines marked by role"
+                        className={`px-2.5 py-0.5 text-[11px] font-semibold transition-colors ${!parsonsPreview ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
+                        Answer
+                      </button>
+                      <button type="button" onClick={() => void enterParsonsPreview()} disabled={isCodeSourceLocked} aria-pressed={parsonsPreview}
+                        title="Try the puzzle as a student sees it (saves the answer first)"
+                        className={`px-2.5 py-0.5 text-[11px] font-semibold transition-colors ${parsonsPreview ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
+                        Preview as student
+                      </button>
+                    </div>
+                    {!parsonsPreview && (
+                      <div className="flex items-center gap-1" role="group" aria-label="Mark the selected lines">
+                        <span className="text-[10px] text-slate-500">Selected lines:</span>
+                        {([
+                          { role: 'fixed' as const, label: 'Fixed', title: 'Fixed — the line stays where it is', cls: 'parsons-role-btn-fixed' },
+                          { role: 'movable' as const, label: 'Movable', title: 'Movable — the student puts it in order', cls: 'parsons-role-btn-movable' },
+                          { role: 'distractor' as const, label: 'Distractor', title: 'Distractor — a wrong line the student should strike out', cls: 'parsons-role-btn-distractor' },
+                        ]).map(b => (
+                          <button key={b.role} type="button" title={`${b.title} (also on the right-click menu)`}
+                            onMouseDown={e => e.preventDefault()}
+                            onClick={() => applyParsonsRole(b.role)} disabled={isRunning}
+                            className={`parsons-role-btn ${b.cls} px-2 py-0.5 rounded border text-[11px] font-semibold transition-colors disabled:opacity-40`}>
+                            {b.label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    <label className="flex items-center gap-1 text-[11px] text-slate-400"
+                      title="Given: lines appear at their indentation and the student only orders them. Student sets it: lines start unindented and the student indents them too.">
+                      Indentation
+                      <select value={activeBookChallenge.parsons?.indent ?? 'student'} disabled={isRunning}
+                        onChange={e => void handleParsonsIndentChange(e.target.value as 'given' | 'student')}
+                        className="bg-slate-800 border border-slate-600 rounded text-[11px] text-slate-300 px-1 py-0.5 focus:outline-none">
+                        <option value="given">given</option>
+                        <option value="student">student sets it</option>
+                      </select>
+                    </label>
+                    {parsonsAuthoringSummary && (
+                      <span className="text-[10px] text-slate-500">
+                        {parsonsAuthoringSummary.blocks > 1 ? `${parsonsAuthoringSummary.blocks} blocks · ` : ''}
+                        {parsonsAuthoringSummary.toPlace} line{parsonsAuthoringSummary.toPlace === 1 ? '' : 's'} to place
+                        {' · '}{parsonsAuthoringSummary.distractors} distractor{parsonsAuthoringSummary.distractors === 1 ? '' : 's'}
+                      </span>
+                    )}
+                    {parsonsAuthoringSummary && parsonsAuthoringSummary.warnings.length > 0 && (
+                      <span className="text-[10px] text-amber-400" title={parsonsAuthoringSummary.warnings.join('\n')}>
+                        ⚠ {parsonsAuthoringSummary.warnings[0]}
+                        {parsonsAuthoringSummary.warnings.length > 1 ? ` (+${parsonsAuthoringSummary.warnings.length - 1} more)` : ''}
+                      </span>
+                    )}
+                  </div>
+                )}
                 {/* Starter / Solution tabs (book edit mode) */}
-                {isBookEditMode && activeBookChallenge && (
+                {isBookEditMode && activeBookChallenge && activeBookChallenge.typ !== 'parsons' && (
                   <div className="flex items-center gap-2 mt-1.5 pt-1.5 border-t border-slate-700/60">
                     <div className="flex items-center rounded overflow-hidden border border-slate-700">
                       <button type="button" onClick={() => void switchEditorTab('starter')} disabled={isCodeSourceLocked}
@@ -6580,6 +6814,8 @@ ${runProgramPython('exec(code_obj, globals())')}
                     glyphMargin: true,
                     minimap: { enabled: false },
                     lineNumbersMinChars: 4,
+                    // Room for a Parsons answer's role marks beside the line numbers.
+                    lineDecorationsWidth: isParsonsAuthoring ? 18 : 10,
                     scrollBeyondLastLine: false,
                     smoothScrolling: true,
                     // Indentation is the model's, set per file by applyEditorIndent.
@@ -6595,16 +6831,17 @@ ${runProgramPython('exec(code_obj, globals())')}
                     underneath for the same dispose-churn reason as above. */}
                 {isParsonsChallenge && parsonsProblem && parsonsArrangement && (
                   <div className="absolute inset-0 z-20">
-                    <ParsonsPane
+                    <ParsonsView
                       problem={parsonsProblem}
                       arrangement={parsonsArrangement}
                       onChange={next => applyParsonsArrangement(parsonsProblem, next)}
                       feedback={parsonsFeedback}
                       onShuffle={handleParsonsShuffle}
+                      monaco={monacoRef.current}
                       highlightPython={(activeBookChallenge?.py ?? '').toLowerCase().endsWith('.py')}
                       fontSize={editorFontSize}
-                      theme={theme === 'light' ? 'light' : 'dark'}
                       disabled={isRunning}
+                      activeLine={isRunning ? currentLine : -1}
                     />
                   </div>
                 )}
@@ -6764,13 +7001,21 @@ ${runProgramPython('exec(code_obj, globals())')}
                 {/* Tests tab (book edit mode) */}
                 {isBookEditMode && activeBookChallenge && consoleTab === 'tests' && !isConsoleCollapsed && (
                   <div id="console-panel-tests" role="tabpanel" aria-labelledby="console-tab-tests" className="flex flex-col flex-1 min-h-0 overflow-hidden bg-slate-900/30">
-                    {(activeBookChallenge.isExample === true || activeBookChallenge.isExample === 'True') ? (
+                    {activeBookChallenge.typ === 'parsons' ? (
+                      <div className="flex-1 flex flex-col items-center justify-center gap-2 p-6 text-center">
+                        <p className="text-slate-400 text-xs leading-relaxed max-w-sm">
+                          A <span className="text-slate-200 font-semibold">Parsons puzzle</span> needs no tests: Submit checks the order
+                          of the student's lines against the answer in the editor. Mark lines Fixed, Movable or Distractor above the
+                          code, then try it with <span className="text-slate-200 font-semibold">Preview as student</span>.
+                        </p>
+                      </div>
+                    ) : (activeBookChallenge.isExample === true || activeBookChallenge.isExample === 'True') ? (
                       <div className="flex-1 flex flex-col items-center justify-center gap-3 p-6 text-center">
                         <p className="text-slate-400 text-xs leading-relaxed max-w-xs">
                           Tests are disabled because this exercise is marked as an <span className="text-slate-200 font-semibold">example</span>.
                           Examples are just demonstrated, not tested.
                         </p>
-                        <button type="button" onClick={() => void handleToggleExample(activeBookChallenge!.id)}
+                        <button type="button" onClick={() => void handleSetExerciseType(activeBookChallenge!.id, 'task')}
                           className="px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition-colors">
                           Convert to task
                         </button>
@@ -6965,11 +7210,11 @@ ${runProgramPython('exec(code_obj, globals())')}
                     editMode={isBookEditMode}
                     editManifest={editManifest}
                     transientTicks={transientTicks}
-                    onAddExercise={(afterId) => void handleAddExercise(afterId)}
+                    onAddExercise={(afterId, kind) => void handleAddExercise(afterId, kind)}
                     onDeleteExercise={(id) => void handleDeleteExercise(id)}
                     onMoveExercise={(id, dir) => void handleMoveExercise(id, dir)}
                     onRenameExercise={handleRenameExercise}
-                    onToggleExample={(id) => void handleToggleExample(id)}
+                    onSetExerciseType={(id, kind) => void handleSetExerciseType(id, kind)}
                     onSaveGuide={handleSaveGuide}
                     onCreateStudentLink={({ id, bookLabel }) => setStudentLinkRequest({
                       source: { rootUrl: bookNavState.rootUrl, label: bookLabel },

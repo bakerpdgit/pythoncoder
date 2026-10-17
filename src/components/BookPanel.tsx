@@ -14,6 +14,8 @@ import TesterWorker from '../workers/tester.worker.ts?worker'
 import { normalizeTestInputs } from '../utils/testInputs'
 import { loadCoderTkFiles } from '../utils/tkinter'
 import { CHART_PREVIEW_TOKEN } from '../utils/chartCheck'
+import { exerciseKind } from '../utils/bookEditStore'
+import type { ExerciseKind } from '../utils/bookEditStore'
 
 interface Props {
   navState: BookNavState
@@ -29,11 +31,11 @@ interface Props {
   editMode?: boolean
   editManifest?: BookManifest | null
   transientTicks?: Set<string>
-  onAddExercise?: (afterId?: string) => void
+  onAddExercise?: (afterId?: string, kind?: ExerciseKind) => void
   onDeleteExercise?: (id: string) => void
   onMoveExercise?: (id: string, dir: -1 | 1) => void
   onRenameExercise?: (id: string, name: string) => void
-  onToggleExample?: (id: string) => void
+  onSetExerciseType?: (id: string, kind: ExerciseKind) => void
   onSaveGuide?: (guidePath: string, markdown: string) => void
   /** Open the student-link dialog for this book; `id: null` means the whole book. */
   onCreateStudentLink?: (target: { id: string | null; bookLabel: string }) => void
@@ -310,6 +312,31 @@ export async function findSiblingSection(
   return null
 }
 
+const KIND_LABELS: Record<ExerciseKind, { label: string; detail: string }> = {
+  example: { label: 'Example', detail: 'The student reads and runs it' },
+  task: { label: 'Task', detail: 'Marked by its tests' },
+  parsons: { label: 'Parsons puzzle', detail: 'The student puts lines of code in order' },
+}
+
+/** An exercise's kind as an icon: a page for examples and tasks, a puzzle piece for Parsons. */
+function KindIcon({ kind, className = 'w-4 h-4' }: { kind: ExerciseKind; className?: string }) {
+  const colour = kind === 'example' ? 'text-slate-400' : kind === 'parsons' ? 'text-sky-400' : 'text-emerald-400'
+  return (
+    <svg className={`${className} flex-shrink-0 ${colour}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+      {kind === 'parsons'
+        ? <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11 4a2 2 0 114 0v1a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-1a2 2 0 100 4h1a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-1a2 2 0 10-4 0v1a1 1 0 01-1 1H7a1 1 0 01-1-1v-3a1 1 0 00-1-1H4a2 2 0 110-4h1a1 1 0 001-1V7a1 1 0 011-1h3a1 1 0 001-1V4z" />
+        : <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />}
+    </svg>
+  )
+}
+
+function KindTag({ kind }: { kind: ExerciseKind }) {
+  if (kind === 'example') return null
+  return kind === 'parsons'
+    ? <span className="text-[9px] text-sky-400 flex-shrink-0 font-semibold">puzzle</span>
+    : <span className="text-[9px] text-emerald-500 flex-shrink-0 font-semibold">task</span>
+}
+
 function CompletedTick() {
   return (
     <svg className="w-3 h-3 text-emerald-400 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
@@ -338,7 +365,7 @@ function ProgressRing({ done, total }: { done: number; total: number }) {
 }
 
 export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClose, testResult, isTestRunning, testStatus, onClearTestResult, completedChallenges,
-  editMode = false, editManifest = null, transientTicks, onAddExercise, onDeleteExercise, onMoveExercise, onRenameExercise, onToggleExample, onSaveGuide, onCreateStudentLink, onResetBook }: Props) {
+  editMode = false, editManifest = null, transientTicks, onAddExercise, onDeleteExercise, onMoveExercise, onRenameExercise, onSetExerciseType, onSaveGuide, onCreateStudentLink, onResetBook }: Props) {
   const dialogs = useDialogs()
   const [manifest, setManifest] = useState<BookManifest | null>(null)
   const [renamingId, setRenamingId] = useState<string | null>(null)
@@ -357,6 +384,8 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
     next: ChallengeNavTarget | null
   } | null>(null)
   const [linkMenu, setLinkMenu] = useState<{ x: number; y: number; id: string | null } | null>(null)
+  // Edit mode: choosing an exercise's kind (`id`), or the kind of a new one (`id: null`).
+  const [kindMenu, setKindMenu] = useState<{ x: number; y: number; id: string | null; current: ExerciseKind | null } | null>(null)
   const [sectionSiblings, setSectionSiblings] = useState<{
     key: string
     previous: SectionNavTarget | null
@@ -390,6 +419,23 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
       document.removeEventListener('keydown', onKey)
     }
   }, [linkMenu])
+
+  useEffect(() => {
+    if (!kindMenu) return
+    const dismiss = () => setKindMenu(null)
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setKindMenu(null) }
+    document.addEventListener('mousedown', dismiss)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', dismiss)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [kindMenu])
+
+  const openKindMenu = (e: React.MouseEvent<HTMLElement>, id: string | null, current: ExerciseKind | null) => {
+    const r = e.currentTarget.getBoundingClientRect()
+    setKindMenu({ x: Math.min(r.left, window.innerWidth - 240), y: Math.min(r.bottom + 2, window.innerHeight - 140), id, current })
+  }
 
   useEffect(() => {
     try { localStorage.setItem('aqa_book_font_size', String(bookFontSize)) } catch { /* ignore */ }
@@ -1059,7 +1105,7 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
                     </button>
                   )
                 }
-                const isExample = child.isExample === 'True' || child.isExample === true
+                const kind = exerciseKind(child)
                 const done = editMode ? (transientTicks?.has(child.id) ?? false) : isCompleted(child.id)
 
                 if (editMode) {
@@ -1082,13 +1128,13 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
                         </svg>
                       </button>
-                      {/* Example / task toggle */}
-                      <button type="button" title={isExample ? 'Marked as example — click to make it a task' : 'Marked as task — click to make it an example'}
-                        onClick={() => onToggleExample?.(child.id)}
-                        className={`flex-shrink-0 p-0.5 ${isExample ? 'text-slate-400 hover:text-emerald-400' : 'text-emerald-400 hover:text-slate-400'}`}>
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                        </svg>
+                      {/* Example / task / Parsons puzzle */}
+                      <button type="button" title={`${KIND_LABELS[kind].label} — click to change what kind of exercise this is`}
+                        aria-label={`Exercise kind: ${KIND_LABELS[kind].label}`}
+                        onMouseDown={e => e.stopPropagation()}
+                        onClick={e => openKindMenu(e, child.id, kind)}
+                        className="flex-shrink-0 rounded p-0.5 hover:bg-slate-500/20">
+                        <KindIcon kind={kind} />
                       </button>
                       {isRenaming ? (
                         <input autoFocus value={renameDraft} onChange={e => setRenameDraft(e.target.value)}
@@ -1101,7 +1147,7 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
                           className="flex-1 min-w-0 text-left truncate text-xs text-slate-300 hover:text-slate-100">
                           {child.name}
                           {done && <span className="ml-1 text-emerald-400">✓</span>}
-                          {!isExample && <span className="ml-1 text-[9px] text-emerald-500 font-semibold">task</span>}
+                          {kind !== 'example' && <span className="ml-1"><KindTag kind={kind} /></span>}
                         </button>
                       )}
                       {/* Up / down / delete */}
@@ -1128,20 +1174,16 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
                     onClick={() => enterChallenge(child)}
                     onContextMenu={e => openLinkMenu(e, child.id)}
                     className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-slate-700 transition-colors text-slate-300 hover:text-slate-100">
-                    <svg className={`w-4 h-4 flex-shrink-0 ${isExample ? 'text-slate-400' : 'text-emerald-400'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                    </svg>
+                    <KindIcon kind={kind} />
                     <span className="flex-1 truncate text-xs">{child.name}</span>
                     {done && <CompletedTick />}
-                    {!isExample && !done && (
-                      <span className="text-[9px] text-emerald-500 flex-shrink-0 font-semibold">task</span>
-                    )}
+                    {!done && <KindTag kind={kind} />}
                   </button>
                 )
               })}
 
               {editMode && (
-                <button type="button" onClick={() => onAddExercise?.()}
+                <button type="button" onMouseDown={e => e.stopPropagation()} onClick={e => openKindMenu(e, null, null)}
                   className="mt-1 w-full flex items-center gap-2 px-3 py-2 text-left text-sky-400 hover:text-sky-300 hover:bg-slate-700/60 transition-colors border-t border-slate-700/60">
                   <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
@@ -1153,6 +1195,31 @@ export function BookPanel({ navState, onNavStateChange, onEnterChallenge, onClos
           )}
         </div>
       </div>
+
+      {kindMenu && (
+        <div className="fixed z-50 bg-slate-800 border border-slate-600 rounded shadow-2xl py-1 text-xs w-[230px]"
+          role="menu" aria-label={kindMenu.id ? 'Exercise kind' : 'Add exercise'}
+          style={{ left: kindMenu.x, top: kindMenu.y }}
+          onMouseDown={e => e.stopPropagation()}>
+          {kindMenu.id === null && <div className="px-3 py-1 text-[10px] uppercase tracking-wide text-slate-500">Add…</div>}
+          {(['example', 'task', 'parsons'] as const).map(k => (
+            <button key={k} type="button" role="menuitem"
+              onClick={() => {
+                const target = kindMenu.id
+                setKindMenu(null)
+                if (target === null) onAddExercise?.(undefined, k)
+                else if (k !== kindMenu.current) onSetExerciseType?.(target, k)
+              }}
+              className={`w-full flex items-start gap-2 px-3 py-1.5 text-left hover:bg-slate-700 ${k === kindMenu.current ? 'bg-slate-700/60' : ''}`}>
+              <KindIcon kind={k} className="w-4 h-4 mt-0.5" />
+              <span className="flex-1">
+                <span className="block text-slate-200">{KIND_LABELS[k].label}{k === kindMenu.current ? ' ✓' : ''}</span>
+                <span className="block text-[10px] text-slate-500">{KIND_LABELS[k].detail}</span>
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
 
       {linkMenu && (
         <div className="fixed z-50 bg-slate-800 border border-slate-600 rounded shadow-2xl py-1 text-xs min-w-[200px]"
