@@ -3,7 +3,7 @@ import { consoleCopy, editorModelState, watchForErrors } from './helpers'
 
 /**
  * Parsons puzzles: one view of the program, its movable lines arranged in
- * place, distractors struck out, indentation given or the student's — and the
+ * place, distractors hidden, indentation given or the student's — and the
  * teacher's side, marking lines Fixed / Movable / Distractor and previewing.
  *
  * The book is served by the test through `page.route`, as in book.spec.ts.
@@ -98,7 +98,7 @@ const editorText = (page: Page) => editorModelState(page).then(s => s.value).cat
 
 const submit = (page: Page) => page.getByRole('button', { name: 'Submit', exact: true }).click()
 
-test('a given-indentation puzzle with two blocks: arrange, strike out, Submit, Run', async ({ page }) => {
+test('a given-indentation puzzle with two blocks: arrange, hide, Submit, Run', async ({ page }) => {
   const problems = watchForErrors(page, { ignoreRequestsTo: EXPECTED_MISSES })
   await serveBook(page)
   await openPuzzle(page, 'blocks')
@@ -118,9 +118,22 @@ test('a given-indentation puzzle with two blocks: arrange, strike out, Submit, R
   await submit(page)
   await expect(page.locator('.parsons-view')).toContainText('too many code fragments')
 
+  // Hidden, a line leaves its block for the list below the program, unnumbered.
   await row(page, 'p5').focus()
   await page.keyboard.press('Delete')
-  await expect(row(page, 'p5')).toHaveAttribute('aria-label', /struck out/)
+  await expect(row(page, 'p5')).toHaveAttribute('aria-label', /^Hidden/)
+  await expect(page.getByRole('list', { name: 'Hidden lines' }).locator('[data-frag-id="p5"]')).toHaveCount(1)
+  expect(await blockOrder(page, 'b1')).toEqual(['p2', 'p3', 'p4'])
+  // It cannot be moved until it is shown again, and then it comes back at the
+  // end of its block.
+  await row(page, 'p2').focus()
+  await page.keyboard.press('Delete')
+  await expect(row(page, 'p2').getByRole('button', { name: 'Indent more' })).toHaveCount(0)
+  await page.keyboard.press('Alt+ArrowUp')
+  expect(await blockOrder(page, 'b1')).toEqual(['p3', 'p4'])
+  await row(page, 'p2').getByRole('button', { name: 'Show line' }).click()
+  expect(await blockOrder(page, 'b1')).toEqual(['p3', 'p4', 'p2'])
+  await arrange(page, 'b1', ['p2', 'p3', 'p4'])
   await submit(page)
   await expect(page.locator('.parsons-view')).toContainText('Correct — well done.')
   await expect.poll(() => page.evaluate(() => {
@@ -128,7 +141,7 @@ test('a given-indentation puzzle with two blocks: arrange, strike out, Submit, R
     return raw ? Object.keys(JSON.parse(raw) as Record<string, unknown>).some(k => k.endsWith('::blocks')) : false
   })).toBe(true)
 
-  // The program is the arrangement, struck-out line left out.
+  // The program is the arrangement, the hidden line left out.
   await expect.poll(() => editorText(page)).toBe(
     'def area(w, h):\n    a = w * h\n    return a\n\ndef main():\n    w = 3\n    h = 4\n    print("Area:", area(w, h))\n\nmain()\n')
   await page.keyboard.press('Control+F5')
@@ -136,12 +149,12 @@ test('a given-indentation puzzle with two blocks: arrange, strike out, Submit, R
 
   // A reload brings the same arrangement back.
   await openPuzzle(page, 'blocks')
-  expect(await blockOrder(page, 'b1')).toEqual(['p2', 'p3', 'p4', 'p5'])
-  await expect(row(page, 'p5')).toHaveAttribute('aria-label', /struck out/)
+  expect(await blockOrder(page, 'b1')).toEqual(['p2', 'p3', 'p4'])
+  await expect(row(page, 'p5')).toHaveAttribute('aria-label', /^Hidden/)
 
   // Shuffle starts again, never already solved.
   await page.getByRole('button', { name: 'Shuffle' }).click()
-  await expect(page.locator('.parsons-view [aria-label*="struck out"]')).toHaveCount(0)
+  await expect(page.locator('.parsons-view [aria-label^="Hidden"]')).toHaveCount(0)
   expect(problems).toEqual([])
 })
 
@@ -201,7 +214,7 @@ test('the debugger’s line is highlighted in the puzzle while tracing', async (
   expect(problems).toEqual([])
 })
 
-test('a two-panel arrangement saved before is kept, its bank struck out', async ({ page }) => {
+test('a two-panel arrangement saved before is kept, its bank hidden', async ({ page }) => {
   const problems = watchForErrors(page, { ignoreRequestsTo: EXPECTED_MISSES })
   await serveBook(page)
   await page.addInitScript(url => {
@@ -212,8 +225,8 @@ test('a two-panel arrangement saved before is kept, its bank struck out', async 
     }))
   }, BOOK_URL)
   await openPuzzle(page, 'indent')
-  expect(await blockOrder(page, 'b0')).toEqual(['p1', 'p0', 'p2'])
-  await expect(row(page, 'p2')).toHaveAttribute('aria-label', /struck out/)
+  expect(await blockOrder(page, 'b0')).toEqual(['p1', 'p0'])
+  await expect(row(page, 'p2')).toHaveAttribute('aria-label', /^Hidden/)
   expect(problems).toEqual([])
 })
 
