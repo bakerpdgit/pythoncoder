@@ -58,6 +58,8 @@ interface Props {
   /** A plain report of something done (a copy made), for the status line. */
   onNotice?: (msg: string) => void
   onBookOpen?: (url: string) => void
+  /** Open a learning book written in this browser (asks: edit, or as a student). */
+  onOpenAuthoredBook?: (fsId: string) => void
   onLocalFileImport?: (fileMap: Map<string, ArrayBuffer>, sourceName: string) => Promise<void>
   onFolderConnect?: (handle: FileSystemDirectoryHandle) => Promise<void>
   isLocalFolderConnected?: boolean
@@ -92,10 +94,14 @@ interface ImagePreview {
   url: string; name: string
 }
 
+/** Learning books written in this browser, oldest first. */
+const authoredBooksIn = (fsList: VFSFilesystem[]) =>
+  fsList.filter(f => f.authoredBook && f.name.startsWith(BOOK_SRC_PREFIX)).sort((x, y) => x.createdAt - y.createdAt)
+
 export function FileSystemPanel({
   activeFilesystemId, currentWorkingDir, openFilePath, hiddenPaths, isChallengeMode,
   isBookOpen, onCloseBook, onOpenResourceUrl,
-  onFilesystemChange, onFilesystemForcedChange, onFilesystemCreated, onCwdChange, onOpenFile, onError, onNotice, onBookOpen,
+  onFilesystemChange, onFilesystemForcedChange, onFilesystemCreated, onCwdChange, onOpenFile, onError, onNotice, onBookOpen, onOpenAuthoredBook,
   onBeforeNewFile, onOpenNewFile, onPreviewHtml, onShare, shareBook, onResetToSource, onLocalFileImport, onFolderConnect,
   isLocalFolderConnected, onLocalFolderSync, onReloadFolder, onDisconnectFolder, onCloseFolder,
   diskDeleteWarnDismissed, onDismissDiskDeleteWarn,
@@ -133,6 +139,7 @@ export function FileSystemPanel({
   const uploadInputRef = useRef<HTMLInputElement>(null)
   const zipInputRef = useRef<HTMLInputElement>(null)
   const fsMenuRef = useRef<HTMLDivElement>(null)
+  const [authoredBooks, setAuthoredBooks] = useState<VFSFilesystem[]>([])
   const rootRef = useRef<HTMLDivElement>(null)
   const newMenuRef = useRef<HTMLDivElement>(null)
   const contextMenuRef = useRef<HTMLDivElement>(null)
@@ -146,6 +153,7 @@ export function FileSystemPanel({
       const activeFsEntry = fsList.find(f => f.id === activeFilesystemId)
       setCurrentFsEntry(activeFsEntry ?? null)
       setFilesystems(fsList.filter(f => !f.name.startsWith(BOOK_FS_PREFIX) && !f.name.startsWith(BOOK_SRC_PREFIX)).sort((a, b) => a.createdAt - b.createdAt))
+      setAuthoredBooks(authoredBooksIn(fsList))
       const hidden = new Set(hiddenPaths ?? [])
       setEntries(children.filter(e => !hidden.has(e.path)).sort((a, b) => {
         if (a.type !== b.type) return a.type === 'folder' ? -1 : 1
@@ -452,13 +460,16 @@ export function FileSystemPanel({
   const handleDeleteFs = (fs: VFSFilesystem) => {
     if (fs.id === 'default') { onError('Cannot delete the default filesystem.'); return }
     setConfirmConfig({
-      message: `Delete filesystem "${fs.name}" and all its files?`,
+      message: fs.authoredBook
+        ? `Delete the learning book "${fs.authoredBook.title}"? It exists only in this browser, so it will be gone for good.`
+        : `Delete filesystem "${fs.name}" and all its files?`,
       onConfirm: async () => {
         try {
           await deleteFilesystem(fs.id)
           if (activeFilesystemId === fs.id) onFilesystemForcedChange('default')
           const fsList = await listFilesystems()
           setFilesystems(fsList.filter(f => !f.name.startsWith(BOOK_FS_PREFIX) && !f.name.startsWith(BOOK_SRC_PREFIX)).sort((a, b) => a.createdAt - b.createdAt))
+          setAuthoredBooks(authoredBooksIn(fsList))
         } catch (err) { onError(String(err)) }
         setConfirmConfig(null)
       },
@@ -584,6 +595,39 @@ export function FileSystemPanel({
                     )}
                   </div>
                 ))}
+                {authoredBooks.length > 0 && (
+                  <div className="border-t border-slate-700" role="group" aria-label="Learning books you are writing">
+                    <div className="px-2 pt-1.5 pb-0.5 text-[10px] uppercase tracking-wide text-slate-500">Learning books you are writing</div>
+                    {authoredBooks.map(fs => (
+                      <div key={fs.id} className="flex items-center justify-between px-2 py-1.5 hover:bg-slate-700 transition-colors">
+                        <button type="button" className="flex-1 min-w-0 flex items-center gap-1.5 text-left text-amber-300"
+                          title={`${fs.authoredBook!.title} — open it to edit, or to try as a student`}
+                          onClick={() => { setShowFsMenu(false); onOpenAuthoredBook?.(fs.id) }}>
+                          <svg className="w-3 h-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+                          </svg>
+                          <span className="truncate">{fs.authoredBook!.title}</span>
+                        </button>
+                        <div className="flex items-center ml-2 flex-shrink-0 gap-1">
+                          <button type="button" onClick={() => { void downloadEntryAsZip(fs.id, '/', fs.authoredBook!.title) }}
+                            title="Download the book as a ZIP"
+                            className="text-slate-500 hover:text-sky-400">
+                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                            </svg>
+                          </button>
+                          <button type="button" onClick={() => { handleDeleteFs(fs); setShowFsMenu(false) }}
+                            title="Delete this book"
+                            className="text-slate-500 hover:text-red-400">
+                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                            </svg>
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 <div className="border-t border-slate-700">
                   {showNewFsDialog ? (
                     <div className="px-2 py-2 flex gap-1">

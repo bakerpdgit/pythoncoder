@@ -89,6 +89,9 @@ Three layers, all of which should pass before a change is called done:
   Run; student indentation with ←/→; the arrangement surviving a reload, and a
   saved two-panel one migrating; the traced line highlighted; and a teacher
   adding a puzzle, marking a line Movable and previewing it.
+  `bookdrafts.spec.ts` covers a book built in the browser surviving Close
+  and a reload, reopening to edit or as a student, and a second book refused
+  its name.
   `indent.spec.ts` covers per-file indentation (a four-space exercise after a
   two-space one, Enter after a colon, re-indenting from the cog menu).
   `recovery.spec.ts` covers the unsaved-changes backup (offered after a reload,
@@ -923,6 +926,38 @@ https, isolated but no SharedArrayBuffer, a WebKit tab with no service worker
   (`foldersHoldingOnlyHidden` in `utils/bookLoader.ts`), otherwise a hidden
   `instance/database.db` leaves an empty `instance` folder on show. A folder
   with anything visible beneath it stays.
+
+### Books written in this browser are kept
+
+- A book being edited lives in a `__booksrc__:<name>` filesystem
+  (`utils/bookEditStore.ts`), hidden from the filesystem list. Closing a book
+  only ended the session, and nothing listed those filesystems, so a book built
+  in the browser looked lost the moment it was closed or the page reloaded (the
+  stored book position is never restored at start-up). Worse, creating another
+  book of the same name — or a student opening a book ZIP of that name, which
+  `importLocalFiles` stages in the same namespace — deleted it.
+- **New learning book** asks for a name (refusing one a browser book already
+  has, case-insensitively), then where to build it:
+  - **in a local folder** (recommended, and offered only where
+    `showDirectoryPicker` exists). It must be an **empty** folder: a folder
+    holding a book is edited with *Edit a local folder learning book*, not
+    created over. Every change is mirrored to disk, as before.
+  - **in this browser**. The filesystem record gets `authoredBook: { title }`
+    (`claimBookSourceFs(name, true)`), as does a book opened for editing from a
+    ZIP, since its edits exist nowhere else until exported. Folder-connected
+    books are not marked: the folder is the book.
+- A marked book is **never deleted to make room**: `bookSourceFsName` (tested)
+  numbers a clashing name instead, for new books, ZIP edits and a student's
+  ZIP staging alike. Unmarked `__booksrc__:` filesystems (a book opened from a
+  ZIP or folder) may still be replaced, as they always were.
+- Marked books are listed in the File System panel's filesystem menu under
+  *Learning books you are writing* (with ZIP download and delete), and Teacher
+  Tools offers *Continue a book in this browser* while any exist. Choosing one
+  from the menu asks **Edit the book** or **Open as a student**
+  (`handleOpenAuthoredBook`): the first is `openBookSession` +
+  `enterBookEditSession`, the second opens `vfs://fs:<id>/book.json` like any
+  book. Filesystems made before the marker existed are not listed: an edit
+  draft and a student's staged ZIP cannot be told apart.
 
 ### Parsons puzzles
 

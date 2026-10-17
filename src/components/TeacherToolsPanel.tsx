@@ -4,6 +4,9 @@ interface Props {
   folderConnected: boolean
   isVerifying?: boolean
   onNewBook: () => void
+  /** How many books are being written in this browser (kept after closing). */
+  browserBookCount?: number
+  onContinueBrowserBook?: () => void
   onOpenZip: () => void
   onConnectFolder: () => void
   onExportZip: () => void
@@ -37,7 +40,7 @@ function BigButton({ title, desc, onClick, icon }: { title: string; desc: string
 // teacher creates/opens/exports a book and reaches the advanced JSON editor.
 export function TeacherToolsPanel({
   isEditing, bookName, folderConnected, isVerifying,
-  onNewBook, onOpenZip, onConnectFolder, onExportZip, onReloadFolder,
+  onNewBook, browserBookCount = 0, onContinueBrowserBook, onOpenZip, onConnectFolder, onExportZip, onReloadFolder,
   onCloseBook, onOpenJsonEditor, onVerifyAll, onCreateStudentLink, onShareBook,
 }: Props) {
   return (
@@ -56,9 +59,15 @@ export function TeacherToolsPanel({
             <p className="text-slate-500 text-[11px] leading-relaxed mb-1">
               Author a learning book: exercises, tests, guides and files. Nothing here is visible to students.
             </p>
-            <BigButton title="New learning book" desc="Start a fresh book with one example exercise."
+            <BigButton title="New learning book" desc="Start a fresh book, in a local folder or in this browser."
               onClick={onNewBook}
               icon={<path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />} />
+            {browserBookCount > 0 && onContinueBrowserBook && (
+              <BigButton title="Continue a book in this browser"
+                desc={browserBookCount === 1 ? 'Carry on editing the book you are writing here.' : `Carry on editing one of the ${browserBookCount} books you are writing here.`}
+                onClick={onContinueBrowserBook}
+                icon={<path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />} />
+            )}
             <BigButton title="Edit a ZIP Learning Book" desc="Edit an existing learning book from a .zip on your computer."
               onClick={onOpenZip}
               icon={<path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8l1 12a2 2 0 002 2h8a2 2 0 002-2l1-12M10 12h4" />} />
@@ -78,7 +87,7 @@ export function TeacherToolsPanel({
               <div className="text-slate-400 text-[10px] mt-1 leading-snug">
                 {folderConnected
                   ? 'Connected to a local folder — changes save to disk.'
-                  : 'Changes are held in the browser. Export a ZIP to keep them.'}
+                  : 'Saved in this browser: once closed, reopen it from the File System list. Export a ZIP to keep a copy.'}
               </div>
             </div>
 

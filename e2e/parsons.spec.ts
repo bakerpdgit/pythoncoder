@@ -194,6 +194,14 @@ test('a line is dragged by its handle, within its block', async ({ page }) => {
   await page.mouse.move(from.x + 40, to.y + 2, { steps: 8 })
   await page.mouse.up()
   expect(await blockOrder(page, 'b1')).toEqual(['p4', 'p2', 'p3', 'p5'])
+  // Dragging by the code itself must not leave the lines it crossed selected.
+  const code = await row(page, 'p3').boundingBox()
+  if (!code) throw new Error('row not laid out')
+  await page.mouse.move(code.x + 200, code.y + code.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(code.x + 200, code.y - code.height * 2, { steps: 8 })
+  await page.mouse.up()
+  expect(await page.evaluate(() => window.getSelection()?.toString() ?? '')).toBe('')
   expect(problems).toEqual([])
 })
 
@@ -238,7 +246,9 @@ async function newBook(page: Page, name: string) {
   await page.getByRole('button', { name: /New learning book/ }).click()
   const prompt = page.getByRole('dialog', { name: 'New learning book' })
   await prompt.getByRole('textbox').fill(name)
-  await prompt.getByRole('button', { name: 'Create' }).click()
+  await prompt.getByRole('button', { name: 'Next' }).click()
+  await page.getByRole('dialog', { name: `Where should "${name}" be built?` })
+    .getByRole('button', { name: 'Build in this browser' }).click()
   await expect(page.getByText(name).first()).toBeVisible()
 }
 

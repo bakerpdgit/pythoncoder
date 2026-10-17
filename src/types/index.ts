@@ -111,6 +111,12 @@ export interface VFSFilesystem {
   source?: FilesystemSource
   /** A filesystem that lasts only as long as the tab that made it. */
   temporary?: { session: string }
+  /**
+   * A learning book being written in this browser (`__booksrc__:` filesystems
+   * only). Its files exist nowhere else, so it is listed for reopening — to
+   * edit or to try as a student — and never deleted to make room for another.
+   */
+  authoredBook?: { title: string }
 }
 
 export interface FilesystemSource {
