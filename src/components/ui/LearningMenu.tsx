@@ -9,9 +9,11 @@ interface Props {
   isOpen: boolean
   onToggleOpen: () => void
   onOpenTutorial: (tutorial: LearningTutorial) => void
+  /** Teachers: start a new learning book (Teacher Tools' New learning book). */
+  onMakeBook?: () => void
 }
 
-export function LearningMenu({ menuRef, isOpen, onToggleOpen, onOpenTutorial }: Props) {
+export function LearningMenu({ menuRef, isOpen, onToggleOpen, onOpenTutorial, onMakeBook }: Props) {
   const [tutorials, setTutorials] = useState<LearningTutorial[]>([])
   const [loadError, setLoadError] = useState('')
   const { panelRef, panelStyle, panelClass } = useMenuMaxHeight(isOpen)
@@ -78,6 +80,27 @@ export function LearningMenu({ menuRef, isOpen, onToggleOpen, onOpenTutorial }: 
                 </button>
               ))}
             </div>
+          )}
+          {onMakeBook && (
+            <>
+              <div className="mx-2 my-2 border-t border-slate-700" />
+              <button
+                type="button"
+                onClick={onMakeBook}
+                className="group flex w-full items-start gap-3 rounded-md px-2 py-2 text-left transition-colors hover:bg-slate-900/70"
+                title="Write your own learning book in Teacher Tools"
+              >
+                <span className="mt-0.5 flex h-6 w-6 flex-shrink-0 items-center justify-center rounded bg-sky-500/10 text-sky-300">
+                  <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
+                  </svg>
+                </span>
+                <span className="min-w-0">
+                  <span className="block text-sm font-medium text-slate-200 group-hover:text-sky-300">Make a learning book…</span>
+                  <span className="block text-[11px] leading-snug text-slate-500">For teachers: exercises, tests and guides of your own.</span>
+                </span>
+              </button>
+            </>
           )}
         </div>
       )}

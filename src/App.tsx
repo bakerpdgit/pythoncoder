@@ -3559,6 +3559,31 @@ export default function App() {
     }
   }
 
+  // The Learning menu's "Make a learning book…": the same New learning book as
+  // Teacher Tools, with that panel brought on screen to carry on from. A run is
+  // stopped first (the run layout hides the sidebar, and a running program
+  // refuses the switch), and a book already being edited is closed — it stays
+  // saved where it is — because Teacher Tools offers New only when none is.
+  const handleMakeBookFromMenu = async () => {
+    setIsLearningMenuOpen(false)
+    if (!(await stopRunBeforeNavigating())) return
+    leaveTransientLayouts()
+    revealTeacherToolsPanel()
+    if (bookEditSession) {
+      const ok = await dialogs.confirm({
+        title: 'Start a new learning book?',
+        message: `You are editing "${bookName ?? 'a book'}". It will be closed first.`,
+        detail: bookEditSession.folderHandle
+          ? 'Its changes are already saved in its local folder.'
+          : 'It stays saved in this browser: reopen it from the File System list.',
+        confirmLabel: 'Close it and continue',
+      })
+      if (!ok) return
+      await handleCloseBook()
+    }
+    await handleNewBook()
+  }
+
   // A book written in this browser, chosen from the File System list or Teacher
   // Tools: edit it, or open it as a student would see it.
   const handleOpenAuthoredBook = async (fsId: string, mode?: 'edit' | 'learn') => {
@@ -6016,7 +6041,8 @@ ${runProgramPython('exec(code_obj, globals())')}
         <div className="flex items-center gap-3">
           <LearningMenu menuRef={learningMenuRef} isOpen={isLearningMenuOpen}
             onToggleOpen={() => { setIsPanelMenuOpen(false); setIsQuickSettingsOpen(false); setIsLearningMenuOpen(o => !o) }}
-            onOpenTutorial={handleLearningTutorialOpen} />
+            onOpenTutorial={handleLearningTutorialOpen}
+            onMakeBook={() => void handleMakeBookFromMenu()} />
           <PanelVisibilityMenu menuRef={panelMenuRef} isOpen={isPanelMenuOpen}
             onToggleOpen={() => { setIsLearningMenuOpen(false); setIsQuickSettingsOpen(false); setIsPanelMenuOpen(o => !o) }}
             panelOptions={PANEL_OPTIONS} visiblePanels={visiblePanels} onTogglePanel={togglePanelVisibility}
