@@ -411,7 +411,9 @@ async function newBook(page: Page, name: string) {
   await page.getByRole('button', { name: /New learning book/ }).click()
   const prompt = page.getByRole('dialog', { name: 'New learning book' })
   await prompt.getByRole('textbox').fill(name)
-  await prompt.getByRole('button', { name: 'Create' }).click()
+  await prompt.getByRole('button', { name: 'Next' }).click()
+  await page.getByRole('dialog', { name: `Where should "${name}" be built?` })
+    .getByRole('button', { name: 'Build in this browser' }).click()
   await expect(page.getByText(name).first()).toBeVisible()
 }
 

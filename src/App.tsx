@@ -348,6 +348,9 @@ export default function App() {
   const [transientTicks, setTransientTicks] = useState<Set<string>>(new Set())
   const [editorTab, setEditorTab] = useState<'starter' | 'solution'>('starter')  // code editor tab in edit mode
   const [showBookJsonEditor, setShowBookJsonEditor] = useState(false)
+  // Books written in this browser, for Teacher Tools' "Continue" (bumped when one is made or closed).
+  const [authoredBooks, setAuthoredBooks] = useState<Array<{ id: string; title: string }>>([])
+  const [authoredBooksTick, setAuthoredBooksTick] = useState(0)
   const [studentLinkRequest, setStudentLinkRequest] = useState<
     { source: StudentLinkSource | null; targetId: string | null; pending?: PendingBookResource } | null>(null)
   const [shareSource, setShareSource] = useState<ShareSource | null>(null)
@@ -894,6 +897,12 @@ export default function App() {
   }, [isParsonsAuthoring, isBookEditMode, parsonsPreview, parsonsProblem, codeText, parsonsIndentSetting])
 
   // ── Effects ──────────────────────────────────────────────────────────────
+
+  useEffect(() => {
+    let cancelled = false
+    void bookEdit.listAuthoredBooks().then(books => { if (!cancelled) setAuthoredBooks(books) }).catch(() => {})
+    return () => { cancelled = true }
+  }, [authoredBooksTick, vfsReloadTrigger, bookEditSession])
 
   // A Parsons answer being authored shows each line's role in the editor: a
   // mark beside the line number (not the glyph margin, which is breakpoints'),
@@ -3443,10 +3452,15 @@ export default function App() {
     setActiveFilesystemId('default')
     setCurrentWorkingDir('/')
     // Tear down any teacher edit session.
+    const closedSession = bookEditSession
     bookEdit.closeBookSession()
     setBookEditSession(null)
     setEditManifest(null)
     setTransientTicks(new Set())
+    if (closedSession && !closedSession.folderHandle) {
+      setCodeStatus('The book is still saved in this browser: reopen it from the File System list.')
+    }
+    setAuthoredBooksTick(t => t + 1)
   }
 
   // ── Teacher Tools: book authoring lifecycle ───────────────────────────────
@@ -3493,16 +3507,95 @@ export default function App() {
     catch (e) { setCodeStatus(`Could not save book: ${e instanceof Error ? e.message : String(e)}`) }
   }
 
+  // A new book is built either in an empty local folder — every change saved to
+  // disk, so the book is ordinary files that outlive this browser — or in the
+  // browser, where it is kept (authoredBook) and listed to reopen once closed.
   const handleNewBook = async () => {
-    const name = await dialogs.prompt({
+    const taken = new Set((await bookEdit.listAuthoredBooks()).map(b => b.title.toLowerCase()))
+    const name = (await dialogs.prompt({
       title: 'New learning book', message: 'What should the book be called?',
-      placeholder: 'My Python Book', confirmLabel: 'Create',
+      placeholder: 'My Python Book', confirmLabel: 'Next',
+      validate: value => taken.has(value.trim().toLowerCase())
+        ? 'You already have a book with this name in this browser. Choose another name, or reopen that one from the File System list.'
+        : null,
+    }))?.trim()
+    if (!name) return
+    const picker = (window as unknown as { showDirectoryPicker?: (o?: { mode?: string }) => Promise<FileSystemDirectoryHandle> }).showDirectoryPicker
+    const where = await dialogs.choose({
+      title: `Where should "${name}" be built?`,
+      message: picker
+        ? 'In a local folder, every change is saved straight to the folder on your computer: the book is ordinary files you can back up, put on GitHub or share, and you reopen it with "Edit a local folder learning book".'
+        : 'This browser cannot save into a folder on your computer, so the book will be built in the browser.',
+      detail: 'In the browser, the book stays in this browser only. Once closed it is listed in the File System panel, where you can reopen it to edit or to try as a student. Clearing the browser\'s data loses it, so export a ZIP to keep a copy.',
+      buttons: [
+        ...(picker ? [{ label: 'Build in a local folder (recommended)', value: 'folder', tone: 'primary' as const }] : []),
+        { label: 'Build in this browser', value: 'browser', tone: picker ? 'neutral' as const : 'primary' as const },
+        { label: 'Cancel', value: 'cancel', tone: 'neutral' as const },
+      ],
     })
-    if (!name?.trim()) return
+    if (where !== 'folder' && where !== 'browser') return
     try {
-      const sess = await bookEdit.createNewBook(name.trim())
-      await enterBookEditSession(sess)
-    } catch (e) { setCodeStatus(`Could not create book: ${e instanceof Error ? e.message : String(e)}`) }
+      if (where === 'browser') {
+        await enterBookEditSession(await bookEdit.createNewBook(name))
+        setCodeStatus(`"${name}" is saved in this browser. Once closed, reopen it from the File System list.`)
+        return
+      }
+      const handle = await picker!({ mode: 'readwrite' })
+      if ((await handle.requestPermission({ mode: 'readwrite' })) !== 'granted') { setCodeStatus('Folder permission denied.'); return }
+      // A new book needs an empty folder: building one over other files would
+      // mix the two, and a folder holding a book is edited, not created.
+      if ((await readDirectoryToMap(handle)).size > 0) {
+        await dialogs.alert({
+          title: 'That folder is not empty',
+          message: `"${handle.name}" already has files in it. Choose an empty folder for a new book — or, to work on a book already in a folder, use "Edit a local folder learning book".`,
+        })
+        return
+      }
+      await enterBookEditSession(await bookEdit.createNewBook(name, handle))
+      setCodeStatus(`Building "${name}" in the local folder "${handle.name}" — changes save to disk.`)
+    } catch (e) {
+      if (e instanceof DOMException && e.name === 'AbortError') return
+      setCodeStatus(`Could not create book: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
+  // A book written in this browser, chosen from the File System list or Teacher
+  // Tools: edit it, or open it as a student would see it.
+  const handleOpenAuthoredBook = async (fsId: string, mode?: 'edit' | 'learn') => {
+    if (!canSwitchCodeSource()) return
+    const book = (await bookEdit.listAuthoredBooks()).find(b => b.id === fsId)
+    if (!book) { setCodeStatus('That book is no longer in this browser.'); return }
+    const choice = mode ?? await dialogs.choose({
+      title: `Open "${book.title}"`,
+      message: 'This is a learning book you are writing in this browser.',
+      detail: 'Edit it to carry on writing, or open it as a student would see it: exercises to work through, tests to pass.',
+      buttons: [
+        { label: 'Edit the book', value: 'edit', tone: 'primary' },
+        { label: 'Open as a student', value: 'learn', tone: 'neutral' },
+        { label: 'Cancel', value: 'cancel', tone: 'neutral' },
+      ],
+    })
+    if (choice === 'edit') {
+      if (bookNavState) await handleCloseBook()
+      await enterBookEditSession(bookEdit.openBookSession(fsId, null))
+      setCodeStatus(`Editing "${book.title}", saved in this browser.`)
+    } else if (choice === 'learn') {
+      await handleBookOpen(`vfs://fs:${fsId}/book.json`)
+    }
+  }
+
+  const handleContinueAuthoredBook = async () => {
+    const books = await bookEdit.listAuthoredBooks()
+    if (books.length === 0) return
+    const choice = await dialogs.choose({
+      title: 'Continue a book in this browser',
+      message: 'Which book would you like to carry on editing?',
+      buttons: [
+        ...books.map(b => ({ label: b.title, value: b.id, tone: 'neutral' as const })),
+        { label: 'Cancel', value: 'cancel', tone: 'neutral' as const },
+      ],
+    })
+    if (choice && choice !== 'cancel') await handleOpenAuthoredBook(choice, 'edit')
   }
 
   const handleOpenBookZip = () => { teacherZipInputRef.current?.click() }
@@ -4493,11 +4586,8 @@ export default function App() {
     hideTeacherToolsPanel()
     const bookJsonBuf = fileMap.get('book.json')
     if (bookJsonBuf) {
-      const stagingName = BOOK_SRC_PREFIX + sourceName
-      const fsList = await listFilesystems()
-      const existing = fsList.find(f => f.name === stagingName)
-      if (existing) await deleteFilesystem(existing.id)
-      const { id: stagingFsId } = await createFilesystem(stagingName)
+      // Never displaces a book being written in this browser under the same name.
+      const stagingFsId = await bookEdit.claimBookSourceFs(sourceName, false)
       await importFileMapToFs(stagingFsId, fileMap, true)
       await handleBookOpen(`vfs://fs:${stagingFsId}/book.json`)
       return null
@@ -6415,6 +6505,7 @@ ${runProgramPython('exec(code_obj, globals())')}
                       {!fsCollapsed && (
                         <div className="overflow-hidden min-h-0 flex-1">
                           <FileSystemPanel
+                            onOpenAuthoredBook={fsId => void handleOpenAuthoredBook(fsId)}
                             activeFilesystemId={activeFilesystemId}
                             currentWorkingDir={currentWorkingDir}
                             openFilePath={openFilePath}
@@ -7244,6 +7335,8 @@ ${runProgramPython('exec(code_obj, globals())')}
                   folderConnected={!!bookEditSession?.folderHandle}
                   isVerifying={isVerifyingSolutions}
                   onNewBook={() => void handleNewBook()}
+                  browserBookCount={authoredBooks.length}
+                  onContinueBrowserBook={() => void handleContinueAuthoredBook()}
                   onOpenZip={handleOpenBookZip}
                   onConnectFolder={() => void handleConnectBookFolder()}
                   onExportZip={() => void handleExportBookZip()}

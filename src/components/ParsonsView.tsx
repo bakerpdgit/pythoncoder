@@ -294,6 +294,12 @@ export function ParsonsView({
     // A hidden line has to be shown again before it can be moved.
     if (disabled || row.removed || e.button !== 0) return
     if ((e.target as HTMLElement).closest('button')) return
+    // A press on the code itself would otherwise start a text selection, which
+    // the drag then stretched over every line it crossed. Cancelling the press
+    // also cancels its focus, so the row is focused by hand.
+    e.preventDefault()
+    e.currentTarget.focus()
+    window.getSelection()?.removeAllRanges()
     const rect = e.currentTarget.getBoundingClientRect()
     setDrag({
       id: row.key,

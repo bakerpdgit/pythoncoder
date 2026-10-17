@@ -121,7 +121,7 @@ export function renameFilesystem(id: string, newName: string): Promise<void> {
  * temporary. A field given as `undefined` is removed.
  */
 export function updateFilesystemMeta(
-  id: string, patch: Partial<Pick<VFSFilesystem, 'name' | 'source' | 'temporary'>>,
+  id: string, patch: Partial<Pick<VFSFilesystem, 'name' | 'source' | 'temporary' | 'authoredBook'>>,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     openVFSDb().then(db => {

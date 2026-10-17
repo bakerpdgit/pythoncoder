@@ -11,10 +11,10 @@
 // EditableBookStore). When a local folder is connected, every write/delete/rename
 // is mirrored to disk for a true two-way connection.
 
-import type { BookManifest, BookChallenge, BookAdditionalFile } from '../types'
+import type { BookManifest, BookChallenge, BookAdditionalFile, VFSFilesystem } from '../types'
 import {
   createFilesystem, deleteFilesystem, listFilesystems, importFileMapToFs,
-  getEntryByPath, writeFile, deleteEntry, renameEntry, guessMimeType,
+  getEntryByPath, writeFile, deleteEntry, renameEntry, guessMimeType, updateFilesystemMeta,
 } from './virtualFS'
 import { BOOK_SRC_PREFIX, BOOK_FS_PREFIX, isBookRef } from './bookLoader'
 import { writeFileToFolderHandle, deleteFromFolderHandle, readDirectoryToMap } from './localFolderIo'
@@ -62,12 +62,40 @@ export function closeBookSession(): void {
   session = null
 }
 
-async function freshBookFs(name: string): Promise<string> {
-  const fsName = BOOK_SRC_PREFIX + name
-  const existing = (await listFilesystems()).find(f => f.name === fsName)
+/**
+ * The filesystem name a book source called `name` should take. One already
+ * holding a book written in this browser is never reused (that would delete
+ * the only copy of someone's book); the name gets a number instead. Anything
+ * else of that name — a book opened from a ZIP or a folder before, whose real
+ * copy is elsewhere — is fine to replace.
+ */
+export function bookSourceFsName(name: string, existing: Array<Pick<VFSFilesystem, 'name' | 'authoredBook'>>): string {
+  const taken = new Set(existing.filter(f => f.authoredBook).map(f => f.name))
+  let fsName = BOOK_SRC_PREFIX + name
+  for (let n = 2; taken.has(fsName); n++) fsName = `${BOOK_SRC_PREFIX}${name} (${n})`
+  return fsName
+}
+
+/**
+ * A fresh, empty book-source filesystem for `name`. `authored` marks it as a
+ * book written in this browser: kept after it is closed, and listed to reopen.
+ */
+export async function claimBookSourceFs(name: string, authored: boolean): Promise<string> {
+  const all = await listFilesystems()
+  const fsName = bookSourceFsName(name, all)
+  const existing = all.find(f => f.name === fsName)
   if (existing) await deleteFilesystem(existing.id)
   const { id } = await createFilesystem(fsName)
+  if (authored) await updateFilesystemMeta(id, { authoredBook: { title: fsName.slice(BOOK_SRC_PREFIX.length) } })
   return id
+}
+
+/** Books written in this browser, oldest first. */
+export async function listAuthoredBooks(): Promise<Array<{ id: string; title: string }>> {
+  return (await listFilesystems())
+    .filter(f => f.authoredBook && f.name.startsWith(BOOK_SRC_PREFIX))
+    .sort((a, b) => a.createdAt - b.createdAt)
+    .map(f => ({ id: f.id, title: f.authoredBook!.title }))
 }
 
 /** Find the book.json entry in an imported file map and return its base directory. */
@@ -103,7 +131,8 @@ export async function createBookFromFileMap(
     if (rel) rebased.set(rel, content)
   }
 
-  const srcFsId = await freshBookFs(name)
+  // Without a folder, the browser holds the only copy of the edits.
+  const srcFsId = await claimBookSourceFs(name, folderHandle === null)
   await importFileMapToFs(srcFsId, rebased, true)
   session = { srcFsId, rootUrl: bookRootUrl(srcFsId), folderHandle }
   return session
@@ -120,7 +149,7 @@ export async function createNewBook(
   bookName: string,
   folderHandle: FileSystemDirectoryHandle | null = null,
 ): Promise<BookEditSession> {
-  const srcFsId = await freshBookFs(bookName)
+  const srcFsId = await claimBookSourceFs(bookName, folderHandle === null)
   // Set the session first so writeBookFile/writeManifest mirror to the folder.
   session = { srcFsId, rootUrl: bookRootUrl(srcFsId), folderHandle }
   const manifest: BookManifest = {
